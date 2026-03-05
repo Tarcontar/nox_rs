@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="NoxWindow" parent="GtkApplicationWindow">
+    <property name="title">Nox Video Editor</property>
+    <property name="default-width">1400</property>
+    <property name="default-height">900</property>
+
+    <child type="titlebar">
+      <object class="GtkHeaderBar" id="header_bar">
+        <child type="start">
+          <object class="GtkButton" id="import_button">
+            <property name="icon-name">document-open-symbolic</property>
+            <property name="tooltip-text">Import Media</property>
+          </object>
+        </child>
+        <child type="start">
+          <object class="GtkButton" id="export_button">
+            <property name="icon-name">document-save-symbolic</property>
+            <property name="tooltip-text">Export Project</property>
+          </object>
+        </child>
+        <child type="end">
+          <object class="GtkMenuButton" id="menu_button">
+            <property name="icon-name">open-menu-symbolic</property>
+            <property name="tooltip-text">Main Menu</property>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkBox" id="main_box">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+
+        <!-- Upper area: media library + preview -->
+        <child>
+          <object class="GtkPaned" id="upper_paned">
+            <property name="orientation">horizontal</property>
+            <property name="position">320</property>
+            <property name="vexpand">true</property>
+            <property name="shrink-start-child">false</property>
+            <property name="shrink-end-child">false</property>
+
+            <property name="start-child">
+              <object class="NoxMediaLibrary" id="media_library"/>
+            </property>
+
+            <property name="end-child">
+              <object class="NoxPreview" id="preview"/>
+            </property>
+          </object>
+        </child>
+
+        <!-- Separator -->
+        <child>
+          <object class="GtkSeparator">
+            <property name="orientation">horizontal</property>
+          </object>
+        </child>
+
+        <!-- Lower area: timeline -->
+        <child>
+          <object class="NoxTimeline" id="timeline">
+            <property name="vexpand">false</property>
+            <property name="height-request">250</property>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

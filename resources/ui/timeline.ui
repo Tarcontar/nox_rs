@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="NoxTimeline" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="spacing">0</property>
+
+    <!-- Timeline toolbar -->
+    <child>
+      <object class="GtkBox" id="timeline_toolbar">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">4</property>
+        <property name="margin-start">8</property>
+        <property name="margin-end">8</property>
+        <property name="margin-top">4</property>
+        <property name="margin-bottom">4</property>
+
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Timeline</property>
+            <style>
+              <class name="heading"/>
+            </style>
+          </object>
+        </child>
+
+        <child>
+          <object class="GtkSeparator">
+            <property name="orientation">vertical</property>
+            <property name="margin-start">8</property>
+            <property name="margin-end">8</property>
+          </object>
+        </child>
+
+        <!-- Snap toggle -->
+        <child>
+          <object class="GtkToggleButton" id="snap_button">
+            <property name="icon-name">snap-orthogonal-symbolic</property>
+            <property name="tooltip-text">Snap to edges</property>
+            <property name="active">true</property>
+            <style>
+              <class name="flat"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Split/Cut button -->
+        <child>
+          <object class="GtkButton" id="split_button">
+            <property name="icon-name">edit-cut-symbolic</property>
+            <property name="tooltip-text">Split clip at playhead</property>
+            <style>
+              <class name="flat"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Delete button -->
+        <child>
+          <object class="GtkButton" id="delete_button">
+            <property name="icon-name">edit-delete-symbolic</property>
+            <property name="tooltip-text">Delete selected clip</property>
+            <style>
+              <class name="flat"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Spacer -->
+        <child>
+          <object class="GtkBox">
+            <property name="hexpand">true</property>
+          </object>
+        </child>
+
+        <!-- Zoom controls -->
+        <child>
+          <object class="GtkButton" id="zoom_out_button">
+            <property name="icon-name">zoom-out-symbolic</property>
+            <property name="tooltip-text">Zoom Out</property>
+            <style>
+              <class name="flat"/>
+            </style>
+          </object>
+        </child>
+
+        <child>
+          <object class="GtkScale" id="zoom_scale">
+            <property name="orientation">horizontal</property>
+            <property name="width-request">120</property>
+            <property name="draw-value">false</property>
+            <property name="adjustment">
+              <object class="GtkAdjustment" id="zoom_adjustment">
+                <property name="lower">10</property>
+                <property name="upper">500</property>
+                <property name="value">100</property>
+                <property name="step-increment">10</property>
+                <property name="page-increment">50</property>
+              </object>
+            </property>
+          </object>
+        </child>
+
+        <child>
+          <object class="GtkButton" id="zoom_in_button">
+            <property name="icon-name">zoom-in-symbolic</property>
+            <property name="tooltip-text">Zoom In</property>
+            <style>
+              <class name="flat"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Timeline track headers + canvas -->
+    <child>
+      <object class="GtkBox">
+        <property name="orientation">horizontal</property>
+        <property name="vexpand">true</property>
+
+        <!-- Track headers -->
+        <child>
+          <object class="GtkBox" id="track_headers">
+            <property name="orientation">vertical</property>
+            <property name="width-request">120</property>
+            <property name="spacing">1</property>
+            <style>
+              <class name="track-headers"/>
+            </style>
+          </object>
+        </child>
+
+        <child>
+          <object class="GtkSeparator">
+            <property name="orientation">vertical</property>
+          </object>
+        </child>
+
+        <!-- Scrollable timeline canvas -->
+        <child>
+          <object class="GtkScrolledWindow" id="timeline_scroll">
+            <property name="hscrollbar-policy">automatic</property>
+            <property name="vscrollbar-policy">automatic</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+
+            <child>
+              <object class="NoxTimelineCanvas" id="timeline_canvas">
+                <property name="hexpand">true</property>
+                <property name="vexpand">true</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

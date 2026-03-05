@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="NoxPreview" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="spacing">0</property>
+
+    <!-- Video display area -->
+    <child>
+      <object class="GtkOverlay" id="video_overlay">
+        <property name="vexpand">true</property>
+        <property name="hexpand">true</property>
+
+        <child>
+          <object class="GtkPicture" id="video_picture">
+            <property name="can-shrink">true</property>
+            <property name="content-fit">contain</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <style>
+              <class name="video-preview"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Timecode overlay -->
+        <child type="overlay">
+          <object class="GtkLabel" id="timecode_label">
+            <property name="label">00:00:00.000</property>
+            <property name="halign">end</property>
+            <property name="valign">start</property>
+            <property name="margin-top">8</property>
+            <property name="margin-end">8</property>
+            <style>
+              <class name="timecode-overlay"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Transport controls -->
+    <child>
+      <object class="GtkBox" id="transport_bar">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+        <property name="margin-start">8</property>
+        <property name="margin-end">8</property>
+        <property name="margin-top">4</property>
+        <property name="margin-bottom">8</property>
+
+        <!-- Scrub bar -->
+        <child>
+          <object class="GtkScale" id="scrub_bar">
+            <property name="orientation">horizontal</property>
+            <property name="draw-value">false</property>
+            <property name="hexpand">true</property>
+            <property name="adjustment">
+              <object class="GtkAdjustment" id="scrub_adjustment">
+                <property name="lower">0</property>
+                <property name="upper">100</property>
+                <property name="step-increment">1</property>
+                <property name="page-increment">10</property>
+              </object>
+            </property>
+          </object>
+        </child>
+
+        <!-- Buttons and time display -->
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">4</property>
+            <property name="halign">center</property>
+
+            <child>
+              <object class="GtkButton" id="skip_back_button">
+                <property name="icon-name">media-skip-backward-symbolic</property>
+                <property name="tooltip-text">Skip to Start</property>
+                <style>
+                  <class name="flat"/>
+                </style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkButton" id="step_back_button">
+                <property name="icon-name">media-seek-backward-symbolic</property>
+                <property name="tooltip-text">Step Back</property>
+                <style>
+                  <class name="flat"/>
+                </style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkButton" id="play_button">
+                <property name="icon-name">media-playback-start-symbolic</property>
+                <property name="tooltip-text">Play / Pause</property>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkButton" id="step_forward_button">
+                <property name="icon-name">media-seek-forward-symbolic</property>
+                <property name="tooltip-text">Step Forward</property>
+                <style>
+                  <class name="flat"/>
+                </style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkButton" id="skip_forward_button">
+                <property name="icon-name">media-skip-forward-symbolic</property>
+                <property name="tooltip-text">Skip to End</property>
+                <style>
+                  <class name="flat"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Position / Duration labels -->
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">4</property>
+
+            <child>
+              <object class="GtkLabel" id="position_label">
+                <property name="label">00:00:00.000</property>
+                <property name="hexpand">true</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="monospace"/>
+                  <class name="dim-label"/>
+                </style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkLabel" id="duration_label">
+                <property name="label">00:00:00.000</property>
+                <property name="hexpand">true</property>
+                <property name="xalign">1</property>
+                <style>
+                  <class name="monospace"/>
+                  <class name="dim-label"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

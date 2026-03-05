@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="NoxMediaLibrary" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="spacing">0</property>
+    <property name="width-request">250</property>
+
+    <!-- Header -->
+    <child>
+      <object class="GtkBox">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">6</property>
+        <property name="margin-start">8</property>
+        <property name="margin-end">8</property>
+        <property name="margin-top">8</property>
+        <property name="margin-bottom">4</property>
+
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Media Library</property>
+            <property name="hexpand">true</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="heading"/>
+            </style>
+          </object>
+        </child>
+
+        <child>
+          <object class="GtkButton" id="add_media_button">
+            <property name="icon-name">list-add-symbolic</property>
+            <property name="tooltip-text">Add Media Files</property>
+            <style>
+              <class name="flat"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Search -->
+    <child>
+      <object class="GtkSearchEntry" id="search_entry">
+        <property name="placeholder-text">Search media…</property>
+        <property name="margin-start">8</property>
+        <property name="margin-end">8</property>
+        <property name="margin-bottom">4</property>
+      </object>
+    </child>
+
+    <!-- Drop target overlay for drag-and-drop import -->
+    <child>
+      <object class="GtkOverlay" id="drop_overlay">
+        <property name="vexpand">true</property>
+
+        <child>
+          <object class="GtkScrolledWindow" id="scrolled_window">
+            <property name="hscrollbar-policy">never</property>
+            <property name="vscrollbar-policy">automatic</property>
+            <property name="vexpand">true</property>
+
+            <child>
+              <object class="GtkFlowBox" id="flow_box">
+                <property name="homogeneous">true</property>
+                <property name="column-spacing">4</property>
+                <property name="row-spacing">4</property>
+                <property name="margin-start">8</property>
+                <property name="margin-end">8</property>
+                <property name="margin-top">4</property>
+                <property name="margin-bottom">4</property>
+                <property name="min-children-per-line">2</property>
+                <property name="max-children-per-line">4</property>
+                <property name="selection-mode">single</property>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Drop hint label (shown during drag) -->
+        <child type="overlay">
+          <object class="GtkLabel" id="drop_hint_label">
+            <property name="label">Drop media files here</property>
+            <property name="visible">false</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <style>
+              <class name="drop-hint"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>
