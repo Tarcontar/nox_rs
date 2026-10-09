@@ -2,16 +2,22 @@
 //! decoding, encoding and muxing. Plain Rust types only; the GUI wraps them
 //! in GObjects.
 
+mod audio;
 mod decode;
+mod encode;
 mod frames;
 mod hw;
 mod probe;
 mod thumbnail;
 mod vulkan_frame;
 
+pub use audio::{AudioDecoder, CHANNELS};
 pub use decode::VideoDecoder;
+pub use encode::{
+    MediaWriter, OutputSettings, Quality as EncodeQuality, VideoCodec, container_for,
+};
 pub use ffmpeg;
-pub use frames::{color_tags, display_size, rgba_cpu, to_software, with_cpu_frame};
+pub use frames::{color_tags, display_size, rgba_cpu, to_software, tone_mapping, with_cpu_frame};
 pub use hw::HwDevice;
 pub use nox_gpu::Image;
 pub use probe::{AudioInfo, MediaInfo, VideoInfo, probe};
@@ -26,6 +32,13 @@ pub enum Error {
     Ffmpeg(#[from] ffmpeg::Error),
     #[error("no video stream")]
     NoVideoStream,
+    #[error("no audio stream")]
+    NoAudioStream,
+    /// Decoding was stopped by the caller (e.g. a newer request).
+    #[error("interrupted")]
+    Interrupted,
+    #[error("{0}")]
+    Encode(String),
     #[error("no decodable video frame")]
     NoFrame,
     #[error("{0}")]

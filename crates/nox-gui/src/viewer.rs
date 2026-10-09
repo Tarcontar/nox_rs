@@ -1,106 +1,91 @@
-//! Preview of the sequence at the playhead, with transport controls.
+//! The viewer (`resources/ui/viewer.ui`): the sequence at the playhead,
+//! with transport controls.
 
-use gtk::{gdk, glib, prelude::*};
-use nox_engine::FrameImage;
+use gtk::{CompositeTemplate, gdk, glib, prelude::*, subclass::prelude::*};
+use nox_engine::{FrameImage, RenderedFrame};
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 
-pub struct Viewer {
-    pub widget: gtk::Box,
-    picture: gtk::Picture,
-    pub timecode: gtk::Label,
-}
+use crate::i18n::gettext;
 
-impl Viewer {
-    pub fn new() -> Self {
-        let picture = gtk::Picture::builder()
-            .content_fit(gtk::ContentFit::Contain)
-            .hexpand(true)
-            .vexpand(true)
-            .css_classes(["viewer-canvas"])
-            .build();
+mod imp {
+    use super::*;
 
-        let transport = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .halign(gtk::Align::Center)
-            .spacing(2)
-            .hexpand(true)
-            .build();
-        // Buttons without an implemented action (play, go to end) are
-        // insensitive until the action exists.
-        for (icon, tooltip, action) in [
-            (
-                "media-skip-backward-symbolic",
-                "Go to Start (Home)",
-                "win.go-to-start",
-            ),
-            (
-                "media-seek-backward-symbolic",
-                "Previous Frame (←)",
-                "win.previous-frame",
-            ),
-            ("media-playback-start-symbolic", "Play", "win.play"),
-            (
-                "media-seek-forward-symbolic",
-                "Next Frame (→)",
-                "win.next-frame",
-            ),
-            ("media-skip-forward-symbolic", "Go to End", "win.go-to-end"),
-        ] {
-            transport.append(
-                &gtk::Button::builder()
-                    .icon_name(icon)
-                    .tooltip_text(tooltip)
-                    .action_name(action)
-                    .css_classes(["flat"])
-                    .build(),
-            );
+    #[derive(Default, CompositeTemplate)]
+    #[template(resource = "/io/github/nox/Nox/ui/viewer.ui")]
+    pub struct Viewer {
+        #[template_child]
+        pub picture: TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub timecode: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub play_button: TemplateChild<gtk::Button>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Viewer {
+        const NAME: &'static str = "NoxViewer";
+        type Type = super::Viewer;
+        type ParentType = gtk::Box;
+
+        fn class_init(klass: &mut Self::Class) {
+            klass.bind_template();
         }
 
-        let timecode = gtk::Label::builder()
-            .label("00:00:00:00")
-            .css_classes(["timecode"])
-            .build();
-
-        let controls = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .margin_top(4)
-            .margin_bottom(4)
-            .build();
-        // Mirror the timecode's width on the left so the transport stays centered.
-        let spacer = gtk::Label::builder()
-            .label("00:00:00:00")
-            .css_classes(["timecode"])
-            .opacity(0.0)
-            .build();
-        controls.append(&spacer);
-        controls.append(&transport);
-        controls.append(&timecode);
-
-        let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        widget.append(&picture);
-        widget.append(&controls);
-
-        Self {
-            widget,
-            picture,
-            timecode,
+        fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
+            obj.init_template();
         }
     }
 
-    /// Shows a frame; fails if GTK cannot import a DMA-BUF frame.
-    pub fn show_frame(&self, image: FrameImage) -> Result<(), glib::Error> {
-        let texture = match image {
+    impl ObjectImpl for Viewer {}
+    impl WidgetImpl for Viewer {}
+    impl BoxImpl for Viewer {}
+}
+
+glib::wrapper! {
+    pub struct Viewer(ObjectSubclass<imp::Viewer>)
+        @extends gtk::Box, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
+}
+
+impl Viewer {
+    pub fn picture(&self) -> gtk::Picture {
+        self.imp().picture.get()
+    }
+
+    pub fn set_timecode(&self, text: &str) {
+        self.imp().timecode.set_text(text);
+    }
+
+    /// Switches the play button between play and pause.
+    pub fn set_playing(&self, playing: bool) {
+        let (icon, tooltip) = if playing {
+            ("media-playback-pause-symbolic", gettext("Pause"))
+        } else {
+            ("media-playback-start-symbolic", gettext("Play"))
+        };
+        let button = &self.imp().play_button;
+        button.set_icon_name(icon);
+        button.set_tooltip_text(Some(&tooltip));
+    }
+
+    /// Shows a rendered frame; fails if GTK cannot import a DMA-BUF frame.
+    /// The frame (shared with the engine's cache) stays alive while GTK
+    /// uses it.
+    pub fn show_frame(&self, rendered: &Arc<RenderedFrame>) -> Result<(), glib::Error> {
+        let imp = self.imp();
+        let texture = match &rendered.image {
             FrameImage::Pixels(image) => gdk::MemoryTexture::new(
                 image.width as i32,
                 image.height as i32,
                 gdk::MemoryFormat::R8g8b8a8,
-                &glib::Bytes::from_owned(image.data),
+                &glib::Bytes::from(&image.data[..]),
                 image.stride,
             )
             .upcast(),
             FrameImage::Dmabuf(frame) => {
                 let builder = gdk::DmabufTextureBuilder::new()
-                    .set_display(&self.picture.display())
+                    .set_display(&imp.picture.display())
                     .set_width(frame.width)
                     .set_height(frame.height)
                     .set_fourcc(frame.fourcc)
@@ -108,20 +93,22 @@ impl Viewer {
                     .set_n_planes(1)
                     .set_offset(0, frame.offset)
                     .set_stride(0, frame.stride);
+                let keep = rendered.clone();
                 // SAFETY: the fd stays open until GTK calls the release
-                // function, which drops the frame (closing the fd and
-                // returning the image to the converter's pool).
+                // function, which drops our reference to the frame (the
+                // last one closes the fd and returns the image to the
+                // compositor's pool).
                 unsafe {
                     let builder = builder.set_fd(0, frame.fd.as_raw_fd());
-                    builder.build_with_release_func(move || drop(frame))?
+                    builder.build_with_release_func(move || drop(keep))?
                 }
             }
         };
-        self.picture.set_paintable(Some(&texture));
+        imp.picture.set_paintable(Some(&texture));
         Ok(())
     }
 
     pub fn clear(&self) {
-        self.picture.set_paintable(gdk::Paintable::NONE);
+        self.imp().picture.set_paintable(gdk::Paintable::NONE);
     }
 }

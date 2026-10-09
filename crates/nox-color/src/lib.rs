@@ -4,7 +4,9 @@
 //! format. Pure Rust; `nox-gpu` turns the transforms into shader code.
 
 pub mod cicp;
+pub mod hdr;
 pub mod ycbcr;
 
 pub use cicp::Cicp;
+pub use hdr::ToneMapping;
 pub use ycbcr::{Coefficients, Matrix3x4, Quantization};

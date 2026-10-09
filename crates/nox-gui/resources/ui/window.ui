@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- Shortcuts are shown by the menu itself (from the app's accels). -->
+  <menu id="main_menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">New Project</attribute>
+        <attribute name="action">win.new</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Open…</attribute>
+        <attribute name="action">win.open</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Save</attribute>
+        <attribute name="action">win.save</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Save As…</attribute>
+        <attribute name="action">win.save-as</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Export…</attribute>
+        <attribute name="action">win.export</attribute>
+      </item>
+    </section>
+    <section>
+      <attribute name="label" translatable="yes">Sequence</attribute>
+      <item>
+        <attribute name="label" translatable="yes">Project Settings…</attribute>
+        <attribute name="action">win.project-settings</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Split at Playhead</attribute>
+        <attribute name="action">win.split</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Add Dissolve</attribute>
+        <attribute name="action">win.add-dissolve</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Add Video Track</attribute>
+        <attribute name="action">win.add-video-track</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Add Audio Track</attribute>
+        <attribute name="action">win.add-audio-track</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Snapping</attribute>
+        <attribute name="action">win.snapping</attribute>
+      </item>
+    </section>
+  </menu>
+
+  <template class="NoxWindow" parent="GtkApplicationWindow">
+    <property name="default-width">1400</property>
+    <property name="default-height">860</property>
+    <property name="titlebar">
+      <object class="GtkHeaderBar">
+        <child type="start">
+          <object class="GtkButton">
+            <property name="icon-name">document-open-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Open Project</property>
+            <property name="action-name">win.open</property>
+          </object>
+        </child>
+        <child type="start">
+          <object class="GtkButton">
+            <property name="icon-name">document-save-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Save Project</property>
+            <property name="action-name">win.save</property>
+          </object>
+        </child>
+        <child type="start">
+          <object class="GtkButton">
+            <property name="icon-name">edit-undo-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Undo</property>
+            <property name="action-name">win.undo</property>
+          </object>
+        </child>
+        <child type="start">
+          <object class="GtkButton">
+            <property name="icon-name">edit-redo-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Redo</property>
+            <property name="action-name">win.redo</property>
+          </object>
+        </child>
+        <child type="end">
+          <object class="GtkMenuButton">
+            <property name="icon-name">open-menu-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Main Menu</property>
+            <property name="menu-model">main_menu</property>
+            <property name="primary">true</property>
+          </object>
+        </child>
+      </object>
+    </property>
+    <property name="child">
+      <object class="GtkPaned">
+        <property name="orientation">vertical</property>
+        <property name="position">500</property>
+        <property name="shrink-end-child">false</property>
+        <!-- A thin handle's invisible grab area covers the top of the ruler. -->
+        <property name="wide-handle">true</property>
+        <property name="start-child">
+          <object class="GtkPaned">
+            <property name="orientation">horizontal</property>
+            <property name="position">340</property>
+            <property name="resize-start-child">false</property>
+            <property name="shrink-start-child">false</property>
+            <property name="wide-handle">true</property>
+            <property name="start-child">
+              <object class="NoxMediaPool" id="media_pool"/>
+            </property>
+            <property name="end-child">
+              <object class="NoxViewer" id="viewer"/>
+            </property>
+          </object>
+        </property>
+        <property name="end-child">
+          <object class="NoxTimelineView" id="timeline">
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+          </object>
+        </property>
+      </object>
+    </property>
+  </template>
+</interface>

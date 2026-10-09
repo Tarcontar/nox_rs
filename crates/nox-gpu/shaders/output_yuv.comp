@@ -1,0 +1,47 @@
+// Writes the accumulated picture as 4:2:0 Y'CbCr into the two planes of an
+// NV12 image (e.g. a video encoder's input), one invocation per 2×2 block.
+// Chroma is left-sited, the MPEG-2/H.264 convention: horizontally filtered
+// [1/4 1/2 1/4] around the left column, averaged over the two rows.
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D accum;
+layout(set = 0, binding = 1, r8) uniform writeonly image2D luma;
+layout(set = 0, binding = 2, rg8) uniform writeonly image2D chroma;
+
+layout(push_constant) uniform Params {
+    // R'G'B' → normalized (Y, Cb, Cr) texel values (nox_color::ycbcr).
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
+    ivec2 size;
+} p;
+
+vec4 rgb_at(ivec2 pos) {
+    pos = clamp(pos, ivec2(0), p.size - 1);
+    return vec4(clamp(imageLoad(accum, pos).rgb, 0.0, 1.0), 1.0);
+}
+
+void main() {
+    ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 base = block * 2;
+    if (any(greaterThanEqual(base, p.size))) {
+        return;
+    }
+    for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+            ivec2 pos = base + ivec2(dx, dy);
+            if (all(lessThan(pos, p.size))) {
+                imageStore(luma, pos, vec4(dot(p.row0, rgb_at(pos))));
+            }
+        }
+    }
+    vec4 rgb = vec4(0.0);
+    for (int dy = 0; dy < 2; dy++) {
+        ivec2 row = base + ivec2(0, dy);
+        rgb += 0.25 * rgb_at(row - ivec2(1, 0)) + 0.5 * rgb_at(row) + 0.25 * rgb_at(row + ivec2(1, 0));
+    }
+    rgb *= 0.5;
+    imageStore(chroma, block, vec4(dot(p.row1, rgb), dot(p.row2, rgb), 0.0, 0.0));
+}

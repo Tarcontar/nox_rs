@@ -34,10 +34,67 @@ pub struct Timeline {
 }
 
 /// Nox's own sequence settings, stored under `metadata.nox` in `.otio`.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// Show drop-frame timecode (only for 29.97 and 59.94 fps).
     pub drop_frame: bool,
+    /// Picture size of the sequence.
+    pub width: u32,
+    pub height: u32,
+    /// How sources of another size or shape are placed.
+    pub scaling: ScalingMode,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            drop_frame: false,
+            width: 1920,
+            height: 1080,
+            scaling: ScalingMode::Fit,
+        }
+    }
+}
+
+/// How a source that doesn't match the sequence resolution is placed (as
+/// in Resolve's "mismatched resolution files" setting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScalingMode {
+    /// Scale the entire image to fit, with black bars.
+    #[default]
+    Fit,
+    /// Scale to fill the frame, cropping the overhang.
+    Fill,
+    /// Keep pixels 1:1, centered (crop or border).
+    CenterCrop,
+    /// Stretch to the frame, ignoring the aspect ratio.
+    Stretch,
+}
+
+impl ScalingMode {
+    pub const ALL: [ScalingMode; 4] = [Self::Fit, Self::Fill, Self::CenterCrop, Self::Stretch];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fit => "fit",
+            Self::Fill => "fill",
+            Self::CenterCrop => "center",
+            Self::Stretch => "stretch",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == name)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fit => "Scale entire image to fit",
+            Self::Fill => "Scale full frame with crop",
+            Self::CenterCrop => "Center crop with no resizing",
+            Self::Stretch => "Stretch frame to all corners",
+        }
+    }
 }
 
 impl Timeline {
@@ -111,10 +168,15 @@ impl Timeline {
     /// The clip that supplies the picture at `time` (timeline time, starting
     /// at zero): the topmost enabled video track with an enabled clip there.
     pub fn video_at(&self, time: Time) -> Option<ResolvedClip<'_>> {
-        self.tracks
-            .resolve(time, Some(&TrackKind::Video))
-            .into_iter()
-            .next_back()
+        self.video_layers(time).into_iter().next_back()
+    }
+
+    /// Everything that makes up the picture at `time`, bottom layer first:
+    /// the clip of every enabled video track, and both clips of a dissolve
+    /// (the incoming one with its opacity scaled by the dissolve's
+    /// progress).
+    pub fn video_layers(&self, time: Time) -> Vec<ResolvedClip<'_>> {
+        self.tracks.resolve(time, Some(&TrackKind::Video))
     }
 
     /// Every boundary between items on every top-level track, plus zero,
@@ -153,6 +215,51 @@ pub struct ResolvedClip<'a> {
     /// Time in the clip's media reference (same time space as
     /// `source_range` and `available_range`).
     pub source_time: Time,
+    /// The clip's opacity, times the progress of a dissolve it fades in by.
+    pub opacity: f64,
+}
+
+impl ResolvedClip<'_> {
+    pub fn blend_mode(&self) -> BlendMode {
+        self.clip.item.blend_mode()
+    }
+
+    /// Source time from the start of the media file (decoders count from
+    /// zero, while `source_time` counts from the available range's start,
+    /// e.g. a start timecode).
+    pub fn file_time(&self) -> Time {
+        match self.clip.available_range() {
+            Some(range) => self.source_time - range.start,
+            None => self.source_time,
+        }
+    }
+}
+
+/// How a layer combines with the layers below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Add,
+    Multiply,
+    Screen,
+}
+
+impl BlendMode {
+    pub const ALL: [BlendMode; 4] = [Self::Normal, Self::Add, Self::Multiply, Self::Screen];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Add => "add",
+            Self::Multiply => "multiply",
+            Self::Screen => "screen",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == name)
+    }
 }
 
 /// Fields shared by clips, gaps, tracks and stacks.
@@ -187,26 +294,73 @@ impl Item {
         }
     }
 
-    /// Clips with the same link id move and trim together (e.g. the video
-    /// and audio of one file). Stored as `metadata.nox.link`.
-    pub fn link(&self) -> Option<i64> {
-        self.metadata.get("nox")?.as_object()?.get("link")?.as_i64()
+    /// A value of Nox's own metadata, `metadata.nox.<key>`.
+    pub fn nox_value(&self, key: &str) -> Option<&Value> {
+        self.metadata.get("nox")?.as_object()?.get(key)
     }
 
-    pub fn set_link(&mut self, link: Option<i64>) {
+    /// Sets or (with `None`) removes `metadata.nox.<key>`.
+    pub fn set_nox_value(&mut self, key: &str, value: Option<Value>) {
         let mut nox = match self.metadata.remove("nox") {
             Some(Value::Object(nox)) => nox,
             _ => Object::new(),
         };
-        match link {
-            Some(link) => nox.insert("link", link),
+        match value {
+            Some(value) => nox.insert(key, value),
             None => {
-                nox.remove("link");
+                nox.remove(key);
             }
         }
         if !nox.is_empty() {
             self.metadata.insert("nox", nox);
         }
+    }
+
+    /// Clips with the same link id move and trim together (e.g. the video
+    /// and audio of one file). Stored as `metadata.nox.link`.
+    pub fn link(&self) -> Option<i64> {
+        self.nox_value("link")?.as_i64()
+    }
+
+    pub fn set_link(&mut self, link: Option<i64>) {
+        self.set_nox_value("link", link.map(Value::Int));
+    }
+
+    /// Opacity of a video clip, 0–1 (`metadata.nox.opacity`, default 1).
+    pub fn opacity(&self) -> f64 {
+        self.nox_value("opacity")
+            .and_then(Value::as_f64)
+            .map_or(1.0, |o| o.clamp(0.0, 1.0))
+    }
+
+    pub fn set_opacity(&mut self, opacity: f64) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        self.set_nox_value("opacity", (opacity < 1.0).then_some(Value::Float(opacity)));
+    }
+
+    /// Blend mode of a video clip (`metadata.nox.blend`, default normal).
+    pub fn blend_mode(&self) -> BlendMode {
+        self.nox_value("blend")
+            .and_then(Value::as_str)
+            .and_then(BlendMode::parse)
+            .unwrap_or_default()
+    }
+
+    pub fn set_blend_mode(&mut self, mode: BlendMode) {
+        let value = (mode != BlendMode::Normal).then(|| Value::from(mode.as_str()));
+        self.set_nox_value("blend", value);
+    }
+
+    /// Linear gain of an audio clip (`metadata.nox.gain`, default 1).
+    pub fn gain(&self) -> f64 {
+        self.nox_value("gain")
+            .and_then(Value::as_f64)
+            .map_or(1.0, |g| g.max(0.0))
+    }
+
+    pub fn set_gain(&mut self, gain: f64) {
+        let gain = gain.max(0.0);
+        self.set_nox_value("gain", (gain != 1.0).then_some(Value::Float(gain)));
     }
 
     /// Maps a time inside the item's trimmed range through its time effects
@@ -328,7 +482,11 @@ impl Composable {
                     return Vec::new();
                 };
                 let source_time = clip.item.warp(range.start, time);
-                vec![ResolvedClip { clip, source_time }]
+                vec![ResolvedClip {
+                    clip,
+                    source_time,
+                    opacity: clip.item.opacity(),
+                }]
             }
             Self::Track(track) => track.resolve(time, kind),
             Self::Stack(stack) => stack.resolve(time, kind),
@@ -518,10 +676,142 @@ impl Track {
             Some(range) => range.start + time,
             None => time,
         };
+        // Inside a dissolve both neighbors show: the outgoing item runs on
+        // past the cut, the incoming one starts early and fades in.
+        let ranges: Vec<_> = self.child_ranges().map(|(r, _)| r).collect();
+        for (i, child) in self.children.iter().enumerate() {
+            let Composable::Transition(_) = child else {
+                continue;
+            };
+            let range = ranges[i];
+            if !range.contains(time) || i == 0 || i + 1 >= self.children.len() {
+                continue;
+            }
+            let (before, after) = (&self.children[i - 1], &self.children[i + 1]);
+            if matches!(before, Composable::Transition(_))
+                || matches!(after, Composable::Transition(_))
+            {
+                continue;
+            }
+            let progress = (time - range.start).as_seconds() / range.duration.as_seconds();
+            let mut layers = before.resolve(time - ranges[i - 1].start, kind);
+            layers.extend(
+                after
+                    .resolve(time - ranges[i + 1].start, kind)
+                    .into_iter()
+                    .map(|mut layer| {
+                        layer.opacity *= progress.clamp(0.0, 1.0);
+                        layer
+                    }),
+            );
+            return layers;
+        }
         match self.child_at(time) {
             Some((index, range)) => self.children[index].resolve(time - range.start, kind),
             None => Vec::new(),
         }
+    }
+
+    /// The audio of this track overlapping `range` (content time), with
+    /// crossfades for transitions.
+    fn audio_segments(&self, range: TimeRange, out: &mut Vec<AudioSegment>) {
+        let ranges: Vec<_> = self.child_ranges().map(|(r, _)| r).collect();
+        let transition = |i: usize| match self.children.get(i) {
+            Some(Composable::Transition(t)) => Some(t),
+            _ => None,
+        };
+        for (i, child) in self.children.iter().enumerate() {
+            let Composable::Clip(clip) = child else {
+                continue;
+            };
+            let (Some(trimmed), Some(path)) = (
+                clip.trimmed_range(),
+                clip.media_reference().and_then(MediaReference::path),
+            ) else {
+                continue;
+            };
+            if !clip.item.enabled {
+                continue;
+            }
+            let mut place = ranges[i];
+            let mut source_start = trimmed.start;
+            let mut fade_in = Time::zero(place.start.timebase);
+            let mut fade_out = Time::zero(place.start.timebase);
+            if let Some(t) = i.checked_sub(1).and_then(transition) {
+                place = TimeRange::from_start_end(place.start - t.in_offset, place.end());
+                source_start -= t.in_offset;
+                fade_in = t.in_offset + t.out_offset;
+            }
+            if let Some(t) = transition(i + 1) {
+                place = TimeRange::from_start_end(place.start, place.end() + t.out_offset);
+                fade_out = t.in_offset + t.out_offset;
+            }
+            if !place.overlaps(range) {
+                continue;
+            }
+            let file_start = clip
+                .available_range()
+                .map_or(Time::zero(source_start.timebase), |r| r.start);
+            out.push(AudioSegment {
+                path,
+                place,
+                source_start: source_start - file_start,
+                gain: clip.item.gain(),
+                fade_in,
+                fade_out,
+            });
+        }
+    }
+}
+
+/// A piece of audio to play: `place` in timeline time, starting at
+/// `source_start` in the file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioSegment {
+    pub path: PathBuf,
+    pub place: TimeRange,
+    /// From the start of the file.
+    pub source_start: Time,
+    pub gain: f64,
+    /// Length of the fade at the start (a crossfade with the previous clip).
+    pub fade_in: Time,
+    /// Length of the fade at the end.
+    pub fade_out: Time,
+}
+
+impl AudioSegment {
+    /// The gain at timeline time `time`: the clip gain with equal-power
+    /// fades, zero outside the segment.
+    pub fn gain_at(&self, time: f64) -> f64 {
+        let start = self.place.start.as_seconds();
+        let end = self.place.end().as_seconds();
+        if time < start || time >= end {
+            return 0.0;
+        }
+        let mut gain = self.gain;
+        let fade_in = self.fade_in.as_seconds();
+        if fade_in > 0.0 && time < start + fade_in {
+            gain *= (std::f64::consts::FRAC_PI_2 * (time - start) / fade_in).sin();
+        }
+        let fade_out = self.fade_out.as_seconds();
+        if fade_out > 0.0 && time > end - fade_out {
+            gain *= (std::f64::consts::FRAC_PI_2 * (end - time) / fade_out).sin();
+        }
+        gain
+    }
+}
+
+impl Timeline {
+    /// The audio playing during `range`: clips of every enabled top-level
+    /// audio track.
+    pub fn audio_segments(&self, range: TimeRange) -> Vec<AudioSegment> {
+        let mut segments = Vec::new();
+        for (_, track) in self.tracks() {
+            if track.kind == TrackKind::Audio && track.item.enabled {
+                track.audio_segments(range, &mut segments);
+            }
+        }
+        segments
     }
 }
 

@@ -534,6 +534,21 @@ fn take_settings(metadata: &mut Object) -> Settings {
     if let Some(drop_frame) = nox.remove("drop_frame").and_then(|v| v.as_bool()) {
         settings.drop_frame = drop_frame;
     }
+    let mut size = |key| {
+        nox.remove(key)
+            .and_then(|v| v.as_i64())
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|&v| v > 0)
+    };
+    if let (Some(width), Some(height)) = (size("width"), size("height")) {
+        (settings.width, settings.height) = (width, height);
+    }
+    if let Some(mode) = nox
+        .remove("scaling")
+        .and_then(|v| v.as_str().and_then(nox_project::ScalingMode::parse))
+    {
+        settings.scaling = mode;
+    }
     // Keep anything we don't know, e.g. from newer versions.
     if !nox.is_empty() {
         metadata.insert("nox", nox);
@@ -646,7 +661,11 @@ fn write_timeline(timeline: &Timeline) -> Value {
             Some(Value::Object(nox)) => nox,
             _ => Object::new(),
         };
-        nox.insert("drop_frame", timeline.settings.drop_frame);
+        let settings = &timeline.settings;
+        nox.insert("drop_frame", settings.drop_frame);
+        nox.insert("width", i64::from(settings.width));
+        nox.insert("height", i64::from(settings.height));
+        nox.insert("scaling", settings.scaling.as_str());
         metadata.insert("nox", nox);
     }
     object.insert("metadata", metadata);
@@ -846,6 +865,8 @@ mod tests {
     fn settings_round_trip() {
         let mut timeline = Timeline::new("t", Rational::new(30000, 1001));
         timeline.settings.drop_frame = true;
+        (timeline.settings.width, timeline.settings.height) = (3840, 2160);
+        timeline.settings.scaling = nox_project::ScalingMode::Fill;
         timeline.metadata.insert("other", 1);
         let text = write_string(&timeline);
         assert!(text.contains("\"drop_frame\": true"));

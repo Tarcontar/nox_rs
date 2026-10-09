@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- Right-click menu of timeline clips; the actions work on the selection. -->
+  <menu id="clip_menu">
+    <section>
+      <submenu>
+        <attribute name="label" translatable="yes">Opacity</attribute>
+        <item>
+          <attribute name="label">100%</attribute>
+          <attribute name="action">win.clip-opacity</attribute>
+          <attribute name="target" type="d">1.0</attribute>
+        </item>
+        <item>
+          <attribute name="label">75%</attribute>
+          <attribute name="action">win.clip-opacity</attribute>
+          <attribute name="target" type="d">0.75</attribute>
+        </item>
+        <item>
+          <attribute name="label">50%</attribute>
+          <attribute name="action">win.clip-opacity</attribute>
+          <attribute name="target" type="d">0.5</attribute>
+        </item>
+        <item>
+          <attribute name="label">25%</attribute>
+          <attribute name="action">win.clip-opacity</attribute>
+          <attribute name="target" type="d">0.25</attribute>
+        </item>
+      </submenu>
+      <submenu>
+        <attribute name="label" translatable="yes">Blend Mode</attribute>
+        <item>
+          <attribute name="label" translatable="yes" context="blend mode">Normal</attribute>
+          <attribute name="action">win.clip-blend</attribute>
+          <attribute name="target">normal</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes" context="blend mode">Add</attribute>
+          <attribute name="action">win.clip-blend</attribute>
+          <attribute name="target">add</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes" context="blend mode">Multiply</attribute>
+          <attribute name="action">win.clip-blend</attribute>
+          <attribute name="target">multiply</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes" context="blend mode">Screen</attribute>
+          <attribute name="action">win.clip-blend</attribute>
+          <attribute name="target">screen</attribute>
+        </item>
+      </submenu>
+      <submenu>
+        <attribute name="label" translatable="yes">Gain</attribute>
+        <item>
+          <attribute name="label">+6 dB</attribute>
+          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="target" type="d">2.0</attribute>
+        </item>
+        <item>
+          <attribute name="label">0 dB</attribute>
+          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="target" type="d">1.0</attribute>
+        </item>
+        <item>
+          <attribute name="label">−6 dB</attribute>
+          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="target" type="d">0.5</attribute>
+        </item>
+        <item>
+          <attribute name="label">−12 dB</attribute>
+          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="target" type="d">0.25</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes">Mute</attribute>
+          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="target" type="d">0.0</attribute>
+        </item>
+      </submenu>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Add Dissolve</attribute>
+        <attribute name="action">win.add-dissolve</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Split at Playhead</attribute>
+        <attribute name="action">win.split</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Delete</attribute>
+        <attribute name="action">win.delete-clip</attribute>
+      </item>
+    </section>
+  </menu>
+</interface>

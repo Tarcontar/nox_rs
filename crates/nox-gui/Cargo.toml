@@ -11,6 +11,7 @@ name = "nox"
 path = "src/main.rs"
 
 [dependencies]
+gettext-rs.workspace = true
 async-channel.workspace = true
 gtk.workspace = true
 nox-engine.workspace = true
@@ -19,6 +20,9 @@ nox-otio.workspace = true
 nox-project.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[build-dependencies]
+glib-build-tools.workspace = true
 
 [lints]
 workspace = true

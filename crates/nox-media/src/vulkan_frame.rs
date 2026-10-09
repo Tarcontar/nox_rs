@@ -84,6 +84,7 @@ impl Prepared {
                 swap_chroma,
                 matrix,
                 chroma_offset,
+                tone,
                 planes,
             } = classify(sw_format, frame).ok_or("unsupported decoder output format")?;
             if layout == Layout::Packed {
@@ -121,6 +122,7 @@ impl Prepared {
                 swap_chroma,
                 matrix,
                 chroma_offset,
+                tone,
                 planes,
                 images: Vec::new(),
             };

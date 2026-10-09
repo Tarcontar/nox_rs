@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- A media pool item: thumbnail (or icon), name and duration. The
+       thumbnail size matches media_object::THUMBNAIL_WIDTH/HEIGHT. -->
+  <template class="NoxMediaCell" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="spacing">2</property>
+    <property name="halign">center</property>
+    <child>
+      <object class="GtkOverlay">
+        <property name="width-request">144</property>
+        <property name="height-request">81</property>
+        <property name="overflow">hidden</property>
+        <style><class name="thumbnail-frame"/></style>
+        <property name="child">
+          <object class="GtkImage" id="icon">
+            <property name="pixel-size">32</property>
+          </object>
+        </property>
+        <child type="overlay">
+          <object class="GtkPicture" id="picture">
+            <property name="content-fit">contain</property>
+          </object>
+        </child>
+      </object>
+    </child>
+    <!-- The thumbnail sets the width; labels ellipsize within it. -->
+    <child>
+      <object class="GtkLabel" id="name">
+        <property name="ellipsize">middle</property>
+        <property name="max-width-chars">1</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="summary">
+        <property name="ellipsize">end</property>
+        <property name="max-width-chars">1</property>
+        <style><class name="media-summary"/></style>
+      </object>
+    </child>
+  </template>
+</interface>

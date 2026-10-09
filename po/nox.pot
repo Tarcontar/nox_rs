@@ -1,0 +1,508 @@
+# Translations of Nox.
+# This file is distributed under the same license as Nox.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: nox\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
+
+#: src/export_dialog.rs:21
+msgid "High"
+msgstr ""
+
+#: src/export_dialog.rs:22
+msgid "Medium"
+msgstr ""
+
+#: src/export_dialog.rs:23
+msgid "Low (small files)"
+msgstr ""
+
+#: src/export_dialog.rs:30
+msgid "H.264 Master"
+msgstr ""
+
+#: src/export_dialog.rs:31
+msgid "YouTube / Web (H.264)"
+msgstr ""
+
+#: src/export_dialog.rs:32
+msgid "HEVC (smaller files)"
+msgstr ""
+
+#: src/export_dialog.rs:33
+msgid "ProRes 422 HQ (for editing)"
+msgstr ""
+
+#: src/export_dialog.rs:34
+msgid "Review copy (small)"
+msgstr ""
+
+#: src/export_dialog.rs:35 src/settings_dialog.rs:124
+msgid "Custom"
+msgstr ""
+
+#: src/export_dialog.rs:241
+msgid "Export To"
+msgstr ""
+
+#: src/export_dialog.rs:299
+msgid "Choose a file to export to."
+msgstr ""
+
+#: src/export_dialog.rs:314
+msgid "Starting…"
+msgstr ""
+
+#: src/export_dialog.rs:341
+#, python-brace-format
+msgid "Frame {done} of {total}"
+msgstr ""
+
+#: src/export_dialog.rs:353
+msgid "Done"
+msgstr ""
+
+#: src/export_dialog.rs:356
+#, python-brace-format
+msgid "{encoder}, zero copy"
+msgstr ""
+
+#: src/export_dialog.rs:376
+msgid "Close"
+msgstr ""
+
+#: src/export_dialog.rs:382
+#, python-brace-format
+msgid "Export failed: {error}"
+msgstr ""
+
+#: src/export_dialog.rs:221
+#, python-brace-format
+msgid "{width} × {height}, {fps} fps, {frames} frame ({timecode})"
+msgid_plural "{width} × {height}, {fps} fps, {frames} frames ({timecode})"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/export_dialog.rs:363
+#, python-brace-format
+msgid "Exported {frames} frame to {path} in {seconds} s ({fps} fps, {encoder})."
+msgid_plural "Exported {frames} frames to {path} in {seconds} s ({fps} fps, {encoder})."
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/i18n.rs:7 src/window.rs:199
+#, python-brace-format
+msgid "Cannot open {path}"
+msgstr ""
+
+#: src/i18n.rs:61
+msgid "Scale entire image to fit"
+msgstr ""
+
+#: src/i18n.rs:62
+msgid "Scale full frame with crop"
+msgstr ""
+
+#: src/i18n.rs:63
+msgid "Center crop with no resizing"
+msgstr ""
+
+#: src/i18n.rs:64
+msgid "Stretch frame to all corners"
+msgstr ""
+
+#: src/i18n.rs:72 resources/ui/menus.ui:32
+msgctxt "blend mode"
+msgid "Normal"
+msgstr ""
+
+#: src/i18n.rs:73 resources/ui/menus.ui:37
+msgctxt "blend mode"
+msgid "Add"
+msgstr ""
+
+#: src/i18n.rs:74 resources/ui/menus.ui:42
+msgctxt "blend mode"
+msgid "Multiply"
+msgstr ""
+
+#: src/i18n.rs:75 resources/ui/menus.ui:47
+msgctxt "blend mode"
+msgid "Screen"
+msgstr ""
+
+#: src/media_object.rs:60
+msgid "Loading…"
+msgstr ""
+
+#: src/media_object.rs:103
+msgid "probing crashed"
+msgstr ""
+
+#: src/media_object.rs:145
+#, python-brace-format
+msgid "Cannot import: {error}"
+msgstr ""
+
+#: src/media_object.rs:152
+msgid "Still"
+msgstr ""
+
+#: src/media_object.rs:163
+msgid "Unknown length"
+msgstr ""
+
+#: src/media_pool.rs:189
+msgid "Media Files"
+msgstr ""
+
+#: src/media_pool.rs:194
+msgid "All Files"
+msgstr ""
+
+#: src/media_pool.rs:201
+msgid "Import Media"
+msgstr ""
+
+#: src/project.rs:43 src/project.rs:230
+msgid "Untitled"
+msgstr ""
+
+#: src/project.rs:119
+msgid "Add Clip"
+msgstr ""
+
+#: src/project.rs:221
+#, python-brace-format
+msgid "• {name} — Nox"
+msgstr ""
+
+#: src/project.rs:223
+#, python-brace-format
+msgid "{name} — Nox"
+msgstr ""
+
+#: src/settings_dialog.rs:15 src/settings_dialog.rs:16
+msgid "HD"
+msgstr ""
+
+#: src/settings_dialog.rs:17
+msgid "QHD"
+msgstr ""
+
+#: src/settings_dialog.rs:18
+msgid "Ultra HD"
+msgstr ""
+
+#: src/settings_dialog.rs:19
+msgid "DCI 4K"
+msgstr ""
+
+#: src/settings_dialog.rs:20
+msgid "Vertical"
+msgstr ""
+
+#: src/settings_dialog.rs:21
+msgid "Square"
+msgstr ""
+
+#: src/settings_dialog.rs:115
+#, python-brace-format
+msgid "Project Settings: {name}"
+msgstr ""
+
+#: src/settings_dialog.rs:213
+msgid "Change Project Settings"
+msgstr ""
+
+#: src/timeline.rs:81
+msgid "muted"
+msgstr ""
+
+#: src/timeline.rs:993
+msgid "Move Clip"
+msgstr ""
+
+#: src/timeline.rs:1013
+msgid "Trim Clip"
+msgstr ""
+
+#: src/timeline.rs:1137
+msgid "Delete Clip"
+msgstr ""
+
+#: src/viewer.rs:63
+msgid "Pause"
+msgstr ""
+
+#: src/viewer.rs:65 resources/ui/viewer.ui:45
+msgid "Play"
+msgstr ""
+
+#: src/window.rs:247
+#, python-brace-format
+msgid "Cannot save {path}"
+msgstr ""
+
+#: src/window.rs:258 resources/ui/window.ui:71
+msgid "Save Project"
+msgstr ""
+
+#: src/window.rs:281 resources/ui/window.ui:64
+msgid "Open Project"
+msgstr ""
+
+#: src/window.rs:300
+msgid "Save changes to the project?"
+msgstr ""
+
+#: src/window.rs:301
+msgid "Unsaved changes will be lost otherwise."
+msgstr ""
+
+#: src/window.rs:302 resources/ui/export-dialog.ui:172 resources/ui/project-settings.ui:258
+msgid "Cancel"
+msgstr ""
+
+#: src/window.rs:302
+msgid "Discard"
+msgstr ""
+
+#: src/window.rs:302 resources/ui/project-settings.ui:264 resources/ui/window.ui:15
+msgid "Save"
+msgstr ""
+
+#: src/window.rs:320
+msgid "Add Track"
+msgstr ""
+
+#: src/window.rs:365 resources/ui/menus.ui:83 resources/ui/window.ui:38
+msgid "Add Dissolve"
+msgstr ""
+
+#: src/window.rs:457
+msgid "Split Clips"
+msgstr ""
+
+#: src/window.rs:519
+msgid "Change Resolution"
+msgstr ""
+
+#: src/window.rs:543
+msgid "Change Frame Rate"
+msgstr ""
+
+#: src/window.rs:568
+msgid "Change Timecode"
+msgstr ""
+
+#: src/window.rs:638
+msgid "Change Opacity"
+msgstr ""
+
+#: src/window.rs:643
+msgid "Change Blend Mode"
+msgstr ""
+
+#: src/window.rs:650
+msgid "Change Gain"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:6 resources/ui/export-dialog.ui:178
+msgid "Export"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:22
+msgid "Render Settings"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:39
+msgid "Preset"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:53
+msgid "File"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:71
+msgid "Browse…"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:79
+msgid "Format"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:93
+msgid "Quality"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:107
+msgid "Use hardware encoding (Vulkan Video, NVENC)"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:114
+msgid "Include audio"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:121
+msgid "Timeline"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:165
+msgid "Open Folder"
+msgstr ""
+
+#: resources/ui/media-pool.ui:12
+msgid "Media Pool"
+msgstr ""
+
+#: resources/ui/media-pool.ui:21
+msgid "Import Media…"
+msgstr ""
+
+#: resources/ui/media-pool.ui:36
+msgid "Drop media files here"
+msgstr ""
+
+#: resources/ui/menus.ui:7
+msgid "Opacity"
+msgstr ""
+
+#: resources/ui/menus.ui:30
+msgid "Blend Mode"
+msgstr ""
+
+#: resources/ui/menus.ui:53
+msgid "Gain"
+msgstr ""
+
+#: resources/ui/menus.ui:75
+msgid "Mute"
+msgstr ""
+
+#: resources/ui/menus.ui:87 resources/ui/window.ui:34
+msgid "Split at Playhead"
+msgstr ""
+
+#: resources/ui/menus.ui:91
+msgid "Delete"
+msgstr ""
+
+#: resources/ui/project-settings.ui:33 resources/ui/project-settings.ui:43
+msgid "General"
+msgstr ""
+
+#: resources/ui/project-settings.ui:60
+msgid "Project name"
+msgstr ""
+
+#: resources/ui/project-settings.ui:83
+msgid "Master Settings"
+msgstr ""
+
+#: resources/ui/project-settings.ui:93
+msgid "Timeline Format"
+msgstr ""
+
+#: resources/ui/project-settings.ui:110
+msgid "Timeline resolution"
+msgstr ""
+
+#: resources/ui/project-settings.ui:128
+msgid "For"
+msgstr ""
+
+#: resources/ui/project-settings.ui:162
+msgid "processing"
+msgstr ""
+
+#: resources/ui/project-settings.ui:169
+msgid "Timeline frame rate"
+msgstr ""
+
+#: resources/ui/project-settings.ui:183
+msgid "Use drop frame timecode"
+msgstr ""
+
+#: resources/ui/project-settings.ui:198
+msgid "Image Scaling"
+msgstr ""
+
+#: resources/ui/project-settings.ui:208
+msgid "Input Scaling"
+msgstr ""
+
+#: resources/ui/project-settings.ui:225
+msgid "Mismatched resolution files"
+msgstr ""
+
+#: resources/ui/viewer.ui:27
+msgid "Go to Start"
+msgstr ""
+
+#: resources/ui/viewer.ui:36
+msgid "Previous Frame"
+msgstr ""
+
+#: resources/ui/viewer.ui:54
+msgid "Next Frame"
+msgstr ""
+
+#: resources/ui/viewer.ui:63
+msgid "Go to End"
+msgstr ""
+
+#: resources/ui/window.ui:7
+msgid "New Project"
+msgstr ""
+
+#: resources/ui/window.ui:11
+msgid "Open…"
+msgstr ""
+
+#: resources/ui/window.ui:19
+msgid "Save As…"
+msgstr ""
+
+#: resources/ui/window.ui:23
+msgid "Export…"
+msgstr ""
+
+#: resources/ui/window.ui:28
+msgid "Sequence"
+msgstr ""
+
+#: resources/ui/window.ui:30
+msgid "Project Settings…"
+msgstr ""
+
+#: resources/ui/window.ui:42
+msgid "Add Video Track"
+msgstr ""
+
+#: resources/ui/window.ui:46
+msgid "Add Audio Track"
+msgstr ""
+
+#: resources/ui/window.ui:50
+msgid "Snapping"
+msgstr ""
+
+#: resources/ui/window.ui:78
+msgid "Undo"
+msgstr ""
+
+#: resources/ui/window.ui:85
+msgid "Redo"
+msgstr ""
+
+#: resources/ui/window.ui:92
+msgid "Main Menu"
+msgstr ""

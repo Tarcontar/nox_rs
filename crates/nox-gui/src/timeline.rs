@@ -65,6 +65,39 @@ fn rows(timeline: &Timeline) -> Vec<usize> {
     rows
 }
 
+/// A clip's name plus whatever differs from the defaults.
+fn clip_label(child: &Composable) -> String {
+    let mut label = child.name().to_owned();
+    if let Composable::Clip(clip) = child {
+        let item = &clip.item;
+        if item.opacity() < 1.0 {
+            label += &format!(" · {:.0}%", item.opacity() * 100.0);
+        }
+        if item.blend_mode() != nox_project::BlendMode::Normal {
+            label += &format!(" · {}", crate::i18n::blend_mode_name(item.blend_mode()));
+        }
+        if item.gain() != 1.0 {
+            label += &if item.gain() == 0.0 {
+                format!(" · {}", crate::i18n::gettext("muted"))
+            } else {
+                format!(" · {:+.0} dB", 20.0 * item.gain().log10())
+            };
+        }
+    }
+    label
+}
+
+/// The clip context menu (`resources/ui/menus.ui`); its actions work on
+/// the selection.
+pub(crate) fn clip_menu() -> gtk::gio::MenuModel {
+    let builder = gtk::Builder::new();
+    builder.set_translation_domain(Some(crate::i18n::DOMAIN));
+    builder
+        .add_from_resource("/io/github/nox/Nox/ui/menus.ui")
+        .expect("menus.ui is valid");
+    builder.object("clip_menu").expect("clip_menu in menus.ui")
+}
+
 /// An interaction in progress.
 #[derive(Debug, Clone)]
 enum Drag {
@@ -118,6 +151,8 @@ mod imp {
         /// Media being dragged over the timeline: stack index and frame.
         pub drop_hint: Cell<Option<(usize, i64)>>,
         pub pointer_x: Cell<f64>,
+        /// Context menu for clips.
+        pub menu: OnceCell<gtk::PopoverMenu>,
     }
 
     impl Default for TimelineView {
@@ -132,6 +167,7 @@ mod imp {
                 drag: RefCell::new(None),
                 drop_hint: Cell::new(None),
                 pointer_x: Cell::new(0.0),
+                menu: OnceCell::new(),
             }
         }
     }
@@ -275,6 +311,25 @@ mod imp {
                 }
             ));
             obj.add_controller(drop);
+
+            let menu = gtk::PopoverMenu::from_model(Some(&clip_menu()));
+            menu.set_parent(&*obj);
+            menu.set_has_arrow(false);
+            menu.set_halign(gtk::Align::Start);
+            self.menu.set(menu).expect("menu set once");
+            let context = gtk::GestureClick::builder().button(3).build();
+            context.connect_pressed(glib::clone!(
+                #[weak]
+                obj,
+                move |_, _, x, y| obj.imp().context_menu(x, y)
+            ));
+            obj.add_controller(context);
+        }
+
+        fn dispose(&self) {
+            if let Some(menu) = self.menu.get() {
+                menu.unparent();
+            }
         }
     }
 
@@ -438,10 +493,8 @@ mod imp {
                 };
                 let color = match child {
                     Composable::Gap(_) => continue,
-                    Composable::Transition(_) => {
-                        self.draw_transition(snapshot, range, y);
-                        continue;
-                    }
+                    // Drawn below, over both neighbors.
+                    Composable::Transition(_) => continue,
                     Composable::Clip(_) if track.kind == TrackKind::Video => VIDEO_CLIP,
                     Composable::Clip(_) => AUDIO_CLIP,
                     _ => NESTED_CLIP,
@@ -459,10 +512,20 @@ mod imp {
                     snapshot,
                     range,
                     y,
-                    child.name(),
+                    &clip_label(child),
                     with_alpha(color, alpha),
                     selected,
                 );
+            }
+            for (i, (range, child)) in track.child_ranges().enumerate() {
+                if let Composable::Transition(_) = child {
+                    let selected = self.selection.get()
+                        == Some(ItemRef {
+                            track: index,
+                            index: i,
+                        });
+                    self.draw_transition(snapshot, range, y, selected);
+                }
             }
         }
 
@@ -508,7 +571,13 @@ mod imp {
             snapshot.append_border(&rounded, &[width; 4], &[border; 4]);
         }
 
-        fn draw_transition(&self, snapshot: &gtk::Snapshot, range: TimeRange, y: f32) {
+        fn draw_transition(
+            &self,
+            snapshot: &gtk::Snapshot,
+            range: TimeRange,
+            y: f32,
+            selected: bool,
+        ) {
             let rect = self.clip_rect(range, y);
             let rect = graphene::Rect::new(
                 rect.x(),
@@ -517,6 +586,10 @@ mod imp {
                 TRACK_HEIGHT / 2.0 - 3.0,
             );
             snapshot.append_color(&with_alpha(CLIP_TEXT, 0.35), &rect);
+            if selected {
+                let rounded = gsk::RoundedRect::from_rect(rect, 2.0);
+                snapshot.append_border(&rounded, &[2.0; 4], &[SELECTION; 4]);
+            }
         }
 
         /// The moving or trimmed clips at their new position, and the snap
@@ -639,6 +712,24 @@ mod imp {
             let project = self.project();
             let timeline = project.timeline();
             let track = timeline.track(track_index).expect("track");
+            // Transitions are drawn over the lower half of the cut.
+            let in_row = (y - RULER_HEIGHT as f64) % TRACK_HEIGHT as f64;
+            if in_row >= TRACK_HEIGHT as f64 / 2.0 {
+                for (index, (range, child)) in track.child_ranges().enumerate() {
+                    if !matches!(child, Composable::Transition(_)) {
+                        continue;
+                    }
+                    let x0 = self.frame_to_x(self.time_to_frames(range.start));
+                    let x1 = self.frame_to_x(self.time_to_frames(range.end()));
+                    if x >= x0.min(x1 - 4.0) && x <= x1.max(x0 + 4.0) {
+                        let item = ItemRef {
+                            track: track_index,
+                            index,
+                        };
+                        return Hit::Item { item, edge: None };
+                    }
+                }
+            }
             for (index, (range, child)) in track.child_ranges().enumerate() {
                 if child.is_gap() || matches!(child, Composable::Transition(_)) {
                     continue;
@@ -749,6 +840,10 @@ mod imp {
                 Hit::Item { item, edge } => {
                     self.set_selection(Some(item));
                     let timeline = project.timeline();
+                    // Transitions are selected (to delete them), not dragged.
+                    if matches!(timeline.item(item), Ok(Composable::Transition(_))) {
+                        return;
+                    }
                     let Ok(range) = timeline.item_range(item) else {
                         return;
                     };
@@ -895,8 +990,9 @@ mod imp {
                     ..
                 } => {
                     if !offset.is_zero() || target_track != item.track {
-                        let moved =
-                            project.edit("Move Clip", |t| t.move_item(item, target_track, offset));
+                        let moved = project.edit(&crate::i18n::gettext("Move Clip"), |t| {
+                            t.move_item(item, target_track, offset)
+                        });
                         if let Ok(moved) = moved {
                             self.set_selection(Some(moved));
                         }
@@ -914,7 +1010,9 @@ mod imp {
                         Edge::End => range.end(),
                     };
                     if to != original {
-                        let _ = project.edit("Trim Clip", |t| t.trim_item(item, edge, to));
+                        let _ = project.edit(&crate::i18n::gettext("Trim Clip"), |t| {
+                            t.trim_item(item, edge, to)
+                        });
                         let start = match edge {
                             Edge::Start => to,
                             Edge::End => range.start,
@@ -924,6 +1022,16 @@ mod imp {
                 }
             }
             self.obj().queue_draw();
+        }
+
+        fn context_menu(&self, x: f64, y: f64) {
+            let Hit::Item { item, .. } = self.hit(x, y) else {
+                return;
+            };
+            self.set_selection(Some(item));
+            let menu = self.menu.get().expect("menu");
+            menu.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            menu.popup();
         }
 
         pub fn set_selection(&self, item: Option<ItemRef>) {
@@ -956,14 +1064,11 @@ glib::wrapper! {
 }
 
 impl TimelineView {
-    pub fn new(project: Rc<Project>) -> Self {
-        let view: Self = glib::Object::builder()
-            .property("hexpand", true)
-            .property("vexpand", true)
-            .build();
+    /// Shows and edits `project`. Called once, before the widget is shown.
+    pub fn set_project(&self, project: Rc<Project>) {
         project.connect_changed(glib::clone!(
-            #[weak]
-            view,
+            #[weak(rename_to = view)]
+            self,
             move |project| {
                 // Selections refer to positions, which edits may change.
                 let imp = view.imp();
@@ -978,11 +1083,10 @@ impl TimelineView {
                 view.queue_draw();
             }
         ));
-        view.imp()
-            .project
-            .set(project)
-            .unwrap_or_else(|_| unreachable!());
-        view
+        if self.imp().project.set(project).is_err() {
+            panic!("TimelineView::set_project called twice");
+        }
+        self.queue_resize();
     }
 
     pub fn playhead(&self) -> i64 {
@@ -1029,7 +1133,12 @@ impl TimelineView {
     pub fn delete_selection(&self) {
         let Some(item) = self.selection() else { return };
         let project = self.imp().project().clone();
-        if project.edit("Delete Clip", |t| t.remove_item(item)).is_ok() {
+        if project
+            .edit(&crate::i18n::gettext("Delete Clip"), |t| {
+                t.remove_item(item)
+            })
+            .is_ok()
+        {
             self.set_selection(None);
         }
     }

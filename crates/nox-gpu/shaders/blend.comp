@@ -1,0 +1,44 @@
+// Blends one layer (an RGBA8 image converted by ycbcr_to_rgb.comp) onto the
+// accumulated picture. Runs over the layer's rectangle only.
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D accum;
+layout(set = 0, binding = 1) uniform sampler2D layer;
+
+layout(push_constant) uniform Params {
+    ivec2 offset;     // layer position in the output
+    ivec2 size;       // layer size
+    ivec2 out_size;   // output size
+    float opacity;
+    int mode;
+} p;
+
+const int NORMAL = 0;
+const int ADD = 1;
+const int MULTIPLY = 2;
+const int SCREEN = 3;
+
+void main() {
+    ivec2 local = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 pos = local + p.offset;
+    if (any(greaterThanEqual(local, p.size)) || any(lessThan(pos, ivec2(0)))
+            || any(greaterThanEqual(pos, p.out_size))) {
+        return;
+    }
+    vec3 dst = imageLoad(accum, pos).rgb;
+    vec4 src = texelFetch(layer, local, 0);
+    float a = clamp(p.opacity * src.a, 0.0, 1.0);
+    vec3 blended;
+    if (p.mode == ADD) {
+        blended = dst + src.rgb;
+    } else if (p.mode == MULTIPLY) {
+        blended = dst * src.rgb;
+    } else if (p.mode == SCREEN) {
+        blended = 1.0 - (1.0 - dst) * (1.0 - src.rgb);
+    } else {
+        blended = src.rgb;
+    }
+    imageStore(accum, pos, vec4(mix(dst, blended, a), 1.0));
+}

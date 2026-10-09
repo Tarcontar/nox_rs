@@ -9,7 +9,7 @@
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
-use nox_color::Matrix3x4;
+use nox_color::{Matrix3x4, ToneMapping};
 use std::sync::Arc;
 
 use crate::export::{DmabufFrame, ExportPool};
@@ -96,6 +96,8 @@ pub struct CpuFrame<'a> {
     /// Where chroma samples sit relative to center-sited, in luma pixels
     /// (e.g. `(0.5, 0.0)` for left-sited 4:2:0, the MPEG-2/H.264 default).
     pub chroma_offset: [f32; 2],
+    /// HDR to SDR conversion, if the frame is HDR.
+    pub tone: ToneMapping,
     pub planes: Vec<Plane<'a>>,
 }
 
@@ -135,6 +137,7 @@ pub struct VkFrame {
     pub swap_chroma: bool,
     pub matrix: Matrix3x4,
     pub chroma_offset: [f32; 2],
+    pub tone: ToneMapping,
     pub planes: Vec<VkPlane>,
     /// One entry per distinct image used by `planes`.
     pub images: Vec<ImageSync>,
@@ -168,6 +171,7 @@ struct Params {
     swap_chroma: bool,
     matrix: Matrix3x4,
     chroma_offset: [f32; 2],
+    tone: ToneMapping,
 }
 
 impl Input<'_, '_> {
@@ -181,6 +185,7 @@ impl Input<'_, '_> {
                 swap_chroma: f.swap_chroma,
                 matrix: f.matrix,
                 chroma_offset: f.chroma_offset,
+                tone: f.tone,
             },
             Input::Vulkan(f) => Params {
                 width: f.width,
@@ -190,6 +195,7 @@ impl Input<'_, '_> {
                 swap_chroma: f.swap_chroma,
                 matrix: f.matrix,
                 chroma_offset: f.chroma_offset,
+                tone: f.tone,
             },
         }
     }
@@ -204,17 +210,21 @@ struct PushConstants {
     size: [i32; 2],
     layout_mode: i32,
     swap_chroma: i32,
+    hdr_mode: i32,
+    hdr_gamut: i32,
+    source_peak: f32,
+    _pad: f32,
 }
 
-struct GpuImage {
-    image: vk::Image,
-    view: vk::ImageView,
+pub(crate) struct GpuImage {
+    pub image: vk::Image,
+    pub view: vk::ImageView,
     allocation: Option<Allocation>,
 }
 
-struct GpuBuffer {
-    buffer: vk::Buffer,
-    allocation: Option<Allocation>,
+pub(crate) struct GpuBuffer {
+    pub buffer: vk::Buffer,
+    pub allocation: Option<Allocation>,
 }
 
 /// Uploaded planes, keyed by their formats and sizes.
@@ -225,11 +235,31 @@ struct Inputs {
 }
 
 /// Output image plus host-visible copy for readback, keyed by size.
-struct Readback {
-    width: u32,
-    height: u32,
-    image: GpuImage,
-    buffer: GpuBuffer,
+pub(crate) struct Readback {
+    pub width: u32,
+    pub height: u32,
+    pub image: GpuImage,
+    pub buffer: GpuBuffer,
+}
+
+impl Readback {
+    /// The image data after `record_readback` completed.
+    pub fn read(&self) -> Image {
+        let stride = self.width as usize * 4;
+        let data = self
+            .buffer
+            .allocation
+            .as_ref()
+            .and_then(|a| a.mapped_slice())
+            .expect("mapped readback")[..stride * self.height as usize]
+            .to_vec();
+        Image {
+            width: self.width,
+            height: self.height,
+            stride,
+            data,
+        }
+    }
 }
 
 /// Where the shader writes.
@@ -237,6 +267,9 @@ enum Target<'a> {
     Readback(&'a Readback),
     /// An exported image, handed to an external consumer afterwards.
     Export(vk::Image, vk::ImageView),
+    /// An image of ours (in GENERAL layout afterwards) that later work on
+    /// this queue reads.
+    Image(vk::Image, vk::ImageView),
 }
 
 pub struct Converter {
@@ -403,24 +436,28 @@ impl Converter {
         }
         let readback = self.readback.take().expect("readback");
         let result = self.run(&mut input, width, height, Target::Readback(&readback));
-        let image = result.map(|()| {
-            let stride = width as usize * 4;
-            let data = readback
-                .buffer
-                .allocation
-                .as_ref()
-                .and_then(|a| a.mapped_slice())
-                .expect("mapped readback")[..stride * height as usize]
-                .to_vec();
-            Image {
-                width,
-                height,
-                stride,
-                data,
-            }
-        });
+        let image = result.map(|()| readback.read());
         self.readback = Some(readback);
         image
+    }
+
+    /// Converts `frame` into `image` (RGBA8, `width` × `height`, storage
+    /// usage), leaving it in GENERAL layout for later work on this queue.
+    pub(crate) fn convert_into<'f, 'a: 'f>(
+        &mut self,
+        input: impl Into<Input<'f, 'a>>,
+        image: &GpuImage,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let mut input = input.into();
+        validate(&input, width, height)?;
+        self.run(
+            &mut input,
+            width,
+            height,
+            Target::Image(image.image, image.view),
+        )
     }
 
     /// Like `convert`, but renders into an exported image and returns it as
@@ -560,7 +597,7 @@ impl Converter {
     ) -> Result<()> {
         let (out_image, out_view) = match target {
             Target::Readback(r) => (r.image.image, r.image.view),
-            Target::Export(image, view) => (*image, *view),
+            Target::Export(image, view) | Target::Image(image, view) => (*image, *view),
         };
         self.write_descriptors(plane_views, out_view);
 
@@ -687,6 +724,10 @@ impl Converter {
                 size: [width as i32, height as i32],
                 layout_mode: params.layout as i32,
                 swap_chroma: params.swap_chroma.into(),
+                hdr_mode: params.tone.transfer as i32,
+                hdr_gamut: params.tone.gamut as i32,
+                source_peak: params.tone.source_peak,
+                _pad: 0.0,
             };
             device.cmd_push_constants(
                 cmd,
@@ -704,6 +745,8 @@ impl Converter {
 
             match target {
                 Target::Readback(readback) => record_readback(device, cmd, readback, width, height),
+                // Readers on this queue add their own barrier.
+                Target::Image(..) => {}
                 Target::Export(image, _) => {
                     // Release to the external consumer.
                     let release =
@@ -755,7 +798,11 @@ impl Converter {
                 for sync in &mut frame.images {
                     let (_, dst_family) = queue_transfer(sync.queue_family, own_family);
                     sync.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-                    sync.access = vk::AccessFlags::SHADER_READ;
+                    // Reads need no availability operation; the semaphore
+                    // orders the next user. (SHADER_READ here would end up
+                    // as the source access of FFmpeg's next barrier, which
+                    // is invalid on its transfer queue.)
+                    sync.access = vk::AccessFlags::NONE;
                     sync.queue_family = dst_family;
                     sync.value += 1;
                 }
@@ -791,7 +838,7 @@ impl Converter {
         })
     }
 
-    fn create_readback(&self, width: u32, height: u32) -> Result<Readback> {
+    pub(crate) fn create_readback(&self, width: u32, height: u32) -> Result<Readback> {
         Ok(Readback {
             width,
             height,
@@ -809,7 +856,7 @@ impl Converter {
         })
     }
 
-    fn create_image(
+    pub(crate) fn create_image(
         &self,
         format: vk::Format,
         width: u32,
@@ -860,7 +907,7 @@ impl Converter {
         }
     }
 
-    fn create_buffer(
+    pub(crate) fn create_buffer(
         &self,
         size: u64,
         usage: vk::BufferUsageFlags,
@@ -921,7 +968,7 @@ impl Converter {
         unsafe { self.gpu.device.update_descriptor_sets(&writes, &[]) };
     }
 
-    fn destroy_image(&self, mut image: GpuImage) {
+    pub(crate) fn destroy_image(&self, mut image: GpuImage) {
         // SAFETY: the GPU is idle with respect to this image.
         unsafe {
             self.gpu.device.destroy_image_view(image.view, None);
@@ -932,7 +979,7 @@ impl Converter {
         }
     }
 
-    fn destroy_buffer(&self, mut buffer: GpuBuffer) {
+    pub(crate) fn destroy_buffer(&self, mut buffer: GpuBuffer) {
         // SAFETY: the GPU is idle with respect to this buffer.
         unsafe { self.gpu.device.destroy_buffer(buffer.buffer, None) };
         if let Some(a) = buffer.allocation.take() {
@@ -986,7 +1033,7 @@ impl Drop for Converter {
 /// # Safety
 /// `cmd` must be recording; the output must be in GENERAL layout after the
 /// compute dispatch.
-unsafe fn record_readback(
+pub(crate) unsafe fn record_readback(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     readback: &Readback,
@@ -1073,7 +1120,7 @@ pub(crate) fn color_range() -> vk::ImageSubresourceRange {
         .layer_count(1)
 }
 
-fn color_layers() -> vk::ImageSubresourceLayers {
+pub(crate) fn color_layers() -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .layer_count(1)
@@ -1081,7 +1128,7 @@ fn color_layers() -> vk::ImageSubresourceLayers {
 
 /// Queue family indices for acquiring an image last used on `from`.
 /// Images FFmpeg shares across queue families report IGNORED.
-fn queue_transfer(from: u32, own: u32) -> (u32, u32) {
+pub(crate) fn queue_transfer(from: u32, own: u32) -> (u32, u32) {
     if from == vk::QUEUE_FAMILY_IGNORED || from == own {
         (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED)
     } else {
@@ -1089,7 +1136,7 @@ fn queue_transfer(from: u32, own: u32) -> (u32, u32) {
     }
 }
 
-fn image_barrier(
+pub(crate) fn image_barrier(
     image: vk::Image,
     old: vk::ImageLayout,
     new: vk::ImageLayout,

@@ -1,69 +1,90 @@
-use gtk::{gdk, gio, glib, prelude::*};
-use nox_engine::Preview;
-use nox_project::{EditError, Rational, Time, TrackKind, supports_drop_frame};
-use std::cell::{Cell, RefCell};
+//! The main window (`resources/ui/window.ui`): media pool and viewer on
+//! top, the timeline below. The template holds the layout; `Ui` holds the
+//! project and implements the window's actions.
+
+use gtk::{CompositeTemplate, gdk, gio, glib, prelude::*, subclass::prelude::*};
+use nox_project::{BlendMode, Edge, EditError, Rational, Time, TrackKind, supports_drop_frame};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::i18n::{fill, gettext};
 use crate::media_object::MediaObject;
+use crate::playback::Playback;
 use crate::project::Project;
 use crate::{media_pool::MediaPool, timeline::TimelineView, viewer::Viewer};
 
-/// Sequence frame rates offered in the menu.
-const FRAME_RATES: &[(&str, i64, i64)] = &[
-    ("23.976", 24000, 1001),
-    ("24", 24, 1),
-    ("25", 25, 1),
-    ("29.97", 30000, 1001),
-    ("30", 30, 1),
-    ("50", 50, 1),
-    ("59.94", 60000, 1001),
-    ("60", 60, 1),
-];
+mod imp {
+    use super::*;
+
+    #[derive(Default, CompositeTemplate)]
+    #[template(resource = "/io/github/nox/Nox/ui/window.ui")]
+    pub struct Window {
+        #[template_child]
+        pub media_pool: TemplateChild<MediaPool>,
+        #[template_child]
+        pub viewer: TemplateChild<Viewer>,
+        #[template_child]
+        pub timeline: TemplateChild<TimelineView>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Window {
+        const NAME: &'static str = "NoxWindow";
+        type Type = super::Window;
+        type ParentType = gtk::ApplicationWindow;
+
+        fn class_init(klass: &mut Self::Class) {
+            MediaPool::ensure_type();
+            Viewer::ensure_type();
+            TimelineView::ensure_type();
+            klass.bind_template();
+        }
+
+        fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
+            obj.init_template();
+        }
+    }
+
+    impl ObjectImpl for Window {}
+    impl WidgetImpl for Window {}
+    impl WindowImpl for Window {}
+    impl ApplicationWindowImpl for Window {}
+}
+
+glib::wrapper! {
+    pub struct Window(ObjectSubclass<imp::Window>)
+        @extends gtk::ApplicationWindow, gtk::Window, gtk::Widget,
+        @implements gio::ActionGroup, gio::ActionMap, gtk::Accessible, gtk::Buildable,
+            gtk::ConstraintTarget, gtk::Native, gtk::Root, gtk::ShortcutManager;
+}
+
+impl Window {
+    /// The pool, viewer and timeline of the template.
+    #[cfg(test)]
+    pub(crate) fn imp_children(&self) -> (MediaPool, Viewer, TimelineView) {
+        let imp = self.imp();
+        (imp.media_pool.get(), imp.viewer.get(), imp.timeline.get())
+    }
+}
 
 /// Builds the main window. `.otio` files open as the project, other files
 /// are imported into the media pool.
-pub fn build(app: &gtk::Application, files: &[gio::File]) -> gtk::ApplicationWindow {
+pub fn build(app: &gtk::Application, files: &[gio::File]) -> Window {
+    let window: Window = glib::Object::builder().property("application", app).build();
     let project = Project::new();
-    let pool = Rc::new(MediaPool::new());
-    let viewer = Rc::new(Viewer::new());
-    let timeline = TimelineView::new(project.clone());
-    connect_preview(&project, &viewer, &timeline);
-
-    let top = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&pool.widget)
-        .end_child(&viewer.widget)
-        .resize_start_child(false)
-        .shrink_start_child(false)
-        .position(340)
-        .wide_handle(true)
-        .build();
-
-    let main = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .start_child(&top)
-        .end_child(&timeline)
-        .shrink_end_child(false)
-        .position(500)
-        // A thin handle's invisible grab area covers the top of the ruler.
-        .wide_handle(true)
-        .build();
-
-    let window = gtk::ApplicationWindow::builder()
-        .application(app)
-        .default_width(1400)
-        .default_height(860)
-        .titlebar(&header_bar())
-        .child(&main)
-        .build();
+    let pool = window.imp().media_pool.get();
+    let viewer = window.imp().viewer.get();
+    let timeline = window.imp().timeline.get();
+    timeline.set_project(project.clone());
+    let playback = Playback::new(&project, &viewer, &timeline);
 
     let ui = Rc::new(Ui {
-        window: window.clone(),
+        window: window.clone().upcast(),
         project: project.clone(),
         pool: pool.clone(),
         timeline: timeline.clone(),
+        playback,
     });
     // The window owns the controller; handlers only hold weak references.
     // GTK drops this handler on destroy, which breaks the window ↔ ui cycle.
@@ -74,8 +95,9 @@ pub fn build(app: &gtk::Application, files: &[gio::File]) -> gtk::ApplicationWin
             let _ = &ui;
         }
     ));
-    add_transport_actions(&window, &timeline, &project);
+    add_transport_actions(window.upcast_ref(), &timeline, &project);
     add_project_actions(&ui);
+    add_clip_actions(&ui);
     pool.connect_activate(glib::clone!(
         #[weak]
         ui,
@@ -119,74 +141,12 @@ fn is_project_file(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("otio"))
 }
 
-fn header_bar() -> gtk::HeaderBar {
-    let header = gtk::HeaderBar::new();
-    let button = |icon: &str, tooltip: &str, action: &str| {
-        gtk::Button::builder()
-            .icon_name(icon)
-            .tooltip_text(tooltip)
-            .action_name(action)
-            .build()
-    };
-    header.pack_start(&button(
-        "document-open-symbolic",
-        "Open… (Ctrl+O)",
-        "win.open",
-    ));
-    header.pack_start(&button(
-        "document-save-symbolic",
-        "Save (Ctrl+S)",
-        "win.save",
-    ));
-    header.pack_start(&button("edit-undo-symbolic", "Undo (Ctrl+Z)", "win.undo"));
-    header.pack_start(&button(
-        "edit-redo-symbolic",
-        "Redo (Ctrl+Shift+Z)",
-        "win.redo",
-    ));
-
-    let file_menu = gio::Menu::new();
-    file_menu.append(Some("New Project"), Some("win.new"));
-    file_menu.append(Some("Open…"), Some("win.open"));
-    file_menu.append(Some("Save"), Some("win.save"));
-    file_menu.append(Some("Save As…"), Some("win.save-as"));
-
-    let rates = gio::Menu::new();
-    for (label, num, den) in FRAME_RATES {
-        let item = gio::MenuItem::new(Some(&format!("{label} fps")), None);
-        item.set_action_and_target_value(
-            Some("win.frame-rate"),
-            Some(&format!("{num}/{den}").to_variant()),
-        );
-        rates.append_item(&item);
-    }
-    let sequence = gio::Menu::new();
-    sequence.append_submenu(Some("Frame Rate"), &rates);
-    sequence.append(Some("Drop-Frame Timecode"), Some("win.drop-frame"));
-    sequence.append(Some("Split at Playhead"), Some("win.split"));
-    sequence.append(Some("Add Video Track"), Some("win.add-video-track"));
-    sequence.append(Some("Add Audio Track"), Some("win.add-audio-track"));
-    sequence.append(Some("Snapping (N)"), Some("win.snapping"));
-
-    let menu = gio::Menu::new();
-    menu.append_section(None, &file_menu);
-    menu.append_section(Some("Sequence"), &sequence);
-    header.pack_end(
-        &gtk::MenuButton::builder()
-            .icon_name("open-menu-symbolic")
-            .tooltip_text("Main Menu")
-            .menu_model(&menu)
-            .primary(true)
-            .build(),
-    );
-    header
-}
-
 struct Ui {
     window: gtk::ApplicationWindow,
     project: Rc<Project>,
-    pool: Rc<MediaPool>,
+    pool: MediaPool,
     timeline: TimelineView,
+    playback: Rc<Playback>,
 }
 
 impl Ui {
@@ -212,6 +172,9 @@ impl Ui {
         let drop_frame = self.action("drop-frame");
         drop_frame.set_enabled(supports_drop_frame(fps));
         drop_frame.set_state(&project.timeline().settings.drop_frame.to_variant());
+        let settings = project.timeline().settings.clone();
+        self.action("resolution")
+            .set_state(&format!("{}x{}", settings.width, settings.height).to_variant());
 
         // Keep the playhead inside the sequence (plus one frame to see the end).
         let end = project.duration_frames();
@@ -232,7 +195,10 @@ impl Ui {
 
     fn open(&self, path: &Path) {
         if let Err(err) = self.project.open(path) {
-            self.show_error(&format!("Cannot open {}", path.display()), &err.to_string());
+            self.show_error(
+                &fill(&gettext("Cannot open {path}"), &[("path", &path.display())]),
+                &err.to_string(),
+            );
             return;
         }
         // Import the media the timeline uses, so it can be added again.
@@ -277,7 +243,10 @@ impl Ui {
         match self.project.save_as(path) {
             Ok(()) => true,
             Err(err) => {
-                self.show_error(&format!("Cannot save {}", path.display()), &err.to_string());
+                self.show_error(
+                    &fill(&gettext("Cannot save {path}"), &[("path", &path.display())]),
+                    &err.to_string(),
+                );
                 false
             }
         }
@@ -286,7 +255,7 @@ impl Ui {
     fn save_as(self: &Rc<Self>, then: Option<Box<dyn FnOnce()>>) {
         let name = format!("{}.otio", self.project.timeline().name);
         let dialog = gtk::FileDialog::builder()
-            .title("Save Project")
+            .title(gettext("Save Project"))
             .modal(true)
             .initial_name(name)
             .filters(&otio_filters())
@@ -309,7 +278,7 @@ impl Ui {
 
     fn choose_and_open(self: &Rc<Self>) {
         let dialog = gtk::FileDialog::builder()
-            .title("Open Project")
+            .title(gettext("Open Project"))
             .modal(true)
             .filters(&otio_filters())
             .build();
@@ -328,9 +297,9 @@ impl Ui {
             return;
         }
         let dialog = gtk::AlertDialog::builder()
-            .message("Save changes to the project?")
-            .detail("Unsaved changes will be lost otherwise.")
-            .buttons(["Cancel", "Discard", "Save"])
+            .message(gettext("Save changes to the project?"))
+            .detail(gettext("Unsaved changes will be lost otherwise."))
+            .buttons([gettext("Cancel"), gettext("Discard"), gettext("Save")])
             .cancel_button(0)
             .default_button(2)
             .modal(true)
@@ -348,9 +317,53 @@ impl Ui {
     }
 
     fn add_track(&self, kind: TrackKind) {
-        let _ = self.project.edit("Add Track", |t| {
+        let _ = self.project.edit(&gettext("Add Track"), |t| {
             t.add_track(kind);
             Ok::<_, EditError>(())
+        });
+    }
+
+    /// Applies `change` to the selected clip as one undoable edit.
+    fn edit_selected_clip(&self, label: &str, change: impl FnOnce(&mut nox_project::Item)) {
+        let Some(item) = self.timeline.selection() else {
+            return;
+        };
+        let _ = self.project.edit(label, |t| {
+            let track = t
+                .track_mut(item.track)
+                .ok_or(EditError::NoTrack(item.track))?;
+            let clip = track
+                .children
+                .get_mut(item.index)
+                .and_then(nox_project::Composable::as_clip_mut)
+                .ok_or(EditError::NotTrimmable)?;
+            change(&mut clip.item);
+            Ok::<_, EditError>(())
+        });
+    }
+
+    /// A one-second dissolve at the selected clip's edge nearest the
+    /// playhead.
+    fn add_dissolve(&self) {
+        let Some(item) = self.timeline.selection() else {
+            tracing::info!("select a clip to add a dissolve to");
+            return;
+        };
+        let fps = self.project.frame_rate();
+        let playhead = Time::from_frames(self.timeline.playhead(), fps);
+        let Ok(range) = self.project.timeline().item_range(item) else {
+            return;
+        };
+        let edge = if (playhead - range.start).as_seconds().abs()
+            <= (range.end() - playhead).as_seconds().abs()
+        {
+            Edge::Start
+        } else {
+            Edge::End
+        };
+        let one_second = Time::from_frames(nox_project::nominal_fps(fps) as i64, fps);
+        let _ = self.project.edit(&gettext("Add Dissolve"), |t| {
+            t.add_dissolve(item, edge, one_second)
         });
     }
 
@@ -367,7 +380,7 @@ impl Ui {
 
 fn otio_filters() -> gio::ListStore {
     let otio = gtk::FileFilter::new();
-    otio.set_name(Some("OpenTimelineIO"));
+    otio.set_name(Some("OpenTimelineIO")); // no-i18n: a format name
     otio.add_suffix("otio");
     let filters = gio::ListStore::new::<gtk::FileFilter>();
     filters.append(&otio);
@@ -426,14 +439,25 @@ fn add_project_actions(ui: &Rc<Ui>) {
         simple("save", |ui| ui.save(None)),
         simple("save-as", |ui| ui.save_as(None)),
         simple("undo", |ui| ui.project.undo()),
+        simple("project-settings", |ui| {
+            crate::settings_dialog::show(ui.window.upcast_ref(), &ui.project)
+        }),
+        simple("export", |ui| {
+            crate::export_dialog::show(ui.window.upcast_ref(), &ui.project)
+        }),
+        simple("play-pause", |ui| ui.playback.toggle()),
+        simple("play", |ui| ui.playback.play()),
+        simple("pause", |ui| ui.playback.pause()),
         simple("redo", |ui| ui.project.redo()),
         simple("delete-clip", |ui| ui.timeline.delete_selection()),
         simple("split", |ui| {
             let time = Time::from_frames(ui.timeline.playhead(), ui.project.frame_rate());
-            let _ = ui.project.edit("Split", |t| match t.split_at(time) {
-                0 => Err("no clip at the playhead"),
-                _ => Ok(()),
-            });
+            let _ = ui
+                .project
+                .edit(&gettext("Split Clips"), |t| match t.split_at(time) {
+                    0 => Err("no clip at the playhead"),
+                    _ => Ok(()),
+                });
         }),
         simple("add-video-track", |ui| ui.add_track(TrackKind::Video)),
         simple("add-audio-track", |ui| ui.add_track(TrackKind::Audio)),
@@ -450,6 +474,24 @@ fn add_project_actions(ui: &Rc<Ui>) {
         ui.window.add_action(&action);
     }
     if std::env::var("NOX_TEST_ACTIONS").is_ok_and(|v| v == "1") {
+        // The topmost dialog over the window (project settings, export).
+        ui.window
+            .add_action(&with_path("screenshot-dialog", |ui, path| {
+                let dialog = gtk::Window::list_toplevels()
+                    .into_iter()
+                    .filter_map(|w| w.downcast::<gtk::Window>().ok())
+                    .find(|w| {
+                        w.is_visible() && w.transient_for().as_ref() == Some(ui.window.upcast_ref())
+                    });
+                match dialog.and_then(|d| d.child()) {
+                    Some(content) => {
+                        if let Err(err) = screenshot(&content, path) {
+                            tracing::warn!("screenshot failed: {err}");
+                        }
+                    }
+                    None => tracing::warn!("no dialog open"),
+                }
+            }));
         ui.window.add_action(&with_path("screenshot", |ui, path| {
             // A paintable of the toplevel itself renders nothing.
             let content = ui.window.child().expect("window content");
@@ -458,6 +500,29 @@ fn add_project_actions(ui: &Rc<Ui>) {
             }
         }));
     }
+
+    let resolution = gio::SimpleAction::new_stateful(
+        "resolution",
+        Some(glib::VariantTy::STRING),
+        &"1920x1080".to_variant(),
+    );
+    resolution.connect_change_state(glib::clone!(
+        #[weak]
+        ui,
+        move |_, value| {
+            let Some(size) = value
+                .and_then(|v| v.get::<String>())
+                .and_then(|v| parse_size(&v))
+            else {
+                return;
+            };
+            let _ = ui.project.edit(&gettext("Change Resolution"), |t| {
+                (t.settings.width, t.settings.height) = size;
+                Ok::<_, EditError>(())
+            });
+        }
+    ));
+    ui.window.add_action(&resolution);
 
     let frame_rate = gio::SimpleAction::new_stateful(
         "frame-rate",
@@ -475,7 +540,7 @@ fn add_project_actions(ui: &Rc<Ui>) {
                 return;
             };
             if rate != ui.project.frame_rate() {
-                let _ = ui.project.edit("Change Frame Rate", |t| {
+                let _ = ui.project.edit(&gettext("Change Frame Rate"), |t| {
                     t.set_frame_rate(rate);
                     Ok::<_, EditError>(())
                 });
@@ -500,7 +565,7 @@ fn add_project_actions(ui: &Rc<Ui>) {
                 return;
             };
             // The state itself follows the project in `Ui::update`.
-            let _ = ui.project.edit("Change Timecode", |t| {
+            let _ = ui.project.edit(&gettext("Change Timecode"), |t| {
                 t.settings.drop_frame = enabled;
                 Ok::<_, EditError>(())
             });
@@ -542,6 +607,56 @@ fn screenshot(widget: &gtk::Widget, path: &Path) -> Result<(), glib::BoolError> 
     renderer.render_texture(&node, None).save_to_png(path)?;
     tracing::info!("screenshot saved to {}", path.display());
     Ok(())
+}
+
+fn parse_size(text: &str) -> Option<(u32, u32)> {
+    let (width, height) = text.split_once('x')?;
+    let (width, height) = (width.parse().ok()?, height.parse().ok()?);
+    (width >= 16 && height >= 16 && width <= 8192 && height <= 8192).then_some((width, height))
+}
+
+/// Actions on the selected clip, for its context menu (and D-Bus):
+/// `clip-opacity(d)`, `clip-blend(s)`, `clip-gain(d)` and
+/// `add-dissolve`, which adds a one-second dissolve at the selected
+/// clip's edge nearest the playhead.
+fn add_clip_actions(ui: &Rc<Ui>) {
+    let with_param = |name: &str, ty: &glib::VariantTy, f: fn(&Ui, &glib::Variant)| {
+        let action = gio::SimpleAction::new(name, Some(ty));
+        action.connect_activate(glib::clone!(
+            #[weak]
+            ui,
+            move |_, parameter| {
+                if let Some(parameter) = parameter {
+                    f(&ui, parameter);
+                }
+            }
+        ));
+        ui.window.add_action(&action);
+    };
+    with_param("clip-opacity", glib::VariantTy::DOUBLE, |ui, value| {
+        if let Some(opacity) = value.get::<f64>() {
+            ui.edit_selected_clip(&gettext("Change Opacity"), |item| item.set_opacity(opacity));
+        }
+    });
+    with_param("clip-blend", glib::VariantTy::STRING, |ui, value| {
+        if let Some(mode) = value.get::<String>().and_then(|m| BlendMode::parse(&m)) {
+            ui.edit_selected_clip(&gettext("Change Blend Mode"), |item| {
+                item.set_blend_mode(mode)
+            });
+        }
+    });
+    with_param("clip-gain", glib::VariantTy::DOUBLE, |ui, value| {
+        if let Some(gain) = value.get::<f64>() {
+            ui.edit_selected_clip(&gettext("Change Gain"), |item| item.set_gain(gain));
+        }
+    });
+    let dissolve = gio::SimpleAction::new("add-dissolve", None);
+    dissolve.connect_activate(glib::clone!(
+        #[weak]
+        ui,
+        move |_, _| ui.add_dissolve()
+    ));
+    ui.window.add_action(&dissolve);
 }
 
 fn parse_rate(text: &str) -> Option<Rational> {
@@ -607,130 +722,4 @@ fn add_transport_actions(
         go_to_start,
         go_to_end,
     ]);
-}
-
-/// DRM modifiers GTK can import for RGBA8 frames, i.e. whether the engine
-/// may hand over frames as DMA-BUF. `NOX_PRESENT=readback` disables it.
-fn importable_modifiers() -> Vec<u64> {
-    if std::env::var("NOX_PRESENT").is_ok_and(|v| v == "readback") {
-        tracing::info!("NOX_PRESENT=readback: not using DMA-BUF");
-        return Vec::new();
-    }
-    let Some(display) = gdk::Display::default() else {
-        return Vec::new();
-    };
-    let formats = display.dmabuf_formats();
-    (0..formats.n_formats())
-        .map(|i| formats.format(i))
-        .filter(|&(fourcc, _)| fourcc == nox_engine::FOURCC_ABGR8888)
-        .map(|(_, modifier)| modifier)
-        .collect()
-}
-
-/// The viewer shows the topmost video clip at the playhead. Compositing of
-/// all layers comes with the playback engine (M4).
-fn connect_preview(project: &Rc<Project>, viewer: &Rc<Viewer>, timeline: &TimelineView) {
-    let (sender, receiver) = async_channel::unbounded();
-    let preview = Rc::new(Preview::new(importable_modifiers(), move |frame| {
-        let _ = sender.send_blocking(frame);
-    }));
-    // The latest request (0: none, the viewer is cleared).
-    let latest = Rc::new(Cell::new(0u64));
-    // What the latest request was for, to skip repeating it.
-    let requested: Rc<RefCell<Option<(PathBuf, Time)>>> = Rc::default();
-    let offline: Rc<RefCell<HashSet<PathBuf>>> = Rc::default();
-
-    let request = Rc::new(glib::clone!(
-        #[strong]
-        preview,
-        #[strong]
-        project,
-        #[strong]
-        viewer,
-        #[strong]
-        latest,
-        #[strong]
-        requested,
-        #[weak]
-        timeline,
-        move || {
-            let frame = timeline.playhead();
-            viewer.timecode.set_text(&project.timecode(frame));
-            let source = {
-                let sequence = project.timeline();
-                let time = Time::from_frames(frame, sequence.frame_rate());
-                sequence.video_at(time).and_then(|resolved| {
-                    let path = resolved.clip.media_reference()?.path()?;
-                    // Source times count from the available range's start
-                    // (e.g. a start timecode); the decoder from zero.
-                    let start = resolved
-                        .clip
-                        .available_range()
-                        .map_or(Time::zero(time.timebase), |r| r.start);
-                    Some((path, resolved.source_time - start))
-                })
-            };
-            match source {
-                Some((path, _)) if !path.exists() => {
-                    if offline.borrow_mut().insert(path.clone()) {
-                        tracing::warn!("media offline: {}", path.display());
-                    }
-                    latest.set(0);
-                    requested.replace(None);
-                    viewer.clear();
-                }
-                Some(source) => {
-                    if requested.borrow().as_ref() != Some(&source) {
-                        latest.set(preview.request(&source.0, source.1));
-                        requested.replace(Some(source));
-                    }
-                }
-                None => {
-                    latest.set(0);
-                    requested.replace(None);
-                    viewer.clear();
-                }
-            }
-        }
-    ));
-
-    glib::spawn_future_local(glib::clone!(
-        #[strong]
-        viewer,
-        #[strong]
-        preview,
-        #[strong]
-        request,
-        async move {
-            while let Ok(result) = receiver.recv().await {
-                match result {
-                    // Drop frames of superseded requests.
-                    Ok(frame) if frame.request == latest.get() => {
-                        if let Err(err) = viewer.show_frame(frame.image) {
-                            tracing::warn!(
-                                "GTK cannot import DMA-BUF frames ({err}), falling back to readback"
-                            );
-                            preview.disable_dmabuf();
-                            requested.replace(None);
-                            request();
-                        }
-                    }
-                    Ok(_) => {}
-                    Err((id, err)) => {
-                        tracing::warn!("preview: {err}");
-                        if id == latest.get() {
-                            viewer.clear();
-                        }
-                    }
-                }
-            }
-        }
-    ));
-
-    timeline.connect_playhead_changed(glib::clone!(
-        #[strong]
-        request,
-        move |_, _| request()
-    ));
-    project.connect_changed(move |_| request());
 }

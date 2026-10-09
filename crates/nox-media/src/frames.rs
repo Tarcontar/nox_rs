@@ -2,7 +2,7 @@
 //! GPU converter, or RGBA via swscale on the CPU (fallback and reference).
 
 use ffmpeg::{ffi, format, frame, software::scaling};
-use nox_color::{Cicp, Matrix3x4, Quantization, ycbcr};
+use nox_color::{Cicp, Matrix3x4, Quantization, ToneMapping, ycbcr};
 use nox_gpu::{CpuFrame, Image, Layout, Plane, PlaneFormat};
 
 use crate::Result;
@@ -29,6 +29,57 @@ pub fn color_tags(frame: &frame::Video) -> Cicp {
         matrix: ffi::AVColorSpace::from(frame.color_space()) as u8,
         full_range: frame.color_range() == ffmpeg::color::Range::JPEG,
     }
+}
+
+/// `AVContentLightMetadata` (libavutil/mastering_display_metadata.h,
+/// which ffmpeg-sys doesn't bind).
+#[repr(C)]
+struct ContentLightMetadata {
+    max_cll: std::ffi::c_uint,
+    #[allow(dead_code)]
+    max_fall: std::ffi::c_uint,
+}
+
+/// `AVMasteringDisplayMetadata`, as above.
+#[repr(C)]
+struct MasteringDisplayMetadata {
+    display_primaries: [[ffi::AVRational; 2]; 3],
+    white_point: [ffi::AVRational; 2],
+    min_luminance: ffi::AVRational,
+    max_luminance: ffi::AVRational,
+    has_primaries: std::ffi::c_int,
+    has_luminance: std::ffi::c_int,
+}
+
+/// How to show `frame` on an SDR display: tone mapping for HDR (PQ, HLG),
+/// with the content peak from the frame's HDR metadata (MaxCLL, else the
+/// mastering display's peak).
+pub fn tone_mapping(frame: &frame::Video) -> ToneMapping {
+    let tags = color_tags(frame);
+    if !matches!(tags.transfer, 16 | 18) {
+        return ToneMapping::default();
+    }
+    // SAFETY: side data of a valid frame; types per FFmpeg's documentation.
+    let peak = unsafe {
+        let light = ffi::av_frame_get_side_data(
+            frame.as_ptr(),
+            ffi::AVFrameSideDataType::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+        );
+        let mastering = ffi::av_frame_get_side_data(
+            frame.as_ptr(),
+            ffi::AVFrameSideDataType::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+        );
+        let max_cll = (!light.is_null())
+            .then(|| (*(*light).data.cast::<ContentLightMetadata>()).max_cll)
+            .filter(|&cll| cll > 0)
+            .map(|cll| cll as f32);
+        let mastering_peak = (!mastering.is_null())
+            .then(|| &*(*mastering).data.cast::<MasteringDisplayMetadata>())
+            .filter(|m| m.has_luminance != 0 && m.max_luminance.den > 0)
+            .map(|m| m.max_luminance.num as f32 / m.max_luminance.den as f32);
+        max_cll.or(mastering_peak)
+    };
+    ToneMapping::for_cicp(tags, peak)
 }
 
 /// Calls `f` with a GPU-uploadable view of `frame`. Hardware frames are
@@ -70,6 +121,7 @@ pub fn with_cpu_frame<R>(frame: &frame::Video, f: impl FnOnce(&CpuFrame<'_>) -> 
         swap_chroma: false,
         matrix: ycbcr::rgb_to_rgb(quantization),
         chroma_offset: [0.0, 0.0],
+        tone: tone_mapping(frame),
         planes: vec![plane(
             &rgba,
             0,
@@ -97,6 +149,17 @@ pub fn rgba_cpu(frame: &frame::Video, width: u32, height: u32) -> Result<Image> 
     let mut data = Vec::with_capacity(stride * height as usize);
     for row in rgba.data(0).chunks(rgba.stride(0)).take(height as usize) {
         data.extend_from_slice(&row[..stride]);
+    }
+    // swscale leaves HDR signals as they are; map them for SDR like the GPU.
+    let tone = tone_mapping(frame);
+    if tone.is_hdr() {
+        for pixel in data.chunks_exact_mut(4) {
+            let rgb = [0, 1, 2].map(|c| f32::from(pixel[c]) / 255.0);
+            let mapped = tone.apply(rgb);
+            for c in 0..3 {
+                pixel[c] = (mapped[c] * 255.0).round() as u8;
+            }
+        }
     }
     Ok(Image {
         width,
@@ -133,6 +196,7 @@ pub(crate) struct Classified {
     pub matrix: Matrix3x4,
     /// In luma pixels; see `CpuFrame::chroma_offset`.
     pub chroma_offset: [f32; 2],
+    pub tone: ToneMapping,
     /// Texel format and log2 subsampling (w, h) of FFmpeg planes 0, 1, ...
     pub planes: Vec<(PlaneFormat, u8, u8)>,
 }
@@ -231,6 +295,7 @@ pub(crate) fn classify(format: format::Pixel, frame: &frame::Video) -> Option<Cl
         swap_chroma,
         matrix,
         chroma_offset,
+        tone: tone_mapping(frame),
         planes,
     })
 }
@@ -258,6 +323,7 @@ fn describe(frame: &frame::Video) -> Option<CpuFrame<'_>> {
         swap_chroma: classified.swap_chroma,
         matrix: classified.matrix,
         chroma_offset: classified.chroma_offset,
+        tone: classified.tone,
         planes,
     })
 }

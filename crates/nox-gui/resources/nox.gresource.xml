@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/nox/Nox">
+    <file>style.css</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/window.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/viewer.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/media-pool.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/media-cell.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/project-settings.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/export-dialog.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/menus.ui</file>
+  </gresource>
+</gresources>

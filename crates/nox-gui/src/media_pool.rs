@@ -1,34 +1,121 @@
-//! Media pool: every file imported into the project, as a thumbnail grid.
-//! Files can be dropped onto it or picked with the import dialog; Delete
-//! removes the selection.
+//! Media pool (`resources/ui/media-pool.ui`): every file imported into the
+//! project, as a thumbnail grid. Files can be dropped onto it or picked
+//! with the import dialog; Delete removes the selection.
 
-use gtk::{gdk, gio, glib, prelude::*};
+use gtk::{CompositeTemplate, gdk, gio, glib, prelude::*, subclass::prelude::*};
 
+use crate::i18n::gettext;
 use crate::media_cell::MediaCell;
 use crate::media_object::MediaObject;
 
-pub struct MediaPool {
-    pub widget: gtk::Box,
-    store: gio::ListStore,
-    grid: gtk::GridView,
+mod imp {
+    use super::*;
+
+    #[derive(CompositeTemplate)]
+    #[template(resource = "/io/github/nox/Nox/ui/media-pool.ui")]
+    pub struct MediaPool {
+        #[template_child]
+        pub stack: TemplateChild<gtk::Stack>,
+        #[template_child]
+        pub grid: TemplateChild<gtk::GridView>,
+        pub store: gio::ListStore,
+        pub selection: gtk::MultiSelection,
+    }
+
+    impl Default for MediaPool {
+        fn default() -> Self {
+            let store = gio::ListStore::new::<MediaObject>();
+            Self {
+                stack: TemplateChild::default(),
+                grid: TemplateChild::default(),
+                selection: gtk::MultiSelection::new(Some(store.clone())),
+                store,
+            }
+        }
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for MediaPool {
+        const NAME: &'static str = "NoxMediaPool";
+        type Type = super::MediaPool;
+        type ParentType = gtk::Box;
+
+        fn class_init(klass: &mut Self::Class) {
+            klass.bind_template();
+            klass.bind_template_instance_callbacks();
+        }
+
+        fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
+            obj.init_template();
+        }
+    }
+
+    impl ObjectImpl for MediaPool {
+        fn constructed(&self) {
+            self.parent_constructed();
+            let obj = self.obj();
+            self.grid.set_model(Some(&self.selection));
+            self.grid.set_factory(Some(&item_factory()));
+            self.grid
+                .add_controller(delete_shortcut(&self.store, &self.selection));
+            self.store.connect_items_changed(glib::clone!(
+                #[weak(rename_to = stack)]
+                self.stack.get(),
+                move |store, _, _, _| {
+                    stack.set_visible_child_name(if store.n_items() == 0 {
+                        "empty"
+                    } else {
+                        "grid"
+                    });
+                }
+            ));
+            let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+            drop.connect_drop(glib::clone!(
+                #[weak(rename_to = store)]
+                self.store,
+                #[upgrade_or]
+                false,
+                move |_, value, _, _| {
+                    let Ok(files) = value.get::<gdk::FileList>() else {
+                        return false;
+                    };
+                    for file in files.files() {
+                        add_file(&store, &file);
+                    }
+                    true
+                }
+            ));
+            obj.add_controller(drop);
+        }
+    }
+
+    impl WidgetImpl for MediaPool {}
+    impl BoxImpl for MediaPool {}
 }
 
+glib::wrapper! {
+    pub struct MediaPool(ObjectSubclass<imp::MediaPool>)
+        @extends gtk::Box, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
+}
+
+#[gtk::template_callbacks]
 impl MediaPool {
-    pub fn new() -> Self {
-        let store = gio::ListStore::new::<MediaObject>();
-        let selection = gtk::MultiSelection::new(Some(store.clone()));
-        let (widget, grid) = build(&store, &selection);
-        Self {
-            widget,
-            store,
-            grid,
-        }
+    #[template_callback]
+    fn on_import_clicked(&self) {
+        let parent = self.root().and_downcast::<gtk::Window>();
+        open_import_dialog(parent, self.imp().store.clone());
+    }
+
+    pub fn import(&self, file: &gio::File) {
+        add_file(&self.imp().store, file);
     }
 
     /// The item with this path, if imported.
     pub fn find(&self, path: &std::path::Path) -> Option<MediaObject> {
         let path = path.to_string_lossy();
-        self.store
+        self.imp()
+            .store
             .iter::<MediaObject>()
             .flatten()
             .find(|media| media.path() == path)
@@ -36,102 +123,13 @@ impl MediaPool {
 
     /// Calls `f` when an item is activated (double-clicked or Enter).
     pub fn connect_activate<F: Fn(MediaObject) + 'static>(&self, f: F) {
-        let store = self.store.clone();
-        self.grid.connect_activate(move |_, position| {
+        let store = self.imp().store.clone();
+        self.imp().grid.connect_activate(move |_, position| {
             if let Some(media) = store.item(position).and_downcast::<MediaObject>() {
                 f(media);
             }
         });
     }
-
-    pub fn import(&self, file: &gio::File) {
-        add_file(&self.store, file);
-    }
-}
-
-fn build(store: &gio::ListStore, selection: &gtk::MultiSelection) -> (gtk::Box, gtk::GridView) {
-    let grid = gtk::GridView::builder()
-        .model(selection)
-        .factory(&item_factory())
-        .max_columns(12)
-        .enable_rubberband(true)
-        .build();
-    grid.add_controller(delete_shortcut(store, selection));
-
-    let placeholder = gtk::Label::builder()
-        .label("Drop media files here")
-        .css_classes(["dim-label"])
-        .build();
-
-    let stack = gtk::Stack::new();
-    stack.add_named(&placeholder, Some("empty"));
-    stack.add_named(
-        &gtk::ScrolledWindow::builder()
-            .child(&grid)
-            .vexpand(true)
-            .build(),
-        Some("grid"),
-    );
-    store.connect_items_changed(glib::clone!(
-        #[weak]
-        stack,
-        move |store, _, _, _| {
-            stack.set_visible_child_name(if store.n_items() == 0 {
-                "empty"
-            } else {
-                "grid"
-            });
-        }
-    ));
-
-    let import = gtk::Button::builder()
-        .icon_name("list-add-symbolic")
-        .tooltip_text("Import Media…")
-        .css_classes(["flat"])
-        .build();
-    import.connect_clicked(glib::clone!(
-        #[weak]
-        store,
-        move |button| open_import_dialog(button, store)
-    ));
-
-    let title = gtk::Label::builder()
-        .label("Media Pool")
-        .xalign(0.0)
-        .hexpand(true)
-        .css_classes(["pane-title"])
-        .build();
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    header.append(&title);
-    header.append(&import);
-
-    let pool = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .css_classes(["media-pool"])
-        .width_request(220)
-        .build();
-    pool.append(&header);
-    pool.append(&stack);
-
-    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
-    drop.connect_drop(glib::clone!(
-        #[weak]
-        store,
-        #[upgrade_or]
-        false,
-        move |_, value, _, _| {
-            let Ok(files) = value.get::<gdk::FileList>() else {
-                return false;
-            };
-            for file in files.files() {
-                add_file(&store, &file);
-            }
-            true
-        }
-    ));
-    pool.add_controller(drop);
-
-    (pool, grid)
 }
 
 fn item_factory() -> gtk::SignalListItemFactory {
@@ -186,22 +184,21 @@ fn delete_shortcut(
     controller
 }
 
-fn open_import_dialog(button: &gtk::Button, store: gio::ListStore) {
+fn open_import_dialog(parent: Option<gtk::Window>, store: gio::ListStore) {
     let media = gtk::FileFilter::new();
-    media.set_name(Some("Media Files"));
+    media.set_name(Some(&gettext("Media Files")));
     for mime in ["video/*", "audio/*", "image/*"] {
         media.add_mime_type(mime);
     }
     let all = gtk::FileFilter::new();
-    all.set_name(Some("All Files"));
+    all.set_name(Some(&gettext("All Files")));
     all.add_pattern("*");
     let filters = gio::ListStore::new::<gtk::FileFilter>();
     filters.append(&media);
     filters.append(&all);
 
-    let parent = button.root().and_downcast::<gtk::Window>();
     gtk::FileDialog::builder()
-        .title("Import Media")
+        .title(gettext("Import Media"))
         .modal(true)
         .filters(&filters)
         .default_filter(&media)

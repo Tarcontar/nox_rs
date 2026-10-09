@@ -1,7 +1,13 @@
+mod export_dialog;
+mod i18n;
 mod media_cell;
 mod media_object;
 mod media_pool;
+mod playback;
 mod project;
+mod settings_dialog;
+#[cfg(test)]
+mod template_tests;
 mod timeline;
 mod viewer;
 mod window;
@@ -10,18 +16,6 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 const APP_ID: &str = "io.github.nox.Nox";
 
-const CSS: &str = "
-.media-pool { background: #1e1f22; }
-.media-pool:drop(active) { box-shadow: inset 0 0 0 2px #3584e4; }
-.pane-title { font-weight: bold; padding: 6px 8px; }
-.media-pool gridview > child { padding: 6px; }
-.thumbnail-frame { background: #111214; border-radius: 4px; }
-.media-summary { font-size: 8pt; opacity: 0.7; }
-.viewer-canvas { background: black; }
-.timecode { font-family: monospace; font-size: 13pt; padding: 0 8px; }
-timeline { font-size: 8pt; }
-";
-
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -29,6 +23,8 @@ fn main() -> glib::ExitCode {
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+    i18n::init();
+    gio::resources_register_include!("nox.gresource").expect("bundled resources");
 
     let app = gtk::Application::builder()
         .application_id(APP_ID)
@@ -41,7 +37,7 @@ fn main() -> glib::ExitCode {
             settings.set_gtk_application_prefer_dark_theme(true);
         }
         let provider = gtk::CssProvider::new();
-        provider.load_from_string(CSS);
+        provider.load_from_resource("/io/github/nox/Nox/style.css");
         gtk::style_context_add_provider_for_display(
             &gdk::Display::default().expect("no display"),
             &provider,
@@ -58,6 +54,12 @@ fn main() -> glib::ExitCode {
     app.set_accels_for_action("win.save-as", &["<Control><Shift>s"]);
     app.set_accels_for_action("win.undo", &["<Control>z"]);
     app.set_accels_for_action("win.split", &["<Control>b"]);
+    app.set_accels_for_action("win.add-dissolve", &["<Control>t"]);
+    app.set_accels_for_action("win.project-settings", &["<Shift>9"]);
+    app.set_accels_for_action("win.export", &["<Control>e"]);
+    app.set_accels_for_action("win.play-pause", &["space"]);
+    app.set_accels_for_action("win.play", &["l"]);
+    app.set_accels_for_action("win.pause", &["k"]);
     app.set_accels_for_action("win.redo", &["<Control><Shift>z", "<Control>y"]);
     app.connect_activate(|app| window::build(app, &[]).present());
     // `nox clip.mp4 …` imports the files into the media pool; `nox

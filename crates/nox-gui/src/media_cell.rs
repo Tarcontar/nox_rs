@@ -1,19 +1,25 @@
-//! Grid cell for the media pool: thumbnail (or icon), name and duration.
+//! Grid cell for the media pool (`resources/ui/media-cell.ui`): thumbnail
+//! (or icon), name and duration. Cells can be dragged onto the timeline.
 
-use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
+use gtk::{CompositeTemplate, gdk, glib, prelude::*, subclass::prelude::*};
 
-use crate::media_object::{MediaObject, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH};
+use crate::media_object::MediaObject;
 
 mod imp {
     use super::*;
     use std::cell::RefCell;
 
-    #[derive(Default)]
+    #[derive(Default, CompositeTemplate)]
+    #[template(resource = "/io/github/nox/Nox/ui/media-cell.ui")]
     pub struct MediaCell {
-        pub picture: gtk::Picture,
-        pub icon: gtk::Image,
-        pub name: gtk::Label,
-        pub summary: gtk::Label,
+        #[template_child]
+        pub picture: TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub icon: TemplateChild<gtk::Image>,
+        #[template_child]
+        pub name: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub summary: TemplateChild<gtk::Label>,
         pub bindings: RefCell<Vec<glib::Binding>>,
         /// The bound item, for dragging it onto the timeline.
         pub media: RefCell<Option<MediaObject>>,
@@ -26,8 +32,13 @@ mod imp {
         type ParentType = gtk::Box;
 
         fn class_init(klass: &mut Self::Class) {
+            klass.bind_template();
             // Own node name so theme rules for boxes inside grid cells don't add padding.
             klass.set_css_name("media-cell");
+        }
+
+        fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
+            obj.init_template();
         }
     }
 
@@ -35,32 +46,6 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
-            obj.set_orientation(gtk::Orientation::Vertical);
-            obj.set_spacing(2);
-            obj.set_halign(gtk::Align::Center);
-
-            self.icon.set_pixel_size(32);
-            self.picture.set_content_fit(gtk::ContentFit::Contain);
-            let frame = gtk::Overlay::builder()
-                .child(&self.icon)
-                .width_request(THUMBNAIL_WIDTH as i32)
-                .height_request(THUMBNAIL_HEIGHT as i32)
-                .css_classes(["thumbnail-frame"])
-                .overflow(gtk::Overflow::Hidden)
-                .build();
-            frame.add_overlay(&self.picture);
-
-            // The thumbnail frame sets the cell width; labels ellipsize within it.
-            self.name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-            self.name.set_max_width_chars(1);
-            self.summary.add_css_class("media-summary");
-            self.summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            self.summary.set_max_width_chars(1);
-
-            obj.append(&frame);
-            obj.append(&self.name);
-            obj.append(&self.summary);
-
             let drag = gtk::DragSource::new();
             drag.set_actions(gdk::DragAction::COPY);
             drag.connect_prepare(glib::clone!(
@@ -75,7 +60,7 @@ mod imp {
             ));
             drag.connect_drag_begin(glib::clone!(
                 #[weak(rename_to = picture)]
-                self.picture,
+                self.picture.get(),
                 move |source, _| {
                     if let Some(paintable) = picture.paintable() {
                         source.set_icon(Some(&paintable), 0, 0);
@@ -107,20 +92,20 @@ impl MediaCell {
         imp.name.set_label(&media.name());
         let bindings = vec![
             media
-                .bind_property("thumbnail", &imp.picture, "paintable")
+                .bind_property("thumbnail", &*imp.picture, "paintable")
                 .sync_create()
                 .build(),
             media
-                .bind_property("thumbnail", &imp.icon, "visible")
+                .bind_property("thumbnail", &*imp.icon, "visible")
                 .transform_to(|_, thumbnail: Option<gdk::Texture>| Some(thumbnail.is_none()))
                 .sync_create()
                 .build(),
             media
-                .bind_property("icon-name", &imp.icon, "icon-name")
+                .bind_property("icon-name", &*imp.icon, "icon-name")
                 .sync_create()
                 .build(),
             media
-                .bind_property("summary", &imp.summary, "label")
+                .bind_property("summary", &*imp.summary, "label")
                 .sync_create()
                 .build(),
             media

@@ -7,10 +7,16 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+cpal.workspace = true
 nox-gpu.workspace = true
 nox-media.workspace = true
 nox-project.workspace = true
+ringbuf.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

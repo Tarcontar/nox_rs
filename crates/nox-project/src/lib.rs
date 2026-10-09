@@ -19,6 +19,7 @@ pub use time::{
     timecode,
 };
 pub use timeline::{
-    Clip, Composable, DEFAULT_MEDIA_KEY, Effect, EffectKind, Gap, Item, Marker, MediaReference,
-    ReferenceKind, ResolvedClip, Settings, Stack, Timeline, Track, TrackKind, Transition,
+    AudioSegment, BlendMode, Clip, Composable, DEFAULT_MEDIA_KEY, Effect, EffectKind, Gap, Item,
+    Marker, MediaReference, ReferenceKind, ResolvedClip, ScalingMode, Settings, Stack, Timeline,
+    Track, TrackKind, Transition,
 };

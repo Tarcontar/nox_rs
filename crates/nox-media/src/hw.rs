@@ -24,6 +24,12 @@ pub struct HwDevice {
 unsafe impl Send for HwDevice {}
 unsafe impl Sync for HwDevice {}
 
+impl std::fmt::Debug for HwDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HwDevice").finish_non_exhaustive()
+    }
+}
+
 impl Clone for HwDevice {
     fn clone(&self) -> Self {
         // SAFETY: `buffer` is a valid reference.

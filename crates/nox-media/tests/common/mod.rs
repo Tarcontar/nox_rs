@@ -1,5 +1,8 @@
 //! Test clips generated with the `ffmpeg` CLI.
 
+// Not every test binary uses every helper.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

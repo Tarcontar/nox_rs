@@ -32,12 +32,15 @@ pub struct VideoDecoder {
     logged_path: bool,
     /// Nothing has been read since opening or rewinding.
     at_start: bool,
+    /// A still image: one frame, shown at every position.
+    still: bool,
 }
 
 impl VideoDecoder {
     pub fn open(path: &Path, hw: Option<&HwDevice>) -> Result<Self> {
         crate::init();
         let input = format::input(path)?;
+        let still = crate::probe::is_image_demuxer(input.format().name());
         let stream = input
             .streams()
             .best(media::Type::Video)
@@ -80,8 +83,20 @@ impl VideoDecoder {
             last: None,
             pending: None,
             logged_path: false,
+            still,
             at_start: true,
         })
+    }
+
+    /// Whether the file is a still image (shows the same frame throughout).
+    pub fn is_still(&self) -> bool {
+        self.still
+    }
+
+    /// The frame index to decode for `index`: stills have only frame 0
+    /// (seeking would reopen and decode the image again).
+    fn effective(&self, index: i64) -> i64 {
+        if self.still { 0 } else { index.max(0) }
     }
 
     pub fn frame_rate(&self) -> Rational {
@@ -91,18 +106,20 @@ impl VideoDecoder {
     /// The frame displayed at `index` (counted from the stream start at the
     /// stream's frame rate). Past the end, returns the last frame.
     pub fn frame_at(&mut self, index: i64) -> Result<frame::Video> {
-        let index = index.max(0);
+        self.frame_at_until(index, &|| false)
+    }
+
+    /// Like `frame_at`, but gives up with `Error::Interrupted` as soon as
+    /// `stop` returns true (checked after every decoded frame). Frames
+    /// decoded until then still count: asking again continues from there.
+    pub fn frame_at_until(&mut self, index: i64, stop: &dyn Fn() -> bool) -> Result<frame::Video> {
+        let index = self.effective(index);
         if let Some((i, frame)) = &self.last
             && *i == index
         {
             return Ok(reference(frame));
         }
-        let window = FORWARD_DECODE_SECONDS * self.frame_rate.as_f64();
-        let forward = match &self.last {
-            Some((i, _)) => index > *i && (index - *i) as f64 <= window,
-            // Freshly opened: decode from the start rather than seek.
-            None => self.at_start && self.pending.is_none() && index as f64 <= window,
-        };
+        let forward = self.can_decode_forward(index);
         // Where we last sought to, for backing off further.
         let mut sought = None;
         if !forward {
@@ -150,6 +167,108 @@ impl VideoDecoder {
             if i >= index {
                 return Ok(result);
             }
+            if stop() {
+                return Err(Error::Interrupted);
+            }
+        }
+    }
+
+    /// Whether `index` is best reached by decoding on from the current
+    /// position rather than seeking: it lies ahead, and either close or in
+    /// the same group of pictures (seeking would land on a keyframe at or
+    /// before where we are).
+    fn can_decode_forward(&mut self, index: i64) -> bool {
+        let window = FORWARD_DECODE_SECONDS * self.frame_rate.as_f64();
+        match &self.last {
+            Some((i, _)) => {
+                let last = *i;
+                index > last
+                    && ((index - last) as f64 <= window
+                        || self.keyframe_before(index).is_some_and(|k| k <= last))
+            }
+            // Freshly opened: decode from the start rather than seek.
+            None => {
+                self.at_start
+                    && self.pending.is_none()
+                    && ((index as f64) <= window || self.keyframe_before(index) == Some(0))
+            }
+        }
+    }
+
+    /// The last keyframe at or before frame `index`, from the demuxer's
+    /// index (`None` if the container has none).
+    ///
+    /// Index entries carry decode timestamps, which with B-frames run ahead
+    /// of presentation by the reorder delay; the first keyframe (shown
+    /// first) tells by how much.
+    pub fn keyframe_before(&mut self, index: i64) -> Option<i64> {
+        // SAFETY: valid stream of our open input; entries stay valid until
+        // the next demuxer call, and are only read here.
+        let (first, found) = unsafe {
+            let stream = *(*self.input.as_ptr()).streams.add(self.stream_index);
+            let first = ffi::avformat_index_get_entry(stream, 0);
+            if first.is_null() {
+                return None;
+            }
+            let first = (*first).timestamp;
+            let delay = self.start - first;
+            let entry = ffi::avformat_index_get_entry_from_timestamp(
+                stream,
+                self.pts_of(index) - delay,
+                ffi::AVSEEK_FLAG_BACKWARD,
+            );
+            (first, (!entry.is_null()).then(|| (*entry).timestamp))
+        };
+        let delay = self.start - first;
+        Some(self.index_of(found? + delay).max(0))
+    }
+
+    /// About how many frames must be decoded to get frame `index`.
+    pub fn decode_cost(&mut self, index: i64) -> i64 {
+        let index = self.effective(index);
+        if self.last.as_ref().is_some_and(|(i, _)| *i == index) {
+            return 0;
+        }
+        if self.can_decode_forward(index) {
+            let from = self.last.as_ref().map_or(0, |(i, _)| *i);
+            return index - from;
+        }
+        match self.keyframe_before(index) {
+            Some(keyframe) => index - keyframe + 1,
+            // No index: assume a typical group of pictures.
+            None => (FORWARD_DECODE_SECONDS * self.frame_rate.as_f64()) as i64,
+        }
+    }
+
+    /// A frame at or shortly before `index` that is cheap to get: the exact
+    /// frame if that takes at most `max_cost` decoded frames, otherwise
+    /// the frame we are at (if it is earlier in the same group of pictures)
+    /// or the keyframe before `index`. Afterwards the decoder is positioned
+    /// to continue towards `index`.
+    pub fn frame_near(&mut self, index: i64, max_cost: i64) -> Result<frame::Video> {
+        let index = self.effective(index);
+        if self.decode_cost(index) <= max_cost {
+            return self.frame_at(index);
+        }
+        if self.can_decode_forward(index)
+            && let Some((_, frame)) = &self.last
+        {
+            return Ok(reference(frame));
+        }
+        // Seek and take the first frame: the keyframe the demuxer lands on.
+        self.seek(index)?;
+        match self.decode_next()? {
+            Some((i, frame)) if i <= index => {
+                let result = reference(&frame);
+                self.last = Some((i, frame));
+                Ok(result)
+            }
+            // Landed past the target (decode timestamps) or at the end.
+            Some((i, frame)) => {
+                self.last = Some((i, frame));
+                self.frame_at(index)
+            }
+            None => self.frame_at(index),
         }
     }
 

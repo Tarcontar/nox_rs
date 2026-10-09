@@ -1,13 +1,30 @@
-use std::path::Path;
+use nox_engine::{EncodeQuality, ExportSettings, VideoCodec};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: nox-cli <command>
 
 commands:
   version          print Nox and FFmpeg versions
-  probe <file>...  print stream information";
+  probe <file>...  print stream information
+  render <project.otio> <output> [options]
+                   render a timeline to a file (container from the
+                   extension: .mp4, .mov, .mkv)
+    --codec h264|hevc|prores   (default: h264, or prores for .mov)
+    --quality high|medium|low  (default: high)
+    --software                 no hardware encoders
+    --no-audio                 leave out the audio track
+    --frames START-END         sequence frames START..END (END exclusive)";
 
 fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("NOX_LOG")
+                .unwrap_or_else(|_| "warn".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("version") => {
@@ -15,6 +32,13 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("probe") if args.len() > 1 => probe(&args[1..]),
+        Some("render") if args.len() >= 3 => match render(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("nox-cli: {err}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
@@ -55,4 +79,85 @@ fn print_info(info: &nox_media::MediaInfo) {
     for line in info.to_string().lines() {
         println!("  {line}");
     }
+}
+
+fn render(args: &[String]) -> Result<(), String> {
+    let project = Path::new(&args[0]);
+    let output = PathBuf::from(&args[1]);
+    let is_mov = output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mov"));
+    let mut settings = ExportSettings {
+        path: output.clone(),
+        codec: if is_mov {
+            VideoCodec::ProRes
+        } else {
+            VideoCodec::H264
+        },
+        quality: EncodeQuality::High,
+        hardware: true,
+        range: None,
+        audio: true,
+    };
+    let mut rest = args[2..].iter();
+    while let Some(arg) = rest.next() {
+        let mut value = || rest.next().ok_or(format!("{arg} needs a value"));
+        match arg.as_str() {
+            "--codec" => {
+                settings.codec = match value()?.as_str() {
+                    "h264" => VideoCodec::H264,
+                    "hevc" => VideoCodec::Hevc,
+                    "prores" => VideoCodec::ProRes,
+                    other => return Err(format!("unknown codec {other}")),
+                }
+            }
+            "--quality" => {
+                settings.quality = match value()?.as_str() {
+                    "high" => EncodeQuality::High,
+                    "medium" => EncodeQuality::Medium,
+                    "low" => EncodeQuality::Low,
+                    other => return Err(format!("unknown quality {other}")),
+                }
+            }
+            "--software" => settings.hardware = false,
+            "--no-audio" => settings.audio = false,
+            "--frames" => {
+                let range = value()?;
+                let (start, end) = range
+                    .split_once('-')
+                    .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+                    .filter(|(a, b): &(i64, i64)| a < b && *a >= 0)
+                    .ok_or(format!("invalid frame range {range}"))?;
+                settings.range = Some(start..end);
+            }
+            other => return Err(format!("unknown option {other}\n\n{USAGE}")),
+        }
+    }
+    let timeline =
+        nox_otio::read_file(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let summary = nox_engine::export(&timeline, &settings, |done, total| {
+        if interactive && (done % 10 == 0 || done == total) {
+            eprint!(
+                "\rrendering frame {done}/{total} ({:.0}%)",
+                done as f64 * 100.0 / total as f64
+            );
+            let _ = std::io::stderr().flush();
+        }
+        true
+    })
+    .map_err(|e| e.to_string())?;
+    if interactive {
+        eprintln!();
+    }
+    println!(
+        "{}: {} frames in {:.1} s ({:.0} fps), {}{}",
+        summary.path.display(),
+        summary.frames,
+        summary.elapsed.as_secs_f64(),
+        summary.fps(),
+        summary.encoder,
+        if summary.zero_copy { ", zero copy" } else { "" }
+    );
+    Ok(())
 }

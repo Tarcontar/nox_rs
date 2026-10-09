@@ -508,3 +508,91 @@ fn vulkan_zero_copy_dmabuf_stress() {
         }
     }
 }
+
+/// Like `counting_clip`, with keyframes only about every 100 frames (4 s),
+/// as in typical camera and stock footage. (The encoder puts them at
+/// frames 0, 102, 201 and 299.)
+fn long_gop_clip() -> Option<std::path::PathBuf> {
+    #[rustfmt::skip]
+    let args = [
+        "-f", "lavfi", "-i", "color=c=black:size=64x64:rate=25:duration=12,format=yuv420p",
+        "-vf", "geq=lum='16+mod(N\\,70)*3':cb=128:cr=128",
+        "-c:v", "mpeg4", "-q:v", "1", "-g", "100", "-bf", "2",
+    ];
+    fixture("long-gop.mp4", &args)
+}
+
+fn long_gop_luma(index: i64) -> i32 {
+    (16 + (index % 70) * 3) as i32
+}
+
+#[test]
+fn keyframes_costs_and_cheap_frames() {
+    let Some(path) = long_gop_clip() else { return };
+    let mut decoder = VideoDecoder::open(&path, None).unwrap();
+    // The index has decode timestamps, so positions are good to a frame or
+    // two with B-frames.
+    let near =
+        |actual: i64, estimate: Option<i64>| estimate.is_some_and(|e| (e - actual).abs() <= 2);
+    assert!(
+        near(102, decoder.keyframe_before(150)),
+        "{:?}",
+        decoder.keyframe_before(150)
+    );
+    assert!(near(0, decoder.keyframe_before(90)));
+    // Fresh decoder: frame 150 needs a seek to 102 and about 49 frames.
+    assert!(near(49, Some(decoder.decode_cost(150))));
+
+    // A cheap stand-in: the keyframe before.
+    let frame = decoder.frame_near(150, 5).unwrap();
+    assert!((i32::from(luma_of(&frame)) - long_gop_luma(102)).abs() <= 1);
+    // ...after which the exact frame continues from there.
+    assert_eq!(decoder.decode_cost(150), 48);
+    let exact = decoder.frame_at(150).unwrap();
+    assert!((i32::from(luma_of(&exact)) - long_gop_luma(150)).abs() <= 1);
+    // Close enough frames are exact.
+    let frame = decoder.frame_near(152, 5).unwrap();
+    assert!((i32::from(luma_of(&frame)) - long_gop_luma(152)).abs() <= 1);
+    // Going back is a seek again.
+    assert!(near(39, Some(decoder.decode_cost(140))));
+}
+
+#[test]
+fn decoding_can_be_interrupted_and_resumed() {
+    let Some(path) = long_gop_clip() else { return };
+    let mut decoder = VideoDecoder::open(&path, None).unwrap();
+    decoder.frame_at(110).unwrap();
+    let decoded = std::cell::Cell::new(0);
+    let stop = || {
+        decoded.set(decoded.get() + 1);
+        decoded.get() > 10
+    };
+    assert!(matches!(
+        decoder.frame_at_until(180, &stop),
+        Err(nox_media::Error::Interrupted)
+    ));
+    // The work done counts: we are about 10 frames further.
+    assert!(
+        decoder.decode_cost(180) < 70 - 5,
+        "{}",
+        decoder.decode_cost(180)
+    );
+    let frame = decoder.frame_at(180).unwrap();
+    assert!((i32::from(luma_of(&frame)) - long_gop_luma(180)).abs() <= 1);
+}
+
+/// Jumping ahead within a group of pictures decodes on instead of seeking
+/// back to its keyframe (which would decode even more).
+#[test]
+fn far_forward_jumps_in_one_gop_decode_on() {
+    let Some(path) = long_gop_clip() else { return };
+    let mut decoder = VideoDecoder::open(&path, None).unwrap();
+    decoder.frame_at(105).unwrap();
+    // 80 frames (3.2 s) ahead, beyond the 2 s window, same GOP.
+    assert_eq!(decoder.decode_cost(185), 80);
+    let frame = decoder.frame_at(185).unwrap();
+    assert!((i32::from(luma_of(&frame)) - long_gop_luma(185)).abs() <= 1);
+    // Into the next GOP (keyframe 201): seeking there is cheaper.
+    let cost = decoder.decode_cost(260);
+    assert!((58..=62).contains(&cost), "{cost}");
+}

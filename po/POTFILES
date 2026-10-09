@@ -1,0 +1,15 @@
+crates/nox-gui/resources/ui/export-dialog.ui
+crates/nox-gui/resources/ui/media-pool.ui
+crates/nox-gui/resources/ui/menus.ui
+crates/nox-gui/resources/ui/project-settings.ui
+crates/nox-gui/resources/ui/viewer.ui
+crates/nox-gui/resources/ui/window.ui
+crates/nox-gui/src/export_dialog.rs
+crates/nox-gui/src/i18n.rs
+crates/nox-gui/src/media_object.rs
+crates/nox-gui/src/media_pool.rs
+crates/nox-gui/src/project.rs
+crates/nox-gui/src/settings_dialog.rs
+crates/nox-gui/src/timeline.rs
+crates/nox-gui/src/viewer.rs
+crates/nox-gui/src/window.rs

@@ -1,6 +1,7 @@
 //! GObject wrapper around an imported file and its probed `MediaInfo`, so it
 //! can live in a `gio::ListStore` and drive list item widgets via bindings.
 
+use crate::i18n::{fill, gettext};
 use gtk::{gdk, gio, glib, prelude::*, subclass::prelude::*};
 use nox_media::MediaInfo;
 use nox_project::timecode;
@@ -56,7 +57,7 @@ impl MediaObject {
         let media: Self = glib::Object::builder()
             .property("path", path.to_string_lossy().as_ref())
             .property("icon-name", "content-loading-symbolic")
-            .property("summary", "Loading…")
+            .property("summary", gettext("Loading…"))
             .property("details", path.to_string_lossy().as_ref())
             .build();
         media.load();
@@ -99,7 +100,7 @@ impl MediaObject {
                 match result {
                     Ok(Ok((info, thumbnail))) => media.set_loaded(info, thumbnail),
                     Ok(Err(err)) => media.set_failed(&err.to_string()),
-                    Err(_) => media.set_failed("probing crashed"),
+                    Err(_) => media.set_failed(&gettext("probing crashed")),
                 }
             }
         ));
@@ -138,13 +139,17 @@ impl MediaObject {
         tracing::warn!("cannot import {}: {error}", self.path());
         self.set_icon_name("dialog-error-symbolic");
         self.set_summary(error);
-        self.set_details(format!("{}\n\nCannot import: {error}", self.path()));
+        self.set_details(format!(
+            "{}\n\n{}",
+            self.path(),
+            fill(&gettext("Cannot import: {error}"), &[("error", &error)])
+        ));
     }
 }
 
 fn summary(info: &MediaInfo) -> String {
     if info.is_still_image() {
-        return "Still".into();
+        return gettext("Still");
     }
     match (
         info.duration,
@@ -155,6 +160,6 @@ fn summary(info: &MediaInfo) -> String {
             let secs = duration.as_seconds().round() as u64;
             format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
         }
-        (None, _) => "Unknown length".into(),
+        (None, _) => gettext("Unknown length"),
     }
 }

@@ -6,8 +6,9 @@
 //! change. After every edit a track is normalized: adjacent gaps merged,
 //! empty and trailing gaps removed.
 
+use crate::metadata::Object;
 use crate::time::{Time, TimeRange};
-use crate::timeline::{Composable, Gap, Timeline, Track, TrackKind};
+use crate::timeline::{Composable, Gap, Timeline, Track, TrackKind, Transition};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EditError {
@@ -23,6 +24,10 @@ pub enum EditError {
     OutOfRange,
     #[error("{0} items cannot go on {1} tracks")]
     WrongTrackKind(String, String),
+    #[error("there is no clip on the other side of this cut")]
+    NoCut,
+    #[error("the clips have no media beyond the cut to dissolve with")]
+    NoHandles,
 }
 
 /// An item on a top-level track: its stack index and its index in the track.
@@ -453,6 +458,87 @@ impl Timeline {
         split.len()
     }
 
+    /// Adds a dissolve at the cut on `edge` of clip `item` (replacing one
+    /// that is there), about `duration` long and centered on the cut. Each
+    /// side is limited by the media the clips have beyond the cut; if one
+    /// side has less, the other takes the rest. Returns the transition.
+    pub fn add_dissolve(
+        &mut self,
+        item: ItemRef,
+        edge: Edge,
+        duration: Time,
+    ) -> Result<ItemRef, EditError> {
+        let track = self.track_checked(item.track)?;
+        self.item(item)?;
+        // Children around the cut, skipping an existing transition.
+        let step = |i: usize, forward: bool| {
+            if forward {
+                i.checked_add(1)
+            } else {
+                i.checked_sub(1)
+            }
+        };
+        let forward = edge == Edge::End;
+        let mut other = step(item.index, forward).ok_or(EditError::NoCut)?;
+        let mut existing = None;
+        if let Some(Composable::Transition(_)) = track.children.get(other) {
+            existing = Some(other);
+            other = step(other, forward).ok_or(EditError::NoCut)?;
+        }
+        let (left, right) = if forward {
+            (item.index, other)
+        } else {
+            (other, item.index)
+        };
+        let clip = |i: usize| track.children.get(i).and_then(Composable::as_clip);
+        let (Some(a), Some(b)) = (clip(left), clip(right)) else {
+            return Err(EditError::NoCut);
+        };
+        let (Some(a_range), Some(b_range)) = (a.trimmed_range(), b.trimmed_range()) else {
+            return Err(EditError::NoCut);
+        };
+        // Media beyond the cut: after the end of A, before the start of B.
+        let a_tail = a
+            .available_range()
+            .map_or(a_range.duration, |r| r.end() - a_range.end())
+            .min(b_range.duration);
+        let b_head = b
+            .available_range()
+            .map_or(b_range.duration, |r| b_range.start - r.start)
+            .min(a_range.duration);
+        let zero = Time::zero(duration.timebase);
+        let half = Time::new(duration.ticks / 2, duration.timebase);
+        let mut in_offset = half.min(b_head).max(zero);
+        let out_offset = (duration - in_offset).min(a_tail).max(zero);
+        in_offset = (duration - out_offset).min(b_head).max(zero);
+        if (in_offset + out_offset).is_zero() {
+            return Err(EditError::NoHandles);
+        }
+        let transition = Composable::Transition(Transition {
+            name: "Cross Dissolve".into(),
+            metadata: Object::new(),
+            transition_type: "SMPTE_Dissolve".into(),
+            in_offset,
+            out_offset,
+            extra: Object::new(),
+        });
+        let track = self.track_checked_mut(item.track)?;
+        let index = match existing {
+            Some(index) => {
+                track.children[index] = transition;
+                index
+            }
+            None => {
+                track.children.insert(right, transition);
+                right
+            }
+        };
+        Ok(ItemRef {
+            track: item.track,
+            index,
+        })
+    }
+
     /// Adds an empty track of `kind`, above the existing tracks of that kind
     /// for video and below them for audio. Returns its stack index.
     pub fn add_track(&mut self, kind: TrackKind) -> usize {
@@ -750,6 +836,129 @@ mod tests {
             layout(timeline.track(1).unwrap()),
             "_@0+5 a[0]@5+4 _@9+10 a[4]@19+6"
         );
+    }
+
+    #[test]
+    fn dissolves_are_centered_and_limited_by_handles() {
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        // a uses 10..20 of 100 (10 frames of tail), b uses 3..13 (3 of head).
+        timeline.place(0, clip("a", 10, 10), f(0)).unwrap();
+        timeline.place(0, clip("b", 3, 10), f(10)).unwrap();
+        let a = ItemRef { track: 0, index: 0 };
+        let dissolve = timeline.add_dissolve(a, Edge::End, f(8)).unwrap();
+        let offsets = |t: &Timeline, r: ItemRef| match t.item(r).unwrap() {
+            Composable::Transition(t) => (t.in_offset, t.out_offset),
+            _ => panic!("not a transition"),
+        };
+        // 4 + 4 wanted; b has only 3 frames of head, so a gives 5.
+        assert_eq!(offsets(&timeline, dissolve), (f(3), f(5)));
+        // Again from the other side replaces it.
+        let b = ItemRef { track: 0, index: 2 };
+        let again = timeline.add_dissolve(b, Edge::Start, f(2)).unwrap();
+        assert_eq!(again, dissolve);
+        assert_eq!(offsets(&timeline, again), (f(1), f(1)));
+        assert_eq!(timeline.track(0).unwrap().children.len(), 3);
+        // No neighbor, or no handles.
+        assert_eq!(
+            timeline.add_dissolve(a, Edge::Start, f(8)),
+            Err(EditError::NoCut)
+        );
+        let mut tight = Timeline::new("t", Rational::new(24, 1));
+        let whole = |name| {
+            let reference = MediaReference::from_path(
+                Path::new(&format!("/m/{name}.mov")),
+                Some(TimeRange::new(f(0), f(10))),
+            );
+            Composable::Clip(Clip::new(name, reference, TimeRange::new(f(0), f(10))))
+        };
+        tight.place(0, whole("a"), f(0)).unwrap();
+        tight.place(0, whole("b"), f(10)).unwrap();
+        assert_eq!(
+            tight.add_dissolve(a, Edge::End, f(8)),
+            Err(EditError::NoHandles)
+        );
+    }
+
+    #[test]
+    fn dissolve_layers_and_audio_crossfade() {
+        let fps = Rational::new(24, 1);
+        let mut timeline = Timeline::new("t", fps);
+        for track in [0, 1] {
+            timeline.place(track, clip("a", 10, 10), f(0)).unwrap();
+            timeline.place(track, clip("b", 10, 10), f(10)).unwrap();
+            let a = ItemRef { track, index: 0 };
+            timeline.add_dissolve(a, Edge::End, f(4)).unwrap();
+        }
+        // Before the dissolve: only a.
+        let names = |t: f64| {
+            timeline
+                .video_layers(Time::new((t * 24.0) as i64, fps.inverse()))
+                .iter()
+                .map(|l| {
+                    (
+                        l.clip.item.name.clone(),
+                        l.source_time.frame(fps),
+                        (l.opacity * 100.0).round() as i64,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(7.0 / 24.0), [("a".into(), 17, 100)]);
+        // The dissolve runs from frame 8 to 12; at 9 it is a quarter done.
+        // b starts early: its source frame 10 is at the cut (frame 10).
+        assert_eq!(
+            names(9.0 / 24.0),
+            [("a".into(), 19, 100), ("b".into(), 9, 25)]
+        );
+        assert_eq!(
+            names(11.0 / 24.0),
+            [("a".into(), 21, 100), ("b".into(), 11, 75)]
+        );
+        assert_eq!(names(12.0 / 24.0), [("b".into(), 12, 100)]);
+
+        let range = TimeRange::new(f(0), f(20));
+        let segments = timeline.audio_segments(range);
+        assert_eq!(segments.len(), 2);
+        let (a, b) = (&segments[0], &segments[1]);
+        assert_eq!((a.place, a.fade_out), (TimeRange::new(f(0), f(12)), f(4)));
+        assert_eq!(
+            (b.place, b.source_start, b.fade_in),
+            (TimeRange::new(f(8), f(12)), f(8), f(4))
+        );
+        // Equal power: the gains' squares add up to one across the fade.
+        for frame in 8..12 {
+            let t = frame as f64 / 24.0 + 0.01;
+            let power = a.gain_at(t).powi(2) + b.gain_at(t).powi(2);
+            assert!((power - 1.0).abs() < 1e-9, "{frame}: {power}");
+        }
+        assert_eq!(a.gain_at(0.1), 1.0);
+        assert_eq!(b.gain_at(0.1), 0.0);
+        // Only overlapping segments are listed.
+        assert_eq!(
+            timeline.audio_segments(TimeRange::new(f(13), f(2))).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn clip_properties_live_in_nox_metadata() {
+        let mut c = clip("a", 0, 10);
+        let item = c.item_mut().unwrap();
+        assert_eq!((item.opacity(), item.gain()), (1.0, 1.0));
+        item.set_opacity(0.5);
+        item.set_blend_mode(crate::timeline::BlendMode::Screen);
+        item.set_gain(0.25);
+        item.set_link(Some(3));
+        assert_eq!(item.opacity(), 0.5);
+        assert_eq!(item.blend_mode(), crate::timeline::BlendMode::Screen);
+        assert_eq!(item.gain(), 0.25);
+        item.set_opacity(1.0);
+        item.set_blend_mode(crate::timeline::BlendMode::Normal);
+        item.set_gain(1.0);
+        assert_eq!(item.nox_value("opacity"), None);
+        assert_eq!(item.link(), Some(3));
+        item.set_link(None);
+        assert!(item.metadata.is_empty());
     }
 
     #[test]

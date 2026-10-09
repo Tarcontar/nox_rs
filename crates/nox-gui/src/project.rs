@@ -1,6 +1,7 @@
 //! The open project: a timeline document with undo, its file, and change
 //! notification for the widgets that show it.
 
+use crate::i18n::{fill, gettext};
 use nox_media::MediaInfo;
 use nox_project::{
     Clip, Composable, Document, EditError, MediaReference, Rational, Time, TimeRange, Timeline,
@@ -39,7 +40,7 @@ pub struct Project {
 
 impl Project {
     pub fn new() -> Rc<Self> {
-        let mut document = Document::new(Timeline::new("Untitled", DEFAULT_FRAME_RATE));
+        let mut document = Document::new(Timeline::new(gettext("Untitled"), DEFAULT_FRAME_RATE));
         document.mark_saved();
         Rc::new(Self {
             document: RefCell::new(document),
@@ -115,7 +116,26 @@ impl Project {
         track: Option<usize>,
         frame: i64,
     ) -> Result<(), EditError> {
-        self.edit("Add Clip", |timeline| {
+        self.edit(&gettext("Add Clip"), |timeline| {
+            // The first clip sets up the sequence: its frame rate and size.
+            if timeline.clips().next().is_none()
+                && let Some(video) = &media.video
+            {
+                if let Some(rate) = video.frame_rate {
+                    timeline.set_frame_rate(rate);
+                }
+                if !media.is_still_image() {
+                    (timeline.settings.width, timeline.settings.height) =
+                        (video.width, video.height);
+                }
+                tracing::info!(
+                    "sequence set to {}×{} at {:.3} fps from {}",
+                    timeline.settings.width,
+                    timeline.settings.height,
+                    timeline.frame_rate().as_f64(),
+                    media.path.display()
+                );
+            }
             let fps = timeline.frame_rate();
             let at = Time::from_frames(frame.max(0), fps);
             let name = media
@@ -197,13 +217,17 @@ impl Project {
             .path()
             .and_then(|p| p.file_stem().map(|n| n.to_string_lossy().into_owned()));
         let name = name.unwrap_or_else(|| self.timeline().name.clone());
-        let modified = if self.is_modified() { "• " } else { "" };
-        format!("{modified}{name} — Nox")
+        let title = if self.is_modified() {
+            gettext("• {name} — Nox")
+        } else {
+            gettext("{name} — Nox")
+        };
+        fill(&title, &[("name", &name)])
     }
 
     /// Replaces the project with a new, empty one.
     pub fn reset(&self) {
-        let mut document = Document::new(Timeline::new("Untitled", DEFAULT_FRAME_RATE));
+        let mut document = Document::new(Timeline::new(gettext("Untitled"), DEFAULT_FRAME_RATE));
         document.mark_saved();
         self.document.replace(document);
         self.path.replace(None);

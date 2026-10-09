@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- The sequence at the playhead, with transport controls. -->
+  <template class="NoxViewer" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <child>
+      <object class="GtkPicture" id="picture">
+        <property name="content-fit">contain</property>
+        <property name="hexpand">true</property>
+        <property name="vexpand">true</property>
+        <style>
+          <class name="viewer-canvas"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkCenterBox">
+        <property name="margin-top">4</property>
+        <property name="margin-bottom">4</property>
+        <property name="center-widget">
+          <object class="GtkBox">
+            <property name="spacing">2</property>
+            <!-- Space plays; it mustn't also click a focused button. -->
+            <child>
+              <object class="GtkButton">
+                <property name="icon-name">media-skip-backward-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Go to Start</property>
+                <property name="action-name">win.go-to-start</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton">
+                <property name="icon-name">media-seek-backward-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Previous Frame</property>
+                <property name="action-name">win.previous-frame</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="play_button">
+                <property name="icon-name">media-playback-start-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Play</property>
+                <property name="action-name">win.play-pause</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton">
+                <property name="icon-name">media-seek-forward-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Next Frame</property>
+                <property name="action-name">win.next-frame</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton">
+                <property name="icon-name">media-skip-forward-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Go to End</property>
+                <property name="action-name">win.go-to-end</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+          </object>
+        </property>
+        <property name="end-widget">
+          <object class="GtkLabel" id="timecode">
+            <property name="label">00:00:00:00</property>
+            <style><class name="timecode"/></style>
+          </object>
+        </property>
+      </object>
+    </child>
+  </template>
+</interface>

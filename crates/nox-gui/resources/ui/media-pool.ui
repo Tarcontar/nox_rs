@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- Every file imported into the project, as a thumbnail grid. -->
+  <template class="NoxMediaPool" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="width-request">220</property>
+    <style><class name="media-pool"/></style>
+    <child>
+      <object class="GtkBox">
+        <child>
+          <object class="GtkLabel">
+            <property name="label" translatable="yes">Media Pool</property>
+            <property name="xalign">0</property>
+            <property name="hexpand">true</property>
+            <style><class name="pane-title"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton">
+            <property name="icon-name">list-add-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Import Media…</property>
+            <signal name="clicked" handler="on_import_clicked" swapped="true"/>
+            <style><class name="flat"/></style>
+          </object>
+        </child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkStack" id="stack">
+        <property name="vexpand">true</property>
+        <child>
+          <object class="GtkStackPage">
+            <property name="name">empty</property>
+            <property name="child">
+              <object class="GtkLabel">
+                <property name="label" translatable="yes">Drop media files here</property>
+                <style><class name="dim-label"/></style>
+              </object>
+            </property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkStackPage">
+            <property name="name">grid</property>
+            <property name="child">
+              <object class="GtkScrolledWindow">
+                <property name="child">
+                  <object class="GtkGridView" id="grid">
+                    <property name="max-columns">12</property>
+                    <property name="enable-rubberband">true</property>
+                  </object>
+                </property>
+              </object>
+            </property>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

@@ -2,11 +2,13 @@
 //! compute pipelines for color conversion and compositing, and frame
 //! export (readback now; DMA-BUF and GL interop later).
 
+mod compositor;
 mod converter;
 mod device;
 mod export;
 
 pub use ash::vk;
+pub use compositor::{BlendMode, Compositor, MAX_LAYERS, Placement, Rect, YuvTarget};
 pub use converter::{
     Converter, CpuFrame, ImageSync, Input, Layout, Plane, PlaneFormat, VkFrame, VkPlane,
 };

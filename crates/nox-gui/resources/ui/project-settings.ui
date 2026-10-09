@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- Project settings, laid out like Resolve's: categories in a sidebar,
+       the selected category's settings on the right, Cancel and Save. -->
+  <template class="NoxProjectSettings" parent="GtkWindow">
+    <property name="modal">true</property>
+    <property name="default-width">720</property>
+    <property name="default-height">420</property>
+    <property name="child">
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <child>
+          <object class="GtkBox">
+            <property name="vexpand">true</property>
+            <child>
+              <object class="GtkStackSidebar">
+                <property name="stack">stack</property>
+                <property name="width-request">170</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkSeparator">
+                <property name="orientation">vertical</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkStack" id="stack">
+                <property name="hexpand">true</property>
+                <property name="transition-type">crossfade</property>
+                <child>
+                  <object class="GtkStackPage">
+                    <property name="name">general</property>
+                    <property name="title" translatable="yes">General</property>
+                    <property name="child">
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <property name="margin-top">12</property>
+                        <property name="margin-start">12</property>
+                        <property name="margin-end">12</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">General</property>
+                            <property name="xalign">0</property>
+                            <style><class name="heading"/></style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkFrame">
+                            <property name="child">
+                              <object class="GtkGrid">
+                                <property name="row-spacing">10</property>
+                                <property name="column-spacing">14</property>
+                                <property name="margin-top">14</property>
+                                <property name="margin-bottom">14</property>
+                                <property name="margin-start">14</property>
+                                <property name="margin-end">14</property>
+            <child>
+              <object class="GtkLabel">
+                <property name="label" translatable="yes">Project name</property>
+                <property name="xalign">1</property>
+                <style><class name="dim-label"/></style>
+                <layout><property name="column">0</property><property name="row">0</property></layout>
+              </object>
+            </child>
+                                <child>
+                                  <object class="GtkEntry" id="name">
+                                    <property name="width-chars">30</property>
+                                    <layout><property name="column">1</property><property name="row">0</property></layout>
+                                  </object>
+                                </child>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkStackPage">
+                    <property name="name">timeline</property>
+                    <property name="title" translatable="yes">Master Settings</property>
+                    <property name="child">
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <property name="margin-top">12</property>
+                        <property name="margin-start">12</property>
+                        <property name="margin-end">12</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">Timeline Format</property>
+                            <property name="xalign">0</property>
+                            <style><class name="heading"/></style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkFrame">
+                            <property name="child">
+                              <object class="GtkGrid">
+                                <property name="row-spacing">10</property>
+                                <property name="column-spacing">14</property>
+                                <property name="margin-top">14</property>
+                                <property name="margin-bottom">14</property>
+                                <property name="margin-start">14</property>
+                                <property name="margin-end">14</property>
+            <child>
+              <object class="GtkLabel">
+                <property name="label" translatable="yes">Timeline resolution</property>
+                <property name="xalign">1</property>
+                <style><class name="dim-label"/></style>
+                <layout><property name="column">0</property><property name="row">0</property></layout>
+              </object>
+            </child>
+                                <child>
+                                  <object class="GtkDropDown" id="resolution">
+                                    <property name="halign">start</property>
+                                    <layout><property name="column">1</property><property name="row">0</property></layout>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkBox">
+                                    <property name="spacing">6</property>
+                                    <layout><property name="column">1</property><property name="row">1</property></layout>
+                                    <child>
+                                      <object class="GtkLabel">
+                                        <property name="label" translatable="yes" comments="As in: For 1920 × 1080 processing">For</property>
+                                      </object>
+                                    </child>
+                                    <child>
+                                      <object class="GtkSpinButton" id="width">
+                                        <property name="width-chars">5</property>
+                                        <property name="adjustment">
+                                          <object class="GtkAdjustment">
+                                            <property name="lower">16</property>
+                                            <property name="upper">8192</property>
+                                            <property name="step-increment">2</property>
+                                          </object>
+                                        </property>
+                                      </object>
+                                    </child>
+                                    <child>
+                                      <object class="GtkLabel">
+                                        <property name="label">×</property>
+                                      </object>
+                                    </child>
+                                    <child>
+                                      <object class="GtkSpinButton" id="height">
+                                        <property name="width-chars">5</property>
+                                        <property name="adjustment">
+                                          <object class="GtkAdjustment">
+                                            <property name="lower">16</property>
+                                            <property name="upper">8192</property>
+                                            <property name="step-increment">2</property>
+                                          </object>
+                                        </property>
+                                      </object>
+                                    </child>
+                                    <child>
+                                      <object class="GtkLabel">
+                                        <property name="label" translatable="yes" comments="As in: For 1920 × 1080 processing">processing</property>
+                                      </object>
+                                    </child>
+                                  </object>
+                                </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label" translatable="yes">Timeline frame rate</property>
+                <property name="xalign">1</property>
+                <style><class name="dim-label"/></style>
+                <layout><property name="column">0</property><property name="row">2</property></layout>
+              </object>
+            </child>
+                                <child>
+                                  <object class="GtkDropDown" id="frame_rate">
+                                    <property name="halign">start</property>
+                                    <layout><property name="column">1</property><property name="row">2</property></layout>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkCheckButton" id="drop_frame">
+                                    <property name="label" translatable="yes">Use drop frame timecode</property>
+                                    <layout><property name="column">1</property><property name="row">3</property></layout>
+                                  </object>
+                                </child>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkStackPage">
+                    <property name="name">scaling</property>
+                    <property name="title" translatable="yes">Image Scaling</property>
+                    <property name="child">
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <property name="margin-top">12</property>
+                        <property name="margin-start">12</property>
+                        <property name="margin-end">12</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">Input Scaling</property>
+                            <property name="xalign">0</property>
+                            <style><class name="heading"/></style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkFrame">
+                            <property name="child">
+                              <object class="GtkGrid">
+                                <property name="row-spacing">10</property>
+                                <property name="column-spacing">14</property>
+                                <property name="margin-top">14</property>
+                                <property name="margin-bottom">14</property>
+                                <property name="margin-start">14</property>
+                                <property name="margin-end">14</property>
+            <child>
+              <object class="GtkLabel">
+                <property name="label" translatable="yes">Mismatched resolution files</property>
+                <property name="xalign">1</property>
+                <style><class name="dim-label"/></style>
+                <layout><property name="column">0</property><property name="row">0</property></layout>
+              </object>
+            </child>
+                                <child>
+                                  <object class="GtkDropDown" id="scaling">
+                                    <property name="halign">start</property>
+                                    <layout><property name="column">1</property><property name="row">0</property></layout>
+                                  </object>
+                                </child>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox">
+            <property name="spacing">8</property>
+            <property name="halign">end</property>
+            <property name="margin-top">8</property>
+            <property name="margin-bottom">12</property>
+            <property name="margin-end">12</property>
+            <child>
+              <object class="GtkButton">
+                <property name="label" translatable="yes">Cancel</property>
+                <property name="action-name">window.close</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton">
+                <property name="label" translatable="yes">Save</property>
+                <signal name="clicked" handler="on_save_clicked" swapped="true"/>
+                <style><class name="suggested-action"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </property>
+  </template>
+</interface>

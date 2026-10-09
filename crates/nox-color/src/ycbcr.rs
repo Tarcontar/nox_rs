@@ -138,6 +138,36 @@ pub fn ycbcr_to_rgb(k: Coefficients, q: Quantization) -> Matrix3x4 {
     [row(0.0, r_cr), row(g_cb, g_cr), row(b_cb, 0.0)]
 }
 
+/// Matrix from R'G'B' (0–1) to normalized texel values `(Y, Cb, Cr)` for
+/// storage as `q` describes: the exact inverse of `ycbcr_to_rgb`, for
+/// encoding.
+pub fn rgb_to_ycbcr(k: Coefficients, q: Quantization) -> Matrix3x4 {
+    let forward = ycbcr_to_rgb(k, q);
+    let m: [[f64; 3]; 3] =
+        std::array::from_fn(|r| std::array::from_fn(|c| f64::from(forward[r][c])));
+    let t: [f64; 3] = std::array::from_fn(|r| f64::from(forward[r][3]));
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let cofactor = |r: usize, c: usize| {
+        let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
+        let (c1, c2) = ((c + 1) % 3, (c + 2) % 3);
+        m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1]
+    };
+    // inverse[r][c] = cofactor(c, r) / det; offset = -inverse · t.
+    let inverse: [[f64; 3]; 3] =
+        std::array::from_fn(|r| std::array::from_fn(|c| cofactor(c, r) / det));
+    std::array::from_fn(|r| {
+        let offset = -(0..3).map(|c| inverse[r][c] * t[c]).sum::<f64>();
+        [
+            inverse[r][0] as f32,
+            inverse[r][1] as f32,
+            inverse[r][2] as f32,
+            offset as f32,
+        ]
+    })
+}
+
 /// Matrix for RGB input in `(R, G, B)` order.
 pub fn rgb_to_rgb(q: Quantization) -> Matrix3x4 {
     let (s, o) = q.luma();
@@ -249,5 +279,24 @@ mod tests {
             .ycbcr_coefficients(1080),
             None
         );
+    }
+
+    #[test]
+    fn rgb_to_ycbcr_inverts_ycbcr_to_rgb() {
+        let q = Quantization::eight_bit(false);
+        let to_ycbcr = rgb_to_ycbcr(Coefficients::BT709, q);
+        let to_rgb = ycbcr_to_rgb(Coefficients::BT709, q);
+        let apply =
+            |m: &Matrix3x4, v: [f32; 3]| m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2] + r[3]);
+        // White and black: Y' 235/16, chroma 128 (as 8-bit codes).
+        let codes = |v: [f32; 3]| v.map(|c| (c * 255.0).round());
+        assert_eq!(codes(apply(&to_ycbcr, [1.0; 3])), [235.0, 128.0, 128.0]);
+        assert_eq!(codes(apply(&to_ycbcr, [0.0; 3])), [16.0, 128.0, 128.0]);
+        for rgb in [[0.2, 0.5, 0.9], [1.0, 0.0, 0.0], [0.3, 0.3, 0.3]] {
+            let back = apply(&to_rgb, apply(&to_ycbcr, rgb));
+            for c in 0..3 {
+                assert!((back[c] - rgb[c]).abs() < 1e-5, "{rgb:?} -> {back:?}");
+            }
+        }
     }
 }
