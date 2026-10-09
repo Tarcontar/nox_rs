@@ -70,7 +70,6 @@ impl MediaObject {
             .map_or(path.clone(), |n| n.to_string_lossy().into_owned())
     }
 
-    #[allow(dead_code)] // Used by the timeline in M3.
     pub fn info(&self) -> Option<MediaInfo> {
         self.imp().info.borrow().clone()
     }

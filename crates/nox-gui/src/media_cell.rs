@@ -15,6 +15,8 @@ mod imp {
         pub name: gtk::Label,
         pub summary: gtk::Label,
         pub bindings: RefCell<Vec<glib::Binding>>,
+        /// The bound item, for dragging it onto the timeline.
+        pub media: RefCell<Option<MediaObject>>,
     }
 
     #[glib::object_subclass]
@@ -58,6 +60,29 @@ mod imp {
             obj.append(&frame);
             obj.append(&self.name);
             obj.append(&self.summary);
+
+            let drag = gtk::DragSource::new();
+            drag.set_actions(gdk::DragAction::COPY);
+            drag.connect_prepare(glib::clone!(
+                #[weak]
+                obj,
+                #[upgrade_or]
+                None,
+                move |_, _, _| {
+                    let media = obj.imp().media.borrow().clone()?;
+                    Some(gdk::ContentProvider::for_value(&media.to_value()))
+                }
+            ));
+            drag.connect_drag_begin(glib::clone!(
+                #[weak(rename_to = picture)]
+                self.picture,
+                move |source, _| {
+                    if let Some(paintable) = picture.paintable() {
+                        source.set_icon(Some(&paintable), 0, 0);
+                    }
+                }
+            ));
+            obj.add_controller(drag);
         }
     }
 
@@ -78,6 +103,7 @@ impl MediaCell {
 
     pub fn bind(&self, media: &MediaObject) {
         let imp = self.imp();
+        imp.media.replace(Some(media.clone()));
         imp.name.set_label(&media.name());
         let bindings = vec![
             media
@@ -106,6 +132,7 @@ impl MediaCell {
     }
 
     pub fn unbind(&self) {
+        self.imp().media.replace(None);
         for binding in self.imp().bindings.take() {
             binding.unbind();
         }

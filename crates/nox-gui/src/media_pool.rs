@@ -10,46 +10,46 @@ use crate::media_object::MediaObject;
 pub struct MediaPool {
     pub widget: gtk::Box,
     store: gio::ListStore,
-    selection: gtk::MultiSelection,
+    grid: gtk::GridView,
 }
 
 impl MediaPool {
     pub fn new() -> Self {
         let store = gio::ListStore::new::<MediaObject>();
         let selection = gtk::MultiSelection::new(Some(store.clone()));
-        let widget = build(&store, &selection);
+        let (widget, grid) = build(&store, &selection);
         Self {
             widget,
             store,
-            selection,
+            grid,
         }
+    }
+
+    /// The item with this path, if imported.
+    pub fn find(&self, path: &std::path::Path) -> Option<MediaObject> {
+        let path = path.to_string_lossy();
+        self.store
+            .iter::<MediaObject>()
+            .flatten()
+            .find(|media| media.path() == path)
+    }
+
+    /// Calls `f` when an item is activated (double-clicked or Enter).
+    pub fn connect_activate<F: Fn(MediaObject) + 'static>(&self, f: F) {
+        let store = self.store.clone();
+        self.grid.connect_activate(move |_, position| {
+            if let Some(media) = store.item(position).and_downcast::<MediaObject>() {
+                f(media);
+            }
+        });
     }
 
     pub fn import(&self, file: &gio::File) {
         add_file(&self.store, file);
     }
-
-    /// Selects the first item, if any.
-    pub fn select_first(&self) {
-        if self.store.n_items() > 0 {
-            self.selection.select_item(0, true);
-        }
-    }
-
-    /// Calls `f` with the first selected item whenever the selection changes.
-    pub fn connect_selected<F: Fn(Option<MediaObject>) + 'static>(&self, f: F) {
-        self.selection
-            .connect_selection_changed(move |selection, _, _| {
-                let selected = selection.selection();
-                let first = (!selected.is_empty()).then(|| selected.nth(0));
-                f(first
-                    .and_then(|i| selection.item(i))
-                    .and_downcast::<MediaObject>());
-            });
-    }
 }
 
-fn build(store: &gio::ListStore, selection: &gtk::MultiSelection) -> gtk::Box {
+fn build(store: &gio::ListStore, selection: &gtk::MultiSelection) -> (gtk::Box, gtk::GridView) {
     let grid = gtk::GridView::builder()
         .model(selection)
         .factory(&item_factory())
@@ -131,7 +131,7 @@ fn build(store: &gio::ListStore, selection: &gtk::MultiSelection) -> gtk::Box {
     ));
     pool.add_controller(drop);
 
-    pool
+    (pool, grid)
 }
 
 fn item_factory() -> gtk::SignalListItemFactory {

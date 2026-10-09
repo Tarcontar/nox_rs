@@ -689,6 +689,7 @@ dependencies = [
  "gtk4",
  "nox-engine",
  "nox-media",
+ "nox-otio",
  "nox-project",
  "tracing",
  "tracing-subscriber",
@@ -708,10 +709,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nox-otio"
+version = "0.1.0"
+dependencies = [
+ "nox-project",
+ "thiserror",
+]
+
+[[package]]
 name = "nox-project"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror",
 ]
 
 [[package]]

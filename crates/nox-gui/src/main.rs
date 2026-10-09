@@ -1,6 +1,7 @@
 mod media_cell;
 mod media_object;
 mod media_pool;
+mod project;
 mod timeline;
 mod viewer;
 mod window;
@@ -50,8 +51,17 @@ fn main() -> glib::ExitCode {
     app.set_accels_for_action("win.previous-frame", &["Left"]);
     app.set_accels_for_action("win.next-frame", &["Right"]);
     app.set_accels_for_action("win.go-to-start", &["Home"]);
+    app.set_accels_for_action("win.go-to-end", &["End"]);
+    app.set_accels_for_action("win.new", &["<Control>n"]);
+    app.set_accels_for_action("win.open", &["<Control>o"]);
+    app.set_accels_for_action("win.save", &["<Control>s"]);
+    app.set_accels_for_action("win.save-as", &["<Control><Shift>s"]);
+    app.set_accels_for_action("win.undo", &["<Control>z"]);
+    app.set_accels_for_action("win.split", &["<Control>b"]);
+    app.set_accels_for_action("win.redo", &["<Control><Shift>z", "<Control>y"]);
     app.connect_activate(|app| window::build(app, &[]).present());
-    // `nox clip.mp4 …` imports the files into the media pool.
+    // `nox clip.mp4 …` imports the files into the media pool; `nox
+    // edit.otio` opens a project.
     app.connect_open(|app, files, _| window::build(app, files).present());
     app.run()
 }

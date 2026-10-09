@@ -14,6 +14,7 @@ nox-media = { path = "crates/nox-media" }
 nox-gpu = { path = "crates/nox-gpu" }
 nox-color = { path = "crates/nox-color" }
 nox-project = { path = "crates/nox-project" }
+nox-otio = { path = "crates/nox-otio" }
 nox-engine = { path = "crates/nox-engine" }
 
 ash = "0.38"

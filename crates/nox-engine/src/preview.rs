@@ -10,9 +10,10 @@
 
 use nox_gpu::{Converter, DmabufFrame, Image};
 use nox_media::{HwDevice, VideoDecoder};
+use nox_project::Time;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -29,29 +30,35 @@ pub enum FrameImage {
 /// A decoded and converted frame.
 #[derive(Debug)]
 pub struct PreviewFrame {
+    /// The id `Preview::request` returned.
+    pub request: u64,
     pub path: PathBuf,
+    /// Frame index in the source, at its own frame rate.
     pub index: i64,
     pub image: FrameImage,
 }
 
 struct Request {
+    id: u64,
     path: PathBuf,
-    index: i64,
+    time: Time,
 }
 
 pub struct Preview {
     requests: Option<Sender<Request>>,
     worker: Option<JoinHandle<()>>,
     dmabuf_allowed: Arc<AtomicBool>,
+    next_id: AtomicU64,
 }
 
 impl Preview {
     /// Starts the worker. `dmabuf_modifiers` are the DRM modifiers the
     /// consumer can import for `FOURCC_ABGR8888` (empty: always read back).
-    /// `on_frame` is called on the worker thread for every completed request.
+    /// `on_frame` is called on the worker thread for every completed request
+    /// (with the request id on failure).
     pub fn new(
         dmabuf_modifiers: Vec<u64>,
-        on_frame: impl Fn(Result<PreviewFrame, String>) + Send + 'static,
+        on_frame: impl Fn(Result<PreviewFrame, (u64, String)>) + Send + 'static,
     ) -> Self {
         let (requests, receiver) = mpsc::channel();
         let dmabuf_allowed = Arc::new(AtomicBool::new(!dmabuf_modifiers.is_empty()));
@@ -64,17 +71,23 @@ impl Preview {
             requests: Some(requests),
             worker: Some(worker),
             dmabuf_allowed,
+            next_id: AtomicU64::new(1),
         }
     }
 
-    /// Requests frame `index` of `path` (counted at the clip's frame rate).
-    pub fn request(&self, path: &Path, index: i64) {
+    /// Requests the frame of `path` shown at `time` (from the start of the
+    /// stream). Returns an id that the resulting frame carries; requests
+    /// superseded before the worker gets to them produce no frame.
+    pub fn request(&self, path: &Path, time: Time) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         if let Some(requests) = &self.requests {
             let _ = requests.send(Request {
+                id,
                 path: path.to_owned(),
-                index,
+                time,
             });
         }
+        id
     }
 
     /// Falls back to readback, e.g. after the consumer failed to import a
@@ -141,7 +154,11 @@ impl Worker {
         }
     }
 
-    fn run(mut self, requests: Receiver<Request>, on_frame: impl Fn(Result<PreviewFrame, String>)) {
+    fn run(
+        mut self,
+        requests: Receiver<Request>,
+        on_frame: impl Fn(Result<PreviewFrame, (u64, String)>),
+    ) {
         while let Ok(mut request) = requests.recv() {
             // Skip to the newest request.
             while let Ok(newer) = requests.try_recv() {
@@ -150,8 +167,12 @@ impl Worker {
             let started = Instant::now();
             let result = self
                 .render(&request)
-                .map_err(|err| format!("{}: {err}", request.path.display()));
-            tracing::trace!("preview frame {} in {:?}", request.index, started.elapsed());
+                .map_err(|err| (request.id, format!("{}: {err}", request.path.display())));
+            tracing::trace!(
+                "preview frame at {:.3}s in {:?}",
+                request.time.as_seconds(),
+                started.elapsed()
+            );
             on_frame(result);
         }
     }
@@ -166,7 +187,8 @@ impl Worker {
             self.decoder = Some((request.path.clone(), VideoDecoder::open(&request.path, hw)?));
         }
         let (_, decoder) = self.decoder.as_mut().expect("decoder");
-        let frame = decoder.frame_at(request.index)?;
+        let index = request.time.frame(decoder.frame_rate());
+        let frame = decoder.frame_at(index)?;
         let (width, height) = nox_media::display_size(&frame);
 
         let image = match &mut self.gpu {
@@ -208,8 +230,9 @@ impl Worker {
         };
         self.log_present_path(path);
         Ok(PreviewFrame {
+            request: request.id,
             path: request.path.clone(),
-            index: request.index,
+            index,
             image,
         })
     }
