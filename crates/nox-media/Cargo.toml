@@ -1,0 +1,21 @@
+[package]
+name = "nox-media"
+description = "Media probing, decoding and encoding on top of FFmpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ffmpeg.workspace = true
+nox-color.workspace = true
+nox-gpu.workspace = true
+nox-project.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+libc = "0.2"

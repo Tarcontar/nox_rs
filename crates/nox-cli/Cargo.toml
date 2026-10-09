@@ -1,0 +1,17 @@
+[package]
+name = "nox-cli"
+description = "Headless probing and rendering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nox-media.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nox-cli"
+path = "src/main.rs"

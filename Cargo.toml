@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/nox-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Stephan Vedder <stephan.vedder@gmail.com>"]
+
+[workspace.dependencies]
+nox-media = { path = "crates/nox-media" }
+nox-gpu = { path = "crates/nox-gpu" }
+nox-color = { path = "crates/nox-color" }
+nox-project = { path = "crates/nox-project" }
+nox-engine = { path = "crates/nox-engine" }
+
+ash = "0.38"
+async-channel = "2"
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+ffmpeg = { package = "ffmpeg-next", version = "9" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

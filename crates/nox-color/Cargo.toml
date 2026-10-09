@@ -1,0 +1,12 @@
+[package]
+name = "nox-color"
+description = "Color science: H.273 color tags, ACES, CDL, LUTs and an OCIO config subset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

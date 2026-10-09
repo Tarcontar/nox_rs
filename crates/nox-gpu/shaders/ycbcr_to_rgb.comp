@@ -1,0 +1,66 @@
+// Converts decoded video planes to display-referred R'G'B' (RGBA8).
+//
+// Planes are sampled as UNORM textures; the push-constant matrix (built by
+// nox-color) maps the normalized texel values straight to R'G'B', so range,
+// bit depth and Y'CbCr coefficients need no special cases here.
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D out_image;
+layout(set = 0, binding = 1) uniform sampler2D plane0;
+layout(set = 0, binding = 2) uniform sampler2D plane1;
+layout(set = 0, binding = 3) uniform sampler2D plane2;
+
+layout(push_constant) uniform Params {
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
+    // Chroma sample position relative to center-sited, in normalized
+    // coordinates (H.273 chroma sample location).
+    vec2 chroma_offset;
+    // Picture size / image size: decoded images may be padded (e.g. 1088
+    // rows for 1080p), and only the picture area is sampled.
+    vec2 uv_scale;
+    ivec2 size; // output size
+    int layout_mode;
+    int swap_chroma;
+} p;
+
+const int THREE_PLANE = 0; // Y, Cb, Cr (or G, B, R) in separate planes
+const int TWO_PLANE = 1;   // Y + interleaved CbCr (NV12, P010, ...)
+const int PACKED = 2;      // one RGBA plane
+const int ONE_PLANE = 3;   // luma only
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pos, p.size))) {
+        return;
+    }
+    // All planes are sampled bilinearly at the output pixel center, which
+    // scales to the output size (non-square pixels, preview downscaling).
+    // At 1:1 this returns the exact texels.
+    vec2 uv = (vec2(pos) + 0.5) / vec2(p.size) * p.uv_scale;
+    vec2 chroma_uv = uv + p.chroma_offset;
+
+    vec3 samples;
+    if (p.layout_mode == PACKED) {
+        samples = texture(plane0, uv).rgb;
+    } else {
+        float y = texture(plane0, uv).r;
+        vec2 c = vec2(0.0);
+        if (p.layout_mode == TWO_PLANE) {
+            c = texture(plane1, chroma_uv).rg;
+        } else if (p.layout_mode == THREE_PLANE) {
+            c = vec2(texture(plane1, chroma_uv).r, texture(plane2, chroma_uv).r);
+        }
+        if (p.swap_chroma != 0) {
+            c = c.yx;
+        }
+        samples = vec3(y, c);
+    }
+
+    vec4 v = vec4(samples, 1.0);
+    vec3 rgb = vec3(dot(p.row0, v), dot(p.row1, v), dot(p.row2, v));
+    imageStore(out_image, pos, vec4(clamp(rgb, 0.0, 1.0), 1.0));
+}

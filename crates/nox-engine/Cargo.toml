@@ -1,0 +1,16 @@
+[package]
+name = "nox-engine"
+description = "Playback and render engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nox-gpu.workspace = true
+nox-media.workspace = true
+nox-project.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

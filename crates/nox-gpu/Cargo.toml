@@ -1,0 +1,17 @@
+[package]
+name = "nox-gpu"
+description = "Vulkan device, compute pipelines and frame export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ash.workspace = true
+gpu-allocator.workspace = true
+nox-color.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

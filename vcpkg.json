@@ -1,0 +1,14 @@
+{
+  "name": "nox",
+  "version": "0.1.0",
+  "description": "Native dependencies for platforms without system GTK4/FFmpeg (Windows, macOS).",
+  "dependencies": [
+    "pkgconf",
+    "gtk",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale"]
+    }
+  ]
+}
