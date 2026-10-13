@@ -367,7 +367,7 @@ fn dmabuf_export_matches_readback() {
         .frame_at(3)
         .unwrap();
     let mut converter = Converter::new(gpu).unwrap();
-    if let Err(err) = converter.enable_dmabuf(&[0]) {
+    if let Err(err) = converter.enable_dmabuf(&[(nox_gpu::FOURCC_ABGR8888, 0)]) {
         eprintln!("skipping: {err}");
         return;
     }
@@ -480,7 +480,7 @@ fn vulkan_zero_copy_dmabuf_stress() {
     };
     let mut decoder = VideoDecoder::open(&path, Some(&hw)).unwrap();
     let mut converter = Converter::new(gpu).unwrap();
-    if let Err(err) = converter.enable_dmabuf(&[0]) {
+    if let Err(err) = converter.enable_dmabuf(&[(nox_gpu::FOURCC_ABGR8888, 0)]) {
         eprintln!("skipping: {err}");
         return;
     }

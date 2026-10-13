@@ -3,6 +3,7 @@
 mod common;
 
 use common::fixture;
+use nox_color::{InputTransform, OutputTransform};
 use nox_gpu::{BlendMode, Compositor, Converter, Rect};
 use nox_media::{HwDevice, VideoDecoder, ffmpeg, with_cpu_frame};
 use std::sync::{Arc, OnceLock};
@@ -80,21 +81,40 @@ fn layers_blend_like_the_cpu_reference() {
         width: 64,
         height: 36,
     };
-    let mix = |a: [f64; 3], b: [f64; 3], t: f64| [0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * t);
+    // Layers blend in the linear working space (ACEScg): BT.709 sources
+    // enter through the input transform, and the output transform encodes.
+    let linear = |v: [f64; 3]| {
+        InputTransform::default()
+            .apply(v.map(|c| c as f32))
+            .map(f64::from)
+    };
+    let encode = |v: [f64; 3]| OutputTransform.apply(v.map(|c| c as f32)).map(f64::from);
+    let mix = |a: [f64; 3], b: [f64; 3], t: f64| {
+        let (a, b) = (linear(a), linear(b));
+        encode([0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * t))
+    };
+    let (lr, lb) = (linear(r), linear(b));
 
     for (mode, opacity, expected) in [
         (BlendMode::Normal, 0.5, mix(r, b, 0.5)),
         (BlendMode::Normal, 1.0, b),
-        (BlendMode::Add, 1.0, [0, 1, 2].map(|c| r[c] + b[c])),
-        (BlendMode::Multiply, 1.0, [0, 1, 2].map(|c| r[c] * b[c])),
+        (
+            BlendMode::Add,
+            1.0,
+            encode([0, 1, 2].map(|c| lr[c] + lb[c])),
+        ),
+        (
+            BlendMode::Multiply,
+            1.0,
+            encode([0, 1, 2].map(|c| lr[c] * lb[c])),
+        ),
         (
             BlendMode::Screen,
             0.75,
-            mix(
-                r,
-                [0, 1, 2].map(|c| 1.0 - (1.0 - r[c]) * (1.0 - b[c])),
-                0.75,
-            ),
+            encode([0, 1, 2].map(|c| {
+                let screen = 1.0 - (1.0 - lr[c]) * (1.0 - lb[c]);
+                lr[c] + (screen - lr[c]) * 0.75
+            })),
         ),
     ] {
         compositor.begin(128, 72).unwrap();
@@ -205,7 +225,10 @@ fn single_layer_matches_plain_conversion() {
         assert!(max <= 1, "frame {index}: max difference {max}");
     }
 
-    if let Err(err) = compositor.enable_dmabuf(&[0]) {
+    if let Err(err) = compositor.enable_dmabuf(&[
+        (nox_gpu::FOURCC_ABGR16161616F, 0),
+        (nox_gpu::FOURCC_ABGR8888, 0),
+    ]) {
         eprintln!("skipping DMA-BUF part: {err}");
         return;
     }

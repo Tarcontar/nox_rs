@@ -86,6 +86,19 @@ pub fn full_range(timeline: &Timeline) -> Range<i64> {
     0..end
 }
 
+/// The frames between the timeline's In and Out marks, if both are set:
+/// from the frame at In up to and including the frame Out ends.
+pub fn marked_range(timeline: &Timeline) -> Option<Range<i64>> {
+    let fps = timeline.frame_rate();
+    let marked = timeline.settings.marked_range()?;
+    let start = marked.start.frame(fps);
+    let mut end = marked.end().frame(fps);
+    if Time::from_frames(end, fps) < marked.end() {
+        end += 1;
+    }
+    (start < end).then_some(start..end)
+}
+
 /// Renders and writes the timeline; `progress(done, total)` is called after
 /// every frame and cancels the export by returning false.
 pub fn export(
@@ -221,5 +234,29 @@ impl Drop for Export {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nox_project::Rational;
+
+    #[test]
+    fn marked_range_in_frames() {
+        let fps = Rational::new(30000, 1001);
+        let mut timeline = Timeline::new("t", fps);
+        assert_eq!(marked_range(&timeline), None);
+        timeline
+            .settings
+            .set_mark_in(Some(Time::from_frames(10, fps)));
+        assert_eq!(marked_range(&timeline), None);
+        timeline
+            .settings
+            .set_mark_out(Some(Time::from_frames(25, fps)));
+        assert_eq!(marked_range(&timeline), Some(10..25));
+        // Marks off the frame grid still cover the frames they touch.
+        timeline.settings.mark_out = Some(Time::new(1, Rational::new(1, 1)));
+        assert_eq!(marked_range(&timeline), Some(10..30));
     }
 }

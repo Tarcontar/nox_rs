@@ -89,15 +89,19 @@ fn composites_tracks_and_dissolves() {
         let _ = sender.send(event);
     });
     engine.set_size(160, 90);
-    engine.set_timeline(Arc::new(timeline));
+    engine.set_timeline(Arc::new(timeline.clone()));
 
     let red_px = pixel(&render(&engine, &events, 5), 80, 45);
     let blue_px = pixel(&render(&engine, &events, 70), 80, 45);
     assert!(close(red_px, [0xC0, 0x30, 0x20]), "red: {red_px:?}");
     assert!(close(blue_px, [0x20, 0x60, 0xE0]), "blue: {blue_px:?}");
+    // Opacity and dissolves mix in linear light (BT.1886 decoding).
     let mix = |t: f64| {
-        [0, 1, 2]
-            .map(|c| (f64::from(red_px[c]) * (1.0 - t) + f64::from(blue_px[c]) * t).round() as u8)
+        let linear = |v: u8| (f64::from(v) / 255.0).powf(2.4);
+        [0, 1, 2].map(|c| {
+            let l = linear(red_px[c]) * (1.0 - t) + linear(blue_px[c]) * t;
+            (l.powf(1.0 / 2.4) * 255.0).round() as u8
+        })
     };
 
     let half = pixel(&render(&engine, &events, 15), 80, 45);
@@ -126,6 +130,13 @@ fn composites_tracks_and_dissolves() {
     engine.set_size(64, 36);
     assert!(engine.cached(15).is_none());
     assert_eq!(render(&engine, &events, 15).size(), (64, 36));
+
+    // A disabled (hidden) track isn't composited.
+    timeline.track_mut(v2).unwrap().item.enabled = false;
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    let hidden = pixel(&render(&engine, &events, 15), 80, 45);
+    assert!(close(hidden, red_px), "hidden V2: {hidden:?}");
 }
 
 #[test]
@@ -170,6 +181,12 @@ fn mixer_places_and_fades_audio() {
     let (first, last) = level(&mut mixer, &mut block, 24_000);
     assert!((first - 0.25).abs() < 1e-3 && (last - 0.25).abs() < 1e-3);
     assert_eq!(level(&mut mixer, &mut block, 30_000), (0.0, 0.0));
+
+    // A muted (disabled) track is left out of the mix.
+    let mut muted = timeline.clone();
+    muted.track_mut(1).unwrap().item.enabled = false;
+    mixer.mix(&muted, 24_000, &mut block);
+    assert!(block.iter().all(|&s| s == 0.0));
 }
 
 #[test]

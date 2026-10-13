@@ -1,9 +1,10 @@
 //! The export dialog (`resources/ui/export-dialog.ui`): where to, in which
-//! format and quality, then a progress bar while the timeline renders on its
-//! own thread.
+//! format and quality, the whole timeline or the In to Out range, then a
+//! progress bar while the timeline renders on its own thread.
 
 use gtk::{CompositeTemplate, gio, glib, prelude::*, subclass::prelude::*};
 use nox_engine::{EncodeQuality, Export, ExportEvent, ExportSettings, VideoCodec};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -64,6 +65,8 @@ mod imp {
         #[template_child]
         pub audio: TemplateChild<gtk::CheckButton>,
         #[template_child]
+        pub range: TemplateChild<gtk::DropDown>,
+        #[template_child]
         pub summary: TemplateChild<gtk::Label>,
         #[template_child]
         pub progress: TemplateChild<gtk::ProgressBar>,
@@ -77,6 +80,9 @@ mod imp {
         pub start: TemplateChild<gtk::Button>,
         /// A snapshot of the timeline taken when the dialog opened.
         pub timeline: OnceCell<Arc<nox_project::Timeline>>,
+        /// The frames to export: the whole timeline, and In to Out if both
+        /// marks are set.
+        pub ranges: OnceCell<(Range<i64>, Option<Range<i64>>)>,
         /// The running export, if any; dropping it cancels.
         pub running: RefCell<Option<Export>>,
         /// Set while a preset fills in the settings.
@@ -115,8 +121,13 @@ mod imp {
 
     impl WindowImpl for ExportDialog {
         fn close_request(&self) -> glib::Propagation {
-            // Closing cancels a running export.
-            self.running.replace(None);
+            // Closing (or Escape) first cancels a running export and keeps
+            // the dialog, so its outcome stays visible; closing again
+            // closes it.
+            if let Some(export) = self.running.borrow().as_ref() {
+                export.cancel();
+                return glib::Propagation::Stop;
+            }
             self.parent_close_request()
         }
     }
@@ -200,12 +211,39 @@ impl ExportDialog {
         }
     }
 
-    /// Takes the timeline and suggests a file next to the project.
+    /// Takes the timeline and suggests a file next to the project. The
+    /// range is In to Out when both marks are set (as on Resolve's Deliver
+    /// page), else the whole timeline.
     pub(crate) fn load(&self, project: &Rc<Project>) {
         let imp = self.imp();
         let timeline = Arc::new(project.timeline().clone());
         let fps = timeline.frame_rate();
-        let frames = nox_engine::full_range(&timeline).end;
+        let drop_frame = timeline.settings.drop_frame;
+        let full = nox_engine::full_range(&timeline);
+        let marked = nox_engine::marked_range(&timeline);
+        let mut choices = vec![gettext("Entire timeline")];
+        if let Some(marked) = &marked {
+            let timecode = |frame| nox_project::format_timecode(frame, fps, drop_frame);
+            choices.push(fill(
+                &gettext("In to Out ({start} – {end})"),
+                &[
+                    ("start", &timecode(marked.start)),
+                    ("end", &timecode(marked.end - 1)),
+                ],
+            ));
+        }
+        imp.range.set_model(Some(&string_list(
+            choices.iter().map(String::as_str),
+            false,
+        )));
+        imp.range.set_sensitive(marked.is_some());
+        imp.range.set_selected(if marked.is_some() { 1 } else { 0 });
+        imp.ranges.set((full, marked)).expect("loaded once");
+        imp.range.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| dialog.update_summary()
+        ));
         let dir = project
             .path()
             .and_then(|p| p.parent().map(PathBuf::from))
@@ -217,6 +255,29 @@ impl ExportDialog {
             .unwrap_or_else(|| timeline.name.clone());
         imp.path
             .set_text(&dir.join(format!("{file_name}.mp4")).to_string_lossy());
+        imp.timeline.set(timeline).expect("loaded once");
+        self.update_summary();
+    }
+
+    /// The frames the chosen range covers.
+    fn range(&self) -> Range<i64> {
+        let imp = self.imp();
+        let (full, marked) = imp.ranges.get().expect("loaded");
+        match marked {
+            Some(marked) if imp.range.selected() == 1 => marked.clone(),
+            _ => full.clone(),
+        }
+    }
+
+    /// Describes what will be rendered: size, rate and length of the range.
+    fn update_summary(&self) {
+        let imp = self.imp();
+        let Some(timeline) = imp.timeline.get() else {
+            return;
+        };
+        let fps = timeline.frame_rate();
+        let range = self.range();
+        let frames = range.end - range.start;
         imp.summary.set_text(&fill(
             &ngettext(
                 "{width} × {height}, {fps} fps, {frames} frame ({timecode})",
@@ -231,7 +292,6 @@ impl ExportDialog {
                 ("timecode", &nox_project::timecode(frames, fps)),
             ],
         ));
-        imp.timeline.set(timeline).expect("loaded once");
     }
 
     #[template_callback]
@@ -305,7 +365,7 @@ impl ExportDialog {
             codec: FORMATS[imp.format.selected() as usize].1,
             quality: QUALITIES[imp.quality.selected() as usize].1,
             hardware: imp.hardware.is_active(),
-            range: None,
+            range: Some(self.range()),
             audio: imp.audio.is_active(),
         };
         self.set_running(true);
@@ -373,8 +433,9 @@ impl ExportDialog {
                                 ("encoder", &encoder),
                             ],
                         ));
-                        imp.cancel.set_label(&gettext("Close"));
+                        imp.cancel.set_label(&gettext("_Close"));
                         imp.open_folder.set_visible(true);
+                        imp.open_folder.grab_focus();
                     }
                     Err(err) => {
                         imp.progress.set_visible(false);
@@ -382,8 +443,14 @@ impl ExportDialog {
                             &gettext("Export failed: {error}"),
                             &[("error", &err)],
                         ));
+                        imp.cancel.grab_focus();
                     }
                 }
+                // The status label appears silently; tell screen readers.
+                self.announce(
+                    &imp.status.text(),
+                    gtk::AccessibleAnnouncementPriority::High,
+                );
                 true
             }
         }

@@ -549,11 +549,22 @@ fn take_settings(metadata: &mut Object) -> Settings {
     {
         settings.scaling = mode;
     }
+    let mut mark = |key| nox.remove(key).as_ref().and_then(read_rational_time);
+    settings.mark_in = mark("mark_in");
+    settings.mark_out = mark("mark_out");
     // Keep anything we don't know, e.g. from newer versions.
     if !nox.is_empty() {
         metadata.insert("nox", nox);
     }
     settings
+}
+
+/// A `RationalTime` stored in Nox's metadata, if it is one.
+fn read_rational_time(value: &Value) -> Option<Time> {
+    let object = value.as_object()?;
+    let value = object.get("value")?.as_f64()?;
+    let rate = object.get("rate")?.as_f64()?;
+    time_from_otio(value, rate)
 }
 
 /// OTIO's named marker colors and their RGB values.
@@ -656,16 +667,33 @@ fn write_range(range: Option<TimeRange>) -> Value {
 fn write_timeline(timeline: &Timeline) -> Value {
     let mut object = with_schema("Timeline.1");
     let mut metadata = timeline.metadata.clone();
-    if timeline.settings != Settings::default() {
+    let settings = &timeline.settings;
+    let marks = [
+        ("mark_in", settings.mark_in),
+        ("mark_out", settings.mark_out),
+    ];
+    let unmarked = Settings {
+        mark_in: None,
+        mark_out: None,
+        ..settings.clone()
+    };
+    let has_marks = marks.iter().any(|(_, mark)| mark.is_some());
+    if unmarked != Settings::default() || has_marks {
         let mut nox = match metadata.remove("nox") {
             Some(Value::Object(nox)) => nox,
             _ => Object::new(),
         };
-        let settings = &timeline.settings;
-        nox.insert("drop_frame", settings.drop_frame);
-        nox.insert("width", i64::from(settings.width));
-        nox.insert("height", i64::from(settings.height));
-        nox.insert("scaling", settings.scaling.as_str());
+        if unmarked != Settings::default() {
+            nox.insert("drop_frame", settings.drop_frame);
+            nox.insert("width", i64::from(settings.width));
+            nox.insert("height", i64::from(settings.height));
+            nox.insert("scaling", settings.scaling.as_str());
+        }
+        for (key, mark) in marks {
+            if let Some(mark) = mark {
+                nox.insert(key, write_time(mark));
+            }
+        }
         metadata.insert("nox", nox);
     }
     object.insert("metadata", metadata);
@@ -870,6 +898,24 @@ mod tests {
         timeline.metadata.insert("other", 1);
         let text = write_string(&timeline);
         assert!(text.contains("\"drop_frame\": true"));
+        assert_eq!(read_str(&text).unwrap(), timeline);
+    }
+
+    #[test]
+    fn marks_and_track_state_round_trip() {
+        let fps = Rational::new(30000, 1001);
+        let mut timeline = Timeline::new("t", fps);
+        timeline.settings.mark_in = Some(Time::from_frames(12, fps));
+        timeline.settings.mark_out = Some(Time::from_frames(345, fps));
+        let a1 = timeline.track_mut(1).unwrap();
+        a1.item.enabled = false;
+        a1.item.set_locked(true);
+        a1.item.name = "Dialog".into();
+        let text = write_string(&timeline);
+        assert!(text.contains("\"mark_in\""), "{text}");
+        // Only the marks: the other settings are the defaults.
+        assert!(!text.contains("\"drop_frame\""), "{text}");
+        assert!(text.contains("\"locked\": true"), "{text}");
         assert_eq!(read_str(&text).unwrap(), timeline);
     }
 

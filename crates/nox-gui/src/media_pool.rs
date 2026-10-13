@@ -41,6 +41,8 @@ mod imp {
         type ParentType = gtk::Box;
 
         fn class_init(klass: &mut Self::Class) {
+            // Used by the grid's item template (media-pool-item.ui).
+            MediaCell::ensure_type();
             klass.bind_template();
             klass.bind_template_instance_callbacks();
         }
@@ -55,7 +57,6 @@ mod imp {
             self.parent_constructed();
             let obj = self.obj();
             self.grid.set_model(Some(&self.selection));
-            self.grid.set_factory(Some(&item_factory()));
             self.grid
                 .add_controller(delete_shortcut(&self.store, &self.selection));
             self.store.connect_items_changed(glib::clone!(
@@ -130,30 +131,6 @@ impl MediaPool {
             }
         });
     }
-}
-
-fn item_factory() -> gtk::SignalListItemFactory {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("ListItem");
-        item.set_child(Some(&MediaCell::new()));
-    });
-    factory.connect_bind(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("ListItem");
-        let media = item
-            .item()
-            .and_downcast::<MediaObject>()
-            .expect("MediaObject");
-        let cell = item.child().and_downcast::<MediaCell>().expect("MediaCell");
-        cell.bind(&media);
-    });
-    factory.connect_unbind(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("ListItem");
-        if let Some(cell) = item.child().and_downcast::<MediaCell>() {
-            cell.unbind();
-        }
-    });
-    factory
 }
 
 fn delete_shortcut(

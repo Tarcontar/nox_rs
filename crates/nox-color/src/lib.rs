@@ -5,8 +5,17 @@
 
 pub mod cicp;
 pub mod hdr;
+pub mod primaries;
+pub mod transfer;
+pub mod working;
 pub mod ycbcr;
 
 pub use cicp::Cicp;
 pub use hdr::ToneMapping;
+pub use primaries::Primaries;
+pub use transfer::Transfer;
+pub use working::{InputTransform, OutputTransform, WORKING_PRIMARIES};
 pub use ycbcr::{Coefficients, Matrix3x4, Quantization};
+
+/// A 3×3 matrix, row-major, applied to column vectors.
+pub type Mat3 = [[f32; 3]; 3];

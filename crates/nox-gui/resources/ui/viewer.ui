@@ -25,6 +25,9 @@
               <object class="GtkButton">
                 <property name="icon-name">media-skip-backward-symbolic</property>
                 <property name="tooltip-text" translatable="yes">Go to Start</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Go to Start</property>
+                </accessibility>
                 <property name="action-name">win.go-to-start</property>
                 <property name="focus-on-click">false</property>
                 <style><class name="flat"/></style>
@@ -34,6 +37,9 @@
               <object class="GtkButton">
                 <property name="icon-name">media-seek-backward-symbolic</property>
                 <property name="tooltip-text" translatable="yes">Previous Frame</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Previous Frame</property>
+                </accessibility>
                 <property name="action-name">win.previous-frame</property>
                 <property name="focus-on-click">false</property>
                 <style><class name="flat"/></style>
@@ -43,6 +49,9 @@
               <object class="GtkButton" id="play_button">
                 <property name="icon-name">media-playback-start-symbolic</property>
                 <property name="tooltip-text" translatable="yes">Play</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Play</property>
+                </accessibility>
                 <property name="action-name">win.play-pause</property>
                 <property name="focus-on-click">false</property>
                 <style><class name="flat"/></style>
@@ -52,6 +61,9 @@
               <object class="GtkButton">
                 <property name="icon-name">media-seek-forward-symbolic</property>
                 <property name="tooltip-text" translatable="yes">Next Frame</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Next Frame</property>
+                </accessibility>
                 <property name="action-name">win.next-frame</property>
                 <property name="focus-on-click">false</property>
                 <style><class name="flat"/></style>
@@ -61,6 +73,9 @@
               <object class="GtkButton">
                 <property name="icon-name">media-skip-forward-symbolic</property>
                 <property name="tooltip-text" translatable="yes">Go to End</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Go to End</property>
+                </accessibility>
                 <property name="action-name">win.go-to-end</property>
                 <property name="focus-on-click">false</property>
                 <style><class name="flat"/></style>

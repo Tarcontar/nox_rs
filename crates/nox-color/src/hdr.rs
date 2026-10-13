@@ -6,7 +6,8 @@
 //! peak lands on SDR reference white (203 nits, BT.2408), and encoded with
 //! the BT.1886 display gamma, like SDR video. This mirrors
 //! `shaders/ycbcr_to_rgb.comp` in `nox-gpu`, which tests compare against.
-//! Proper HDR output is M6.
+//! In the working space (`working`) the same mapping is used without the
+//! final encoding. Proper HDR output is M6.
 
 use crate::Cicp;
 
@@ -102,8 +103,17 @@ impl ToneMapping {
     /// Maps a non-linear R'G'B' value (0–1, after the Y'CbCr matrix) to
     /// display R'G'B' for SDR.
     pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
+        if !self.is_hdr() {
+            return rgb;
+        }
+        self.apply_linear(rgb).map(|v| v.powf(1.0 / 2.4))
+    }
+
+    /// Like `apply`, but returns linear BT.709 light relative to SDR white
+    /// (0–1), before the BT.1886 encoding. HDR frames only.
+    pub fn apply_linear(&self, rgb: [f32; 3]) -> [f32; 3] {
         let light = match self.transfer {
-            HdrTransfer::None => return rgb,
+            HdrTransfer::None => panic!("apply_linear on an SDR frame"),
             HdrTransfer::Pq => rgb.map(|v| pq_eotf(v) * 10_000.0),
             HdrTransfer::Hlg => hlg_display_light(rgb, self.gamut),
         };
@@ -116,7 +126,7 @@ impl ToneMapping {
         } else {
             0.0
         };
-        linear.map(|v| (v * scale / SDR_WHITE_NITS).clamp(0.0, 1.0).powf(1.0 / 2.4))
+        linear.map(|v| (v * scale / SDR_WHITE_NITS).clamp(0.0, 1.0))
     }
 }
 

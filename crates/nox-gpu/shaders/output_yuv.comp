@@ -1,12 +1,17 @@
-// Writes the accumulated picture as 4:2:0 Y'CbCr into the two planes of an
-// NV12 image (e.g. a video encoder's input), one invocation per 2×2 block.
-// Chroma is left-sited, the MPEG-2/H.264 convention: horizontally filtered
-// [1/4 1/2 1/4] around the left column, averaged over the two rows.
+// Writes the accumulated picture (linear working space) through the output
+// transform as 4:2:0 Y'CbCr into the two planes of an NV12 image (e.g. a
+// video encoder's input), one invocation per 2×2 block. Chroma is
+// left-sited, the MPEG-2/H.264 convention: horizontally filtered
+// [1/4 1/2 1/4] around the left column, averaged over the two rows (of
+// R'G'B', as encoders do).
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "color.glsl"
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform readonly image2D accum;
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accum;
 layout(set = 0, binding = 1, r8) uniform writeonly image2D luma;
 layout(set = 0, binding = 2, rg8) uniform writeonly image2D chroma;
 
@@ -20,7 +25,7 @@ layout(push_constant) uniform Params {
 
 vec4 rgb_at(ivec2 pos) {
     pos = clamp(pos, ivec2(0), p.size - 1);
-    return vec4(clamp(imageLoad(accum, pos).rgb, 0.0, 1.0), 1.0);
+    return vec4(output_transform(imageLoad(accum, pos).rgb), 1.0);
 }
 
 void main() {

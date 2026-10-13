@@ -1,10 +1,11 @@
-// Blends one layer (an RGBA8 image converted by ycbcr_to_rgb.comp) onto the
-// accumulated picture. Runs over the layer's rectangle only.
+// Blends one layer (converted into the linear working space by
+// ycbcr_to_working) onto the accumulated picture, in linear light. Runs
+// over the layer's rectangle only.
 #version 450
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform image2D accum;
+layout(set = 0, binding = 0, rgba32f) uniform image2D accum;
 layout(set = 0, binding = 1) uniform sampler2D layer;
 
 layout(push_constant) uniform Params {

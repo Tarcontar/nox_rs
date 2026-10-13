@@ -5,6 +5,12 @@
 //! Transitions touching an edited range are removed, since their neighbors
 //! change. After every edit a track is normalized: adjacent gaps merged,
 //! empty and trailing gaps removed.
+//!
+//! The ripple edits (insert, ripple delete, ripple trim) are the exception:
+//! they move everything after the edit on the tracks involved. A roll edit
+//! moves the cut between two clips, so nothing else moves.
+//!
+//! Locked tracks (`Item::locked`) reject every edit of their contents.
 
 use crate::metadata::Object;
 use crate::time::{Time, TimeRange};
@@ -28,6 +34,8 @@ pub enum EditError {
     NoCut,
     #[error("the clips have no media beyond the cut to dissolve with")]
     NoHandles,
+    #[error("track {0} is locked")]
+    Locked(usize),
 }
 
 /// An item on a top-level track: its stack index and its index in the track.
@@ -189,6 +197,159 @@ impl Track {
         self.overwrite(Composable::Clip(clip), new_range.start)
     }
 
+    /// Removes everything in `range` and closes the gap: later items move
+    /// back by its duration.
+    pub fn ripple_delete(&mut self, range: TimeRange) {
+        self.remove_transitions_touching(range);
+        let first = self.split_at(range.start);
+        let last = self.split_at(range.end());
+        self.children.drain(first..last);
+        self.normalize();
+    }
+
+    /// How far each edge of clip `index` can be ripple-trimmed, in the
+    /// terms of [`Track::trim_limits`]: `to` is where the edge is dragged.
+    /// Neighbors don't limit a ripple trim, since they move along; only
+    /// the media does (and for stills, the start of the track).
+    pub fn ripple_trim_limits(
+        &self,
+        index: usize,
+        edge: Edge,
+    ) -> Result<(Time, Option<Time>), EditError> {
+        let clip = self
+            .children
+            .get(index)
+            .and_then(Composable::as_clip)
+            .ok_or(EditError::NotTrimmable)?;
+        let range = self.range_of_child(index);
+        let source = clip.trimmed_range().ok_or(EditError::NotTrimmable)?;
+        let available = clip.available_range();
+        Ok(match edge {
+            Edge::Start => {
+                let min = match available {
+                    Some(available) => range.start - (source.start - available.start),
+                    None => Time::zero(range.start.timebase),
+                };
+                (min, Some(range.end()))
+            }
+            Edge::End => {
+                let max = available.map(|available| range.end() + (available.end() - source.end()));
+                (range.start, max)
+            }
+        })
+    }
+
+    /// Ripple-trims one edge of clip `index` to track time `to`: the clip
+    /// gets longer or shorter and everything after it moves along. A
+    /// trimmed start stays where it is; `to` only says how much media to
+    /// add or remove there (as if the edge had been dragged to `to`).
+    pub fn ripple_trim(&mut self, index: usize, edge: Edge, to: Time) -> Result<(), EditError> {
+        let (min, max) = self.ripple_trim_limits(index, edge)?;
+        let out_of_range = match edge {
+            Edge::Start => to < min || max.is_some_and(|max| to >= max),
+            Edge::End => to <= min || max.is_some_and(|max| to > max),
+        };
+        if out_of_range {
+            return Err(EditError::OutOfRange);
+        }
+        let range = self.range_of_child(index);
+        let clip = self.children[index].as_clip_mut().expect("clip");
+        let mut source = clip.trimmed_range().expect("range");
+        match edge {
+            Edge::Start => {
+                source.start += to - range.start;
+                source.duration = range.end() - to;
+            }
+            Edge::End => source.duration = to - range.start,
+        }
+        clip.item.source_range = Some(source);
+        self.remove_adjacent_transitions(index);
+        self.normalize();
+        Ok(())
+    }
+
+    /// Where the cut after clip `index` (between it and the next clip) can
+    /// be rolled to: `min..=max`, limited by the media both clips have
+    /// beyond the cut. The cut must also stay strictly inside the two
+    /// clips, which the limits don't include.
+    pub fn roll_limits(&self, index: usize) -> Result<(Time, Time), EditError> {
+        let (left, right) = self.cut_after(index)?;
+        let left_range = self.range_of_child(left);
+        let right_range = self.range_of_child(right);
+        let clip = |i: usize| self.children[i].as_clip().expect("clip");
+        let (a, b) = (clip(left), clip(right));
+        let (a_source, b_source) = (
+            a.trimmed_range().ok_or(EditError::NotTrimmable)?,
+            b.trimmed_range().ok_or(EditError::NotTrimmable)?,
+        );
+        let mut min = left_range.start;
+        let mut max = right_range.end();
+        if let Some(available) = a.available_range() {
+            max = max.min(left_range.end() + (available.end() - a_source.end()));
+        }
+        if let Some(available) = b.available_range() {
+            min = min.max(right_range.start - (b_source.start - available.start));
+        }
+        Ok((min, max))
+    }
+
+    /// Rolls the cut after clip `index` to track time `to`: the clip ends
+    /// there and the next clip starts there, so nothing else moves. A
+    /// transition at the cut is removed.
+    pub fn roll(&mut self, index: usize, to: Time) -> Result<(), EditError> {
+        let (min, max) = self.roll_limits(index)?;
+        let (left, right) = self.cut_after(index)?;
+        let left_range = self.range_of_child(left);
+        let right_range = self.range_of_child(right);
+        if to < min || to > max || to <= left_range.start || to >= right_range.end() {
+            return Err(EditError::OutOfRange);
+        }
+        let delta = to - left_range.end();
+        let a = self.children[left].as_clip_mut().expect("clip");
+        let mut source = a.trimmed_range().expect("range");
+        source.duration = to - left_range.start;
+        a.item.source_range = Some(source);
+        let b = self.children[right].as_clip_mut().expect("clip");
+        let mut source = b.trimmed_range().expect("range");
+        source.start += delta;
+        source.duration = right_range.end() - to;
+        b.item.source_range = Some(source);
+        if right == left + 2 {
+            self.children.remove(left + 1);
+        }
+        Ok(())
+    }
+
+    /// The clips on both sides of the cut after clip `index`, skipping a
+    /// transition there.
+    fn cut_after(&self, index: usize) -> Result<(usize, usize), EditError> {
+        let is_clip = |i: usize| self.children.get(i).and_then(Composable::as_clip).is_some();
+        if !is_clip(index) {
+            return Err(EditError::NotTrimmable);
+        }
+        let right = match self.children.get(index + 1) {
+            Some(Composable::Transition(_)) => index + 2,
+            _ => index + 1,
+        };
+        if !is_clip(right) {
+            return Err(EditError::NoCut);
+        }
+        Ok((index, right))
+    }
+
+    /// Removes the transitions right before and after child `index`.
+    fn remove_adjacent_transitions(&mut self, index: usize) {
+        let is_transition = |track: &Self, i: usize| {
+            matches!(track.children.get(i), Some(Composable::Transition(_)))
+        };
+        if is_transition(self, index + 1) {
+            self.children.remove(index + 1);
+        }
+        if index > 0 && is_transition(self, index - 1) {
+            self.children.remove(index - 1);
+        }
+    }
+
     /// Merges adjacent gaps and drops empty and trailing gaps.
     pub fn normalize(&mut self) {
         let mut children: Vec<Composable> = Vec::with_capacity(self.children.len());
@@ -262,8 +423,13 @@ impl Timeline {
         self.track(track).ok_or(EditError::NoTrack(track))
     }
 
+    /// A track to edit; locked tracks refuse.
     fn track_checked_mut(&mut self, track: usize) -> Result<&mut Track, EditError> {
-        self.track_mut(track).ok_or(EditError::NoTrack(track))
+        let target = self.track_mut(track).ok_or(EditError::NoTrack(track))?;
+        if target.item.locked() {
+            return Err(EditError::Locked(track));
+        }
+        Ok(target)
     }
 
     pub fn item(&self, item: ItemRef) -> Result<&Composable, EditError> {
@@ -421,13 +587,173 @@ impl Timeline {
         Ok(())
     }
 
-    /// Splits every enabled clip that spans `time` on the top-level tracks
-    /// into two. Linked clips stay linked to their own half. Returns how
-    /// many clips were split.
+    /// Removes `item` and the clips linked to it, closing the gaps on
+    /// their tracks: later items on those tracks move back.
+    pub fn ripple_remove_item(&mut self, item: ItemRef) -> Result<(), EditError> {
+        let mut ranges = self
+            .linked(item)
+            .into_iter()
+            .map(|r| Ok((r, self.item_range(r)?)))
+            .collect::<Result<Vec<_>, EditError>>()?;
+        // From the back, so earlier ranges on the same track stay valid.
+        ranges.sort_by_key(|(r, range)| std::cmp::Reverse((range.start, r.index)));
+        for (r, range) in ranges {
+            if matches!(self.item(r)?, Composable::Transition(_)) {
+                self.track_checked_mut(r.track)?.remove(r.index);
+            } else {
+                self.track_checked_mut(r.track)?.ripple_delete(range);
+            }
+        }
+        Ok(())
+    }
+
+    /// The clips trimmed along with `item`: linked clips on other tracks
+    /// with the same edge at the same time.
+    fn edge_followers(&self, item: ItemRef, edge: Edge) -> Result<Vec<ItemRef>, EditError> {
+        let range = self.item_range(item)?;
+        let edge_time = |r: TimeRange| match edge {
+            Edge::Start => r.start,
+            Edge::End => r.end(),
+        };
+        Ok(self
+            .linked(item)
+            .into_iter()
+            .filter(|r| r.track != item.track)
+            .filter(|&r| {
+                self.item_range(r)
+                    .is_ok_and(|other| edge_time(other) == edge_time(range))
+            })
+            .collect())
+    }
+
+    /// Limits for ripple-trimming `item` and the linked clips that follow
+    /// it (see [`Track::ripple_trim_limits`]); all of them must be able to.
+    pub fn ripple_limits(
+        &self,
+        item: ItemRef,
+        edge: Edge,
+    ) -> Result<(Time, Option<Time>), EditError> {
+        let mut limits = self
+            .track_checked(item.track)?
+            .ripple_trim_limits(item.index, edge)?;
+        for r in self.edge_followers(item, edge)? {
+            let (min, max) = self
+                .track_checked(r.track)?
+                .ripple_trim_limits(r.index, edge)?;
+            limits.0 = limits.0.max(min);
+            limits.1 = match (limits.1, max) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        Ok(limits)
+    }
+
+    /// Ripple-trims one edge of `item` to `to` (see [`Track::ripple_trim`]).
+    /// Linked clips with the same edge are trimmed the same way, so they
+    /// stay in sync; if one of them can't be, nothing is trimmed.
+    pub fn ripple_trim(&mut self, item: ItemRef, edge: Edge, to: Time) -> Result<(), EditError> {
+        let followers = self.edge_followers(item, edge)?;
+        self.track_checked_mut(item.track)?
+            .ripple_trim(item.index, edge, to)?;
+        for r in followers {
+            self.track_checked_mut(r.track)?
+                .ripple_trim(r.index, edge, to)?;
+        }
+        Ok(())
+    }
+
+    /// Whether `edge` of clip `item` is a cut: another clip follows (or
+    /// precedes) it directly, possibly with a transition between them.
+    pub fn is_cut(&self, item: ItemRef, edge: Edge) -> bool {
+        self.cut_index(item, edge).is_ok_and(|left| {
+            self.track(item.track)
+                .is_some_and(|t| t.cut_after(left).is_ok())
+        })
+    }
+
+    /// The cut at `edge` of clip `item` as the index of the clip before it.
+    fn cut_index(&self, item: ItemRef, edge: Edge) -> Result<usize, EditError> {
+        let track = self.track_checked(item.track)?;
+        self.item(item)?;
+        match edge {
+            Edge::End => Ok(item.index),
+            Edge::Start => {
+                let mut index = item.index.checked_sub(1).ok_or(EditError::NoCut)?;
+                if matches!(track.children[index], Composable::Transition(_)) {
+                    index = index.checked_sub(1).ok_or(EditError::NoCut)?;
+                }
+                Ok(index)
+            }
+        }
+    }
+
+    /// The cut at `edge` of `item`, and the same cut on the tracks of
+    /// linked clips (where the clips on both sides are linked to the ones
+    /// at this cut): `(track, index of the clip before it)`.
+    fn linked_cuts(&self, item: ItemRef, edge: Edge) -> Result<Vec<(usize, usize)>, EditError> {
+        let left = ItemRef {
+            track: item.track,
+            index: self.cut_index(item, edge)?,
+        };
+        let track = self.track_checked(left.track)?;
+        let (_, right) = track.cut_after(left.index)?;
+        let link = |track: &Track, i: usize| track.children[i].item().and_then(|i| i.link());
+        let right_link = link(track, right);
+        let mut cuts = vec![(left.track, left.index)];
+        for r in self.edge_followers(left, Edge::End)? {
+            let other = self.track_checked(r.track)?;
+            if let Ok((_, other_right)) = other.cut_after(r.index)
+                && right_link.is_some()
+                && link(other, other_right) == right_link
+            {
+                cuts.push((r.track, r.index));
+            }
+        }
+        Ok(cuts)
+    }
+
+    /// Where the cut at `edge` of clip `item` can be rolled to, inclusive:
+    /// within the media of the clips on both sides, of linked clips with
+    /// the same cut too, and leaving each clip at least a frame.
+    pub fn roll_limits(&self, item: ItemRef, edge: Edge) -> Result<(Time, Time), EditError> {
+        let frame = Time::from_frames(1, self.frame_rate());
+        let mut limits: Option<(Time, Time)> = None;
+        for (t, index) in self.linked_cuts(item, edge)? {
+            let track = self.track_checked(t)?;
+            let (mut min, mut max) = track.roll_limits(index)?;
+            let (left, right) = track.cut_after(index)?;
+            min = min.max(track.range_of_child(left).start + frame);
+            max = max.min(track.range_of_child(right).end() - frame);
+            limits = Some(match limits {
+                Some((a, b)) => (a.max(min), b.min(max)),
+                None => (min, max),
+            });
+        }
+        let (min, max) = limits.ok_or(EditError::NoCut)?;
+        if min > max {
+            return Err(EditError::OutOfRange);
+        }
+        Ok((min, max))
+    }
+
+    /// Rolls the cut at `edge` of clip `item` to `to` (see
+    /// [`Track::roll`]), on the tracks of linked clips too.
+    pub fn roll(&mut self, item: ItemRef, edge: Edge, to: Time) -> Result<(), EditError> {
+        for (track, index) in self.linked_cuts(item, edge)? {
+            self.track_checked_mut(track)?.roll(index, to)?;
+        }
+        Ok(())
+    }
+
+    /// Splits every enabled clip that spans `time` on the unlocked
+    /// top-level tracks into two. Linked clips stay linked to their own
+    /// half. Returns how many clips were split.
     pub fn split_at(&mut self, time: Time) -> usize {
         let mut split = Vec::new();
         for (index, track) in self.tracks() {
-            if let Some((child, range)) = track.child_at(time)
+            if !track.item.locked()
+                && let Some((child, range)) = track.child_at(time)
                 && range.start < time
                 && track.children[child]
                     .as_clip()
@@ -562,6 +888,16 @@ impl Timeline {
         };
         self.tracks.children.insert(index, Composable::Track(track));
         index
+    }
+
+    /// Removes the track at stack index `index` with its contents. Clips
+    /// linked to its clips stay where they are.
+    pub fn remove_track(&mut self, index: usize) -> Result<Track, EditError> {
+        self.track_checked_mut(index)?;
+        match self.tracks.children.remove(index) {
+            Composable::Track(track) => Ok(track),
+            _ => unreachable!("checked above"),
+        }
     }
 }
 
@@ -965,5 +1301,152 @@ mod tests {
     fn edit_points() {
         let timeline = timeline_with_linked_clip();
         assert_eq!(timeline.edit_points(), [f(0), f(5), f(15)]);
+    }
+
+    /// `a` at 0 and `b` at 10 on V1 and A1, each using frames 10..20 of
+    /// 100 and linked with its audio.
+    fn timeline_with_two_linked_clips() -> Timeline {
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        for (name, at) in [("a", 0), ("b", 10)] {
+            let link = timeline.new_link_id();
+            for track in [0, 1] {
+                let mut c = clip(name, 10, 10);
+                c.item_mut().unwrap().set_link(Some(link));
+                timeline.place(track, c, f(at)).unwrap();
+            }
+        }
+        timeline
+    }
+
+    fn layouts(timeline: &Timeline) -> [String; 2] {
+        [0, 1].map(|t| layout(timeline.track(t).unwrap()))
+    }
+
+    #[test]
+    fn ripple_delete_closes_the_gap() {
+        let mut t = track(vec![
+            clip("a", 0, 5),
+            Composable::Gap(Gap::new(f(5))),
+            clip("b", 0, 5),
+            clip("c", 0, 5),
+        ]);
+        t.ripple_delete(t.range_of_child(2));
+        assert_eq!(layout(&t), "a[0]@0+5 _@5+5 c[0]@10+5");
+        // Part of a clip, and part of a gap.
+        t.ripple_delete(TimeRange::new(f(3), f(4)));
+        assert_eq!(layout(&t), "a[0]@0+3 _@3+3 c[0]@6+5");
+
+        let mut timeline = timeline_with_two_linked_clips();
+        let a = timeline.item_at(0, f(0)).unwrap();
+        timeline.ripple_remove_item(a).unwrap();
+        assert_eq!(layouts(&timeline), ["b[10]@0+10", "b[10]@0+10"]);
+    }
+
+    #[test]
+    fn ripple_trims_move_what_follows() {
+        let mut timeline = timeline_with_two_linked_clips();
+        let a = ItemRef { track: 0, index: 0 };
+        // The end may extend over b (which moves) up to the end of the media.
+        assert_eq!(
+            timeline.ripple_limits(a, Edge::End),
+            Ok((f(0), Some(f(90))))
+        );
+        timeline.ripple_trim(a, Edge::End, f(14)).unwrap();
+        let both = |s: &str| [s.to_owned(), s.to_owned()];
+        assert_eq!(layouts(&timeline), both("a[10]@0+14 b[10]@14+10"));
+        timeline.ripple_trim(a, Edge::End, f(6)).unwrap();
+        assert_eq!(layouts(&timeline), both("a[10]@0+6 b[10]@6+10"));
+
+        // The start stays in place; dragging it right takes media away.
+        let b = ItemRef { track: 1, index: 1 };
+        assert_eq!(
+            timeline.ripple_limits(b, Edge::Start),
+            Ok((f(-4), Some(f(16))))
+        );
+        timeline.ripple_trim(b, Edge::Start, f(8)).unwrap();
+        assert_eq!(layouts(&timeline), both("a[10]@0+6 b[12]@6+8"));
+        timeline.ripple_trim(b, Edge::Start, f(-6)).unwrap();
+        assert_eq!(layouts(&timeline), both("a[10]@0+6 b[0]@6+20"));
+        assert_eq!(
+            timeline.ripple_trim(b, Edge::Start, f(-7)),
+            Err(EditError::OutOfRange)
+        );
+        assert_eq!(
+            timeline.ripple_trim(a, Edge::End, f(0)),
+            Err(EditError::OutOfRange)
+        );
+
+        // A dissolve at the trimmed edge goes.
+        timeline.add_dissolve(a, Edge::End, f(4)).unwrap();
+        timeline.ripple_trim(a, Edge::End, f(5)).unwrap();
+        assert_eq!(layout(timeline.track(0).unwrap()), "a[10]@0+5 b[0]@5+20");
+    }
+
+    #[test]
+    fn roll_moves_the_cut_within_the_handles() {
+        let mut t = track(vec![clip("a", 10, 10), clip("b", 2, 10)]);
+        // b has 2 frames before its start, a 80 after its end.
+        assert_eq!(t.roll_limits(0), Ok((f(8), f(20))));
+        assert_eq!(t.roll(0, f(7)), Err(EditError::OutOfRange));
+        assert_eq!(t.roll(0, f(20)), Err(EditError::OutOfRange));
+        t.roll(0, f(8)).unwrap();
+        assert_eq!(layout(&t), "a[10]@0+8 b[0]@8+12");
+        t.roll(0, f(15)).unwrap();
+        assert_eq!(layout(&t), "a[10]@0+15 b[7]@15+5");
+        assert_eq!(t.roll_limits(1), Err(EditError::NoCut));
+
+        // Linked clips roll along; either side of the cut names it.
+        let mut timeline = timeline_with_two_linked_clips();
+        let a = ItemRef { track: 0, index: 0 };
+        let b = ItemRef { track: 1, index: 1 };
+        assert!(timeline.is_cut(a, Edge::End) && timeline.is_cut(b, Edge::Start));
+        assert!(!timeline.is_cut(a, Edge::Start) && !timeline.is_cut(b, Edge::End));
+        assert_eq!(timeline.roll_limits(a, Edge::End), Ok((f(1), f(19))));
+        assert_eq!(timeline.roll_limits(b, Edge::Start), Ok((f(1), f(19))));
+        timeline.roll(a, Edge::End, f(13)).unwrap();
+        let both = |s: &str| [s.to_owned(), s.to_owned()];
+        assert_eq!(layouts(&timeline), both("a[10]@0+13 b[13]@13+7"));
+        timeline.roll(b, Edge::Start, f(4)).unwrap();
+        assert_eq!(layouts(&timeline), both("a[10]@0+4 b[4]@4+16"));
+        assert_eq!(timeline.roll_limits(a, Edge::Start), Err(EditError::NoCut));
+
+        // A dissolve at the cut goes.
+        timeline.add_dissolve(a, Edge::End, f(2)).unwrap();
+        timeline.roll(a, Edge::End, f(6)).unwrap();
+        assert_eq!(layout(timeline.track(0).unwrap()), "a[10]@0+6 b[6]@6+14");
+    }
+
+    #[test]
+    fn locked_tracks_reject_edits() {
+        let mut timeline = timeline_with_linked_clip();
+        timeline.track_mut(1).unwrap().item.set_locked(true);
+        let video = timeline.item_at(0, f(5)).unwrap();
+        // The linked audio is on a locked track, so the clip can't change.
+        // (Failed edits may leave changes behind; `Document` reverts them.)
+        assert_eq!(
+            timeline.clone().move_item(video, 0, f(2)),
+            Err(EditError::Locked(1))
+        );
+        assert_eq!(
+            timeline.clone().ripple_remove_item(video),
+            Err(EditError::Locked(1))
+        );
+        assert_eq!(
+            timeline.remove_track(1).map(|_| ()),
+            Err(EditError::Locked(1))
+        );
+        assert_eq!(
+            timeline.place(1, clip("c", 0, 5), f(0)),
+            Err(EditError::Locked(1))
+        );
+        // Splitting leaves locked tracks alone.
+        assert_eq!(timeline.split_at(f(9)), 1);
+        assert_eq!(layout(timeline.track(1).unwrap()), "_@0+5 a[0]@5+10");
+
+        timeline.track_mut(1).unwrap().item.set_locked(false);
+        assert!(timeline.track(1).unwrap().item.metadata.is_empty());
+        let removed = timeline.remove_track(1).unwrap();
+        assert_eq!(removed.item.name, "A1");
+        assert_eq!(timeline.tracks().count(), 1);
     }
 }

@@ -17,7 +17,9 @@ pub use encode::{
     MediaWriter, OutputSettings, Quality as EncodeQuality, VideoCodec, container_for,
 };
 pub use ffmpeg;
-pub use frames::{color_tags, display_size, rgba_cpu, to_software, tone_mapping, with_cpu_frame};
+pub use frames::{
+    color_tags, display_size, input_transform, rgba_cpu, to_software, tone_mapping, with_cpu_frame,
+};
 pub use hw::HwDevice;
 pub use nox_gpu::Image;
 pub use probe::{AudioInfo, MediaInfo, VideoInfo, probe};

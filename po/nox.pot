@@ -74,10 +74,6 @@ msgstr ""
 msgid "{encoder}, zero copy"
 msgstr ""
 
-#: src/export_dialog.rs:376
-msgid "Close"
-msgstr ""
-
 #: src/export_dialog.rs:382
 #, python-brace-format
 msgid "Export failed: {error}"
@@ -323,40 +319,8 @@ msgstr ""
 msgid "Render Settings"
 msgstr ""
 
-#: resources/ui/export-dialog.ui:39
-msgid "Preset"
-msgstr ""
-
-#: resources/ui/export-dialog.ui:53
-msgid "File"
-msgstr ""
-
-#: resources/ui/export-dialog.ui:71
-msgid "Browse…"
-msgstr ""
-
-#: resources/ui/export-dialog.ui:79
-msgid "Format"
-msgstr ""
-
-#: resources/ui/export-dialog.ui:93
-msgid "Quality"
-msgstr ""
-
-#: resources/ui/export-dialog.ui:107
-msgid "Use hardware encoding (Vulkan Video, NVENC)"
-msgstr ""
-
-#: resources/ui/export-dialog.ui:114
-msgid "Include audio"
-msgstr ""
-
 #: resources/ui/export-dialog.ui:121
 msgid "Timeline"
-msgstr ""
-
-#: resources/ui/export-dialog.ui:165
-msgid "Open Folder"
 msgstr ""
 
 #: resources/ui/media-pool.ui:12
@@ -399,20 +363,12 @@ msgstr ""
 msgid "General"
 msgstr ""
 
-#: resources/ui/project-settings.ui:60
-msgid "Project name"
-msgstr ""
-
 #: resources/ui/project-settings.ui:83
 msgid "Master Settings"
 msgstr ""
 
 #: resources/ui/project-settings.ui:93
 msgid "Timeline Format"
-msgstr ""
-
-#: resources/ui/project-settings.ui:110
-msgid "Timeline resolution"
 msgstr ""
 
 #: resources/ui/project-settings.ui:128
@@ -423,24 +379,12 @@ msgstr ""
 msgid "processing"
 msgstr ""
 
-#: resources/ui/project-settings.ui:169
-msgid "Timeline frame rate"
-msgstr ""
-
-#: resources/ui/project-settings.ui:183
-msgid "Use drop frame timecode"
-msgstr ""
-
 #: resources/ui/project-settings.ui:198
 msgid "Image Scaling"
 msgstr ""
 
 #: resources/ui/project-settings.ui:208
 msgid "Input Scaling"
-msgstr ""
-
-#: resources/ui/project-settings.ui:225
-msgid "Mismatched resolution files"
 msgstr ""
 
 #: resources/ui/viewer.ui:27
@@ -505,4 +449,257 @@ msgstr ""
 
 #: resources/ui/window.ui:92
 msgid "Main Menu"
+msgstr ""
+
+#: src/export_dialog.rs:219
+msgid "Entire timeline"
+msgstr ""
+
+#: src/export_dialog.rs:223
+#, python-brace-format
+msgid "In to Out ({start} – {end})"
+msgstr ""
+
+#: src/timeline.rs:135
+msgid "Unmute Track"
+msgstr ""
+
+#: resources/ui/menus.ui:137 src/timeline.rs:136
+msgid "Mute Track"
+msgstr ""
+
+#: src/timeline.rs:137
+msgid "Enable Track"
+msgstr ""
+
+#: resources/ui/menus.ui:111 src/timeline.rs:138
+msgid "Disable Track"
+msgstr ""
+
+#: resources/ui/menus.ui:115 resources/ui/menus.ui:141 src/timeline.rs:144
+msgid "Lock Track"
+msgstr ""
+
+#: src/timeline.rs:146
+msgid "Unlock Track"
+msgstr ""
+
+#: src/timeline.rs:1386
+msgid "Ripple Trim"
+msgstr ""
+
+#: src/timeline.rs:1410
+msgid "Roll Edit"
+msgstr ""
+
+#: resources/ui/menus.ui:95 resources/ui/window.ui:42 src/timeline.rs:1635
+msgid "Ripple Delete"
+msgstr ""
+
+#: resources/ui/rename-track.ui:6 src/timeline.rs:1670
+msgid "Rename Track"
+msgstr ""
+
+#: resources/ui/menus.ui:121 resources/ui/menus.ui:147 src/timeline.rs:1681
+msgid "Delete Track"
+msgstr ""
+
+#: resources/ui/window.ui:46 src/window.rs:469
+msgid "Mark In"
+msgstr ""
+
+#: resources/ui/window.ui:50 src/window.rs:475
+msgid "Mark Out"
+msgstr ""
+
+#: src/window.rs:480
+msgid "Clear In"
+msgstr ""
+
+#: src/window.rs:483
+msgid "Clear Out"
+msgstr ""
+
+#: resources/ui/window.ui:54 src/window.rs:486
+msgid "Clear In and Out"
+msgstr ""
+
+#: resources/ui/menus.ui:105 resources/ui/menus.ui:131
+msgid "Rename Track…"
+msgstr ""
+
+#: resources/ui/rename-track.ui:35
+msgid "Rename"
+msgstr ""
+
+#: resources/ui/inspector.ui:27
+msgid "Inspector"
+msgstr ""
+
+#: resources/ui/inspector.ui:42
+msgid "Select a clip on the timeline to see its properties."
+msgstr ""
+
+#: resources/ui/inspector.ui:98
+msgid "Composite"
+msgstr ""
+
+#: resources/ui/inspector.ui:124
+msgid "Opacity in percent"
+msgstr ""
+
+#: resources/ui/inspector.ui:170
+msgid "Audio"
+msgstr ""
+
+#: resources/ui/inspector.ui:195
+msgid "Gain in decibels"
+msgstr ""
+
+#: resources/ui/window.ui:129
+msgid "Edit"
+msgstr ""
+
+#: resources/ui/window.ui:184
+msgid "Color"
+msgstr ""
+
+#: resources/ui/window.ui:211
+msgid "Scopes"
+msgstr ""
+
+#: resources/ui/window.ui:220
+msgid "Waveform, parade, vectorscope and histogram are not implemented yet."
+msgstr ""
+
+#: resources/ui/window.ui:246
+msgid "Color Wheels"
+msgstr ""
+
+#: resources/ui/window.ui:255
+msgid "Lift, gamma, gain and offset wheels are not implemented yet."
+msgstr ""
+
+#: src/inspector.rs:161
+msgid "Video clip"
+msgstr ""
+
+#: src/inspector.rs:163
+msgid "Audio clip"
+msgstr ""
+
+#: src/inspector.rs:166
+msgid "{kind}, {length}"
+msgstr ""
+
+#: src/inspector.rs:182
+msgid "Dissolve"
+msgstr ""
+
+#: src/inspector.rs:185
+msgid "Transition, {length}"
+msgstr ""
+
+#: src/clip_strip.rs:117
+msgid "Clips on video tracks appear here."
+msgstr ""
+
+#: resources/ui/clip-strip.ui:37
+msgid "Clips"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:40
+msgid "_Preset"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:56
+msgid "_File"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:77
+msgid "_Browse…"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:86
+msgid "Fo_rmat"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:102
+msgid "_Quality"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:118
+msgid "Use _hardware encoding (Vulkan Video, NVENC)"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:126
+msgid "Include _audio"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:134
+msgid "Ra_nge"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:197
+msgid "Open F_older"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:205
+msgid "_Cancel"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:212
+msgid "_Export"
+msgstr ""
+
+#: src/export_dialog.rs:436
+msgid "_Close"
+msgstr ""
+
+#: resources/ui/project-settings.ui:61
+msgid "Project _name"
+msgstr ""
+
+#: resources/ui/project-settings.ui:114
+msgid "Timeline _resolution"
+msgstr ""
+
+#: resources/ui/project-settings.ui:181
+msgid "Timeline _frame rate"
+msgstr ""
+
+#: resources/ui/project-settings.ui:197
+msgid "Use _drop frame timecode"
+msgstr ""
+
+#: resources/ui/project-settings.ui:240
+msgid "_Mismatched resolution files"
+msgstr ""
+
+#: resources/ui/project-settings.ui:282
+msgid "_Save"
+msgstr ""
+
+#: resources/ui/project-settings.ui:140
+msgid "Width"
+msgstr ""
+
+#: resources/ui/project-settings.ui:160
+msgid "Height"
+msgstr ""
+
+#: resources/ui/rename-track.ui:22
+msgid "Track name"
+msgstr ""
+
+#: src/timeline.rs:1601
+msgid "Dissolve, {length}"
+msgstr ""
+
+#: src/timeline.rs:1608
+msgid "{name}, {start} to {end}"
+msgstr ""
+
+#: src/timeline.rs:320
+msgid "Left and Right step one frame, Up and Down jump to edit points, Shift+V selects the clip at the playhead, Shift+F10 opens its menu, Delete removes it."
 msgstr ""

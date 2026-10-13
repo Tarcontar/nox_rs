@@ -22,6 +22,9 @@ mod imp {
     pub struct MediaObject {
         #[property(get, construct_only)]
         pub path: RefCell<String>,
+        /// The file name, for display.
+        #[property(name = "name", get = Self::file_name, type = String)]
+        pub name: std::marker::PhantomData<String>,
         #[property(get, set, nullable)]
         pub thumbnail: RefCell<Option<gdk::Texture>>,
         /// Shown when there is no thumbnail (loading, audio, errors).
@@ -44,6 +47,15 @@ mod imp {
 
     #[glib::derived_properties]
     impl ObjectImpl for MediaObject {}
+
+    impl MediaObject {
+        fn file_name(&self) -> String {
+            let path = self.path.borrow();
+            Path::new(path.as_str())
+                .file_name()
+                .map_or(path.clone(), |n| n.to_string_lossy().into_owned())
+        }
+    }
 }
 
 glib::wrapper! {
@@ -62,13 +74,6 @@ impl MediaObject {
             .build();
         media.load();
         media
-    }
-
-    pub fn name(&self) -> String {
-        let path = self.path();
-        Path::new(&path)
-            .file_name()
-            .map_or(path.clone(), |n| n.to_string_lossy().into_owned())
     }
 
     pub fn info(&self) -> Option<MediaInfo> {

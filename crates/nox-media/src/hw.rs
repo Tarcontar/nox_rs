@@ -4,7 +4,9 @@
 //! FFmpeg creates the device so it enables exactly the video queues,
 //! extensions and features its decoders need; nox-gpu then loads the same
 //! handles into ash. `NOX_GPU` selects the device (index or name substring,
-//! as accepted by FFmpeg); `NOX_VULKAN_DEBUG=1` enables validation layers.
+//! as accepted by FFmpeg). For validation, run under `tools/vk-validate.sh`
+//! rather than FFmpeg's `debug` option, whose layer settings crash Vulkan
+//! Video decoding on NVIDIA.
 
 use ffmpeg::ffi;
 use nox_gpu::{ExternalDevice, GpuDevice, QueueLock, vk};
@@ -53,10 +55,7 @@ impl HwDevice {
         let device_name = std::env::var("NOX_GPU")
             .ok()
             .and_then(|s| CString::new(s).ok());
-        let mut options = ffmpeg::Dictionary::new();
-        if std::env::var_os("NOX_VULKAN_DEBUG").is_some_and(|v| v == "1") {
-            options.set("debug", "1");
-        }
+        let options = ffmpeg::Dictionary::new();
 
         let mut buffer = ptr::null_mut();
         // SAFETY: valid out-pointer and arguments; the options dictionary is

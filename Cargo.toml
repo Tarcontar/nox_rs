@@ -21,7 +21,7 @@ ash = "0.38"
 async-channel = "2"
 cpal = "0.18"
 gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
-gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_16"] }
 ffmpeg = { package = "ffmpeg-next", version = "9" }
 gettext-rs = { version = "0.8", features = ["gettext-system"] }
 glib-build-tools = "0.22"

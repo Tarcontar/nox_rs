@@ -91,6 +91,62 @@
         <attribute name="label" translatable="yes">Delete</attribute>
         <attribute name="action">win.delete-clip</attribute>
       </item>
+      <item>
+        <attribute name="label" translatable="yes">Ripple Delete</attribute>
+        <attribute name="action">win.ripple-delete</attribute>
+      </item>
+    </section>
+  </menu>
+  <!-- Right-click menu of video track headers; the track.* actions
+       work on the track it was opened for. -->
+  <menu id="video_track_menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Rename Track…</attribute>
+        <attribute name="action">track.rename</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Disable Track</attribute>
+        <attribute name="action">track.muted</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Lock Track</attribute>
+        <attribute name="action">track.locked</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Delete Track</attribute>
+        <attribute name="action">track.delete</attribute>
+      </item>
+    </section>
+  </menu>
+  <!-- Right-click menu of audio track headers; the track.* actions
+       work on the track it was opened for. -->
+  <menu id="audio_track_menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Rename Track…</attribute>
+        <attribute name="action">track.rename</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Mute Track</attribute>
+        <attribute name="action">track.muted</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Lock Track</attribute>
+        <attribute name="action">track.locked</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Delete Track</attribute>
+        <attribute name="action">track.delete</attribute>
+      </item>
     </section>
   </menu>
 </interface>

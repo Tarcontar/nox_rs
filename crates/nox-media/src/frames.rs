@@ -2,7 +2,7 @@
 //! GPU converter, or RGBA via swscale on the CPU (fallback and reference).
 
 use ffmpeg::{ffi, format, frame, software::scaling};
-use nox_color::{Cicp, Matrix3x4, Quantization, ToneMapping, ycbcr};
+use nox_color::{Cicp, InputTransform, Matrix3x4, Quantization, ToneMapping, ycbcr};
 use nox_gpu::{CpuFrame, Image, Layout, Plane, PlaneFormat};
 
 use crate::Result;
@@ -82,6 +82,15 @@ pub fn tone_mapping(frame: &frame::Video) -> ToneMapping {
     ToneMapping::for_cicp(tags, peak)
 }
 
+/// How `frame` enters the working space: its transfer function and
+/// primaries, and tone mapping if it's HDR.
+pub fn input_transform(frame: &frame::Video) -> InputTransform {
+    InputTransform {
+        tone: tone_mapping(frame),
+        ..InputTransform::for_cicp(color_tags(frame), None)
+    }
+}
+
 /// Calls `f` with a GPU-uploadable view of `frame`. Hardware frames are
 /// downloaded first; pixel formats the shader doesn't handle are converted
 /// to RGBA by swscale.
@@ -121,7 +130,7 @@ pub fn with_cpu_frame<R>(frame: &frame::Video, f: impl FnOnce(&CpuFrame<'_>) -> 
         swap_chroma: false,
         matrix: ycbcr::rgb_to_rgb(quantization),
         chroma_offset: [0.0, 0.0],
-        tone: tone_mapping(frame),
+        color: input_transform(frame),
         planes: vec![plane(
             &rgba,
             0,
@@ -196,7 +205,7 @@ pub(crate) struct Classified {
     pub matrix: Matrix3x4,
     /// In luma pixels; see `CpuFrame::chroma_offset`.
     pub chroma_offset: [f32; 2],
-    pub tone: ToneMapping,
+    pub color: InputTransform,
     /// Texel format and log2 subsampling (w, h) of FFmpeg planes 0, 1, ...
     pub planes: Vec<(PlaneFormat, u8, u8)>,
 }
@@ -295,7 +304,7 @@ pub(crate) fn classify(format: format::Pixel, frame: &frame::Video) -> Option<Cl
         swap_chroma,
         matrix,
         chroma_offset,
-        tone: tone_mapping(frame),
+        color: input_transform(frame),
         planes,
     })
 }
@@ -323,7 +332,7 @@ fn describe(frame: &frame::Video) -> Option<CpuFrame<'_>> {
         swap_chroma: classified.swap_chroma,
         matrix: classified.matrix,
         chroma_offset: classified.chroma_offset,
-        tone: classified.tone,
+        color: classified.color,
         planes,
     })
 }

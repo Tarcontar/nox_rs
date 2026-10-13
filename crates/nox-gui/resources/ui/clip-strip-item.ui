@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- A clip in the Color page's clip strip (GtkBuilderListItemFactory in
+       clip-strip.ui): thumbnail, name and start timecode of a NoxClipRow. -->
+  <template class="GtkListItem">
+    <binding name="accessible-label">
+      <lookup name="name" type="NoxClipRow">
+        <lookup name="item">GtkListItem</lookup>
+      </lookup>
+    </binding>
+    <property name="child">
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">2</property>
+        <property name="margin-start">3</property>
+        <property name="margin-end">3</property>
+        <property name="margin-top">3</property>
+        <property name="margin-bottom">3</property>
+        <binding name="tooltip-text">
+          <lookup name="name" type="NoxClipRow">
+            <lookup name="item">GtkListItem</lookup>
+          </lookup>
+        </binding>
+        <child>
+          <object class="GtkPicture">
+            <property name="content-fit">contain</property>
+            <property name="width-request">112</property>
+            <property name="height-request">63</property>
+            <style><class name="thumbnail-frame"/></style>
+            <binding name="paintable">
+              <lookup name="thumbnail" type="NoxMediaObject">
+                <lookup name="media" type="NoxClipRow">
+                  <lookup name="item">GtkListItem</lookup>
+                </lookup>
+              </lookup>
+            </binding>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel">
+            <property name="ellipsize">middle</property>
+            <property name="max-width-chars">14</property>
+            <binding name="label">
+              <lookup name="name" type="NoxClipRow">
+                <lookup name="item">GtkListItem</lookup>
+              </lookup>
+            </binding>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel">
+            <style><class name="media-summary"/></style>
+            <binding name="label">
+              <lookup name="timecode" type="NoxClipRow">
+                <lookup name="item">GtkListItem</lookup>
+              </lookup>
+            </binding>
+          </object>
+        </child>
+      </object>
+    </property>
+  </template>
+</interface>

@@ -1,5 +1,6 @@
 //! Grid cell for the media pool (`resources/ui/media-cell.ui`): thumbnail
-//! (or icon), name and duration. Cells can be dragged onto the timeline.
+//! (or icon), name and duration of its `media`, all bound in the template.
+//! Cells can be dragged onto the timeline.
 
 use gtk::{CompositeTemplate, gdk, glib, prelude::*, subclass::prelude::*};
 
@@ -9,19 +10,15 @@ mod imp {
     use super::*;
     use std::cell::RefCell;
 
-    #[derive(Default, CompositeTemplate)]
+    #[derive(Default, CompositeTemplate, glib::Properties)]
     #[template(resource = "/io/github/nox/Nox/ui/media-cell.ui")]
+    #[properties(wrapper_type = super::MediaCell)]
     pub struct MediaCell {
         #[template_child]
         pub picture: TemplateChild<gtk::Picture>,
-        #[template_child]
-        pub icon: TemplateChild<gtk::Image>,
-        #[template_child]
-        pub name: TemplateChild<gtk::Label>,
-        #[template_child]
-        pub summary: TemplateChild<gtk::Label>,
-        pub bindings: RefCell<Vec<glib::Binding>>,
-        /// The bound item, for dragging it onto the timeline.
+        /// The item shown (set by the list item factory in
+        /// `media-pool-item.ui`), also what a drag carries.
+        #[property(get, set, nullable)]
         pub media: RefCell<Option<MediaObject>>,
     }
 
@@ -32,7 +29,9 @@ mod imp {
         type ParentType = gtk::Box;
 
         fn class_init(klass: &mut Self::Class) {
+            MediaObject::ensure_type();
             klass.bind_template();
+            klass.bind_template_instance_callbacks();
             // Own node name so theme rules for boxes inside grid cells don't add padding.
             klass.set_css_name("media-cell");
         }
@@ -42,6 +41,7 @@ mod imp {
         }
     }
 
+    #[glib::derived_properties]
     impl ObjectImpl for MediaCell {
         fn constructed(&self) {
             self.parent_constructed();
@@ -54,7 +54,7 @@ mod imp {
                 #[upgrade_or]
                 None,
                 move |_, _, _| {
-                    let media = obj.imp().media.borrow().clone()?;
+                    let media = obj.media()?;
                     Some(gdk::ContentProvider::for_value(&media.to_value()))
                 }
             ));
@@ -81,45 +81,12 @@ glib::wrapper! {
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
 }
 
+#[gtk::template_callbacks(functions)]
 impl MediaCell {
-    pub fn new() -> Self {
-        glib::Object::new()
-    }
-
-    pub fn bind(&self, media: &MediaObject) {
-        let imp = self.imp();
-        imp.media.replace(Some(media.clone()));
-        imp.name.set_label(&media.name());
-        let bindings = vec![
-            media
-                .bind_property("thumbnail", &*imp.picture, "paintable")
-                .sync_create()
-                .build(),
-            media
-                .bind_property("thumbnail", &*imp.icon, "visible")
-                .transform_to(|_, thumbnail: Option<gdk::Texture>| Some(thumbnail.is_none()))
-                .sync_create()
-                .build(),
-            media
-                .bind_property("icon-name", &*imp.icon, "icon-name")
-                .sync_create()
-                .build(),
-            media
-                .bind_property("summary", &*imp.summary, "label")
-                .sync_create()
-                .build(),
-            media
-                .bind_property("details", self, "tooltip-text")
-                .sync_create()
-                .build(),
-        ];
-        imp.bindings.replace(bindings);
-    }
-
-    pub fn unbind(&self) {
-        self.imp().media.replace(None);
-        for binding in self.imp().bindings.take() {
-            binding.unbind();
-        }
+    /// For `<closure>` in the template: the icon shows until there is a
+    /// thumbnail.
+    #[template_callback]
+    fn is_none(thumbnail: Option<gdk::Texture>) -> bool {
+        thumbnail.is_none()
     }
 }

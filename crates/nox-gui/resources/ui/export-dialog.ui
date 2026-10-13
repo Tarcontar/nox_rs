@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface domain="nox">
-  <!-- Export: preset, file, format and quality, then progress while the
-       timeline renders. -->
+  <!-- Export: preset, file, format and quality, the range (whole timeline
+       or In to Out), then progress while the timeline renders. -->
   <template class="NoxExportDialog" parent="GtkWindow">
     <property name="title" translatable="yes">Export</property>
+    <property name="default-widget">start</property>
     <property name="modal">true</property>
     <property name="default-width">640</property>
     <property name="child">
@@ -36,7 +37,9 @@
                     <property name="margin-end">14</property>
             <child>
               <object class="GtkLabel">
-                <property name="label" translatable="yes">Preset</property>
+                <property name="label" translatable="yes">_Preset</property>
+                <property name="use-underline">true</property>
+                <property name="mnemonic-widget">preset</property>
                 <property name="xalign">1</property>
                 <style><class name="dim-label"/></style>
                 <layout><property name="column">0</property><property name="row">0</property></layout>
@@ -50,7 +53,9 @@
                     </child>
             <child>
               <object class="GtkLabel">
-                <property name="label" translatable="yes">File</property>
+                <property name="label" translatable="yes">_File</property>
+                <property name="use-underline">true</property>
+                <property name="mnemonic-widget">path</property>
                 <property name="xalign">1</property>
                 <style><class name="dim-label"/></style>
                 <layout><property name="column">0</property><property name="row">1</property></layout>
@@ -62,13 +67,15 @@
                         <layout><property name="column">1</property><property name="row">1</property></layout>
                         <child>
                           <object class="GtkEntry" id="path">
+                            <property name="activates-default">true</property>
                             <property name="hexpand">true</property>
                             <property name="width-chars">40</property>
                           </object>
                         </child>
                         <child>
                           <object class="GtkButton">
-                            <property name="label" translatable="yes">Browse…</property>
+                            <property name="label" translatable="yes">_Browse…</property>
+                            <property name="use-underline">true</property>
                             <signal name="clicked" handler="on_browse_clicked" swapped="true"/>
                           </object>
                         </child>
@@ -76,7 +83,9 @@
                     </child>
             <child>
               <object class="GtkLabel">
-                <property name="label" translatable="yes">Format</property>
+                <property name="label" translatable="yes">Fo_rmat</property>
+                <property name="use-underline">true</property>
+                <property name="mnemonic-widget">format</property>
                 <property name="xalign">1</property>
                 <style><class name="dim-label"/></style>
                 <layout><property name="column">0</property><property name="row">2</property></layout>
@@ -90,7 +99,9 @@
                     </child>
             <child>
               <object class="GtkLabel">
-                <property name="label" translatable="yes">Quality</property>
+                <property name="label" translatable="yes">_Quality</property>
+                <property name="use-underline">true</property>
+                <property name="mnemonic-widget">quality</property>
                 <property name="xalign">1</property>
                 <style><class name="dim-label"/></style>
                 <layout><property name="column">0</property><property name="row">3</property></layout>
@@ -104,30 +115,51 @@
                     </child>
                     <child>
                       <object class="GtkCheckButton" id="hardware">
-                        <property name="label" translatable="yes">Use hardware encoding (Vulkan Video, NVENC)</property>
+                        <property name="label" translatable="yes">Use _hardware encoding (Vulkan Video, NVENC)</property>
+                        <property name="use-underline">true</property>
                         <property name="active">true</property>
                         <layout><property name="column">1</property><property name="row">4</property></layout>
                       </object>
                     </child>
                     <child>
                       <object class="GtkCheckButton" id="audio">
-                        <property name="label" translatable="yes">Include audio</property>
+                        <property name="label" translatable="yes">Include _audio</property>
+                        <property name="use-underline">true</property>
                         <property name="active">true</property>
                         <layout><property name="column">1</property><property name="row">5</property></layout>
                       </object>
                     </child>
             <child>
               <object class="GtkLabel">
-                <property name="label" translatable="yes">Timeline</property>
+                <property name="label" translatable="yes">Ra_nge</property>
+                <property name="use-underline">true</property>
+                <property name="mnemonic-widget">range</property>
                 <property name="xalign">1</property>
                 <style><class name="dim-label"/></style>
                 <layout><property name="column">0</property><property name="row">6</property></layout>
               </object>
             </child>
                     <child>
-                      <object class="GtkLabel" id="summary">
-                        <property name="xalign">0</property>
+                      <object class="GtkDropDown" id="range">
+                        <property name="halign">start</property>
                         <layout><property name="column">1</property><property name="row">6</property></layout>
+                      </object>
+                    </child>
+            <child>
+              <object class="GtkLabel" id="summary_label">
+                <property name="label" translatable="yes">Timeline</property>
+                <property name="xalign">1</property>
+                <style><class name="dim-label"/></style>
+                <layout><property name="column">0</property><property name="row">7</property></layout>
+              </object>
+            </child>
+                    <child>
+                      <object class="GtkLabel" id="summary">
+                        <accessibility>
+                          <relation name="labelled-by">summary_label</relation>
+                        </accessibility>
+                        <property name="xalign">0</property>
+                        <layout><property name="column">1</property><property name="row">7</property></layout>
                       </object>
                     </child>
                   </object>
@@ -162,20 +194,23 @@
             <property name="margin-end">12</property>
             <child>
               <object class="GtkButton" id="open_folder">
-                <property name="label" translatable="yes">Open Folder</property>
+                <property name="label" translatable="yes">Open F_older</property>
+                <property name="use-underline">true</property>
                 <property name="visible">false</property>
                 <signal name="clicked" handler="on_open_folder_clicked" swapped="true"/>
               </object>
             </child>
             <child>
               <object class="GtkButton" id="cancel">
-                <property name="label" translatable="yes">Cancel</property>
+                <property name="label" translatable="yes">_Cancel</property>
+                <property name="use-underline">true</property>
                 <signal name="clicked" handler="on_cancel_clicked" swapped="true"/>
               </object>
             </child>
             <child>
               <object class="GtkButton" id="start">
-                <property name="label" translatable="yes">Export</property>
+                <property name="label" translatable="yes">_Export</property>
+                <property name="use-underline">true</property>
                 <signal name="clicked" handler="on_export_clicked" swapped="true"/>
                 <style><class name="suggested-action"/></style>
               </object>

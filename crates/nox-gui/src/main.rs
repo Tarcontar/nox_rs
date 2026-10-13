@@ -1,5 +1,7 @@
+mod clip_strip;
 mod export_dialog;
 mod i18n;
+mod inspector;
 mod media_cell;
 mod media_object;
 mod media_pool;
@@ -44,10 +46,10 @@ fn main() -> glib::ExitCode {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     });
-    app.set_accels_for_action("win.previous-frame", &["Left"]);
-    app.set_accels_for_action("win.next-frame", &["Right"]);
-    app.set_accels_for_action("win.go-to-start", &["Home"]);
-    app.set_accels_for_action("win.go-to-end", &["End"]);
+    // Only shortcuts with Ctrl or Alt here: GTK runs application
+    // accelerators before the focused widget, so a bare key would be taken
+    // from it (Space from a focused button, arrows from a spin button).
+    // Those keys are in a bubble-phase controller in window.ui.
     app.set_accels_for_action("win.new", &["<Control>n"]);
     app.set_accels_for_action("win.open", &["<Control>o"]);
     app.set_accels_for_action("win.save", &["<Control>s"]);
@@ -55,12 +57,12 @@ fn main() -> glib::ExitCode {
     app.set_accels_for_action("win.undo", &["<Control>z"]);
     app.set_accels_for_action("win.split", &["<Control>b"]);
     app.set_accels_for_action("win.add-dissolve", &["<Control>t"]);
-    app.set_accels_for_action("win.project-settings", &["<Shift>9"]);
     app.set_accels_for_action("win.export", &["<Control>e"]);
-    app.set_accels_for_action("win.play-pause", &["space"]);
-    app.set_accels_for_action("win.play", &["l"]);
-    app.set_accels_for_action("win.pause", &["k"]);
     app.set_accels_for_action("win.redo", &["<Control><Shift>z", "<Control>y"]);
+    // Clearing In/Out marks as in DaVinci Resolve.
+    app.set_accels_for_action("win.clear-in", &["<Alt>i"]);
+    app.set_accels_for_action("win.clear-out", &["<Alt>o"]);
+    app.set_accels_for_action("win.clear-in-out", &["<Alt>x"]);
     app.connect_activate(|app| window::build(app, &[]).present());
     // `nox clip.mp4 …` imports the files into the media pool; `nox
     // edit.otio` opens a project.

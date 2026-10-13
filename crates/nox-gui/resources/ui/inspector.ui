@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- Opacity in percent, shared by the slider and the spin button. -->
+  <object class="GtkAdjustment" id="opacity_adjustment">
+    <property name="lower">0</property>
+    <property name="upper">100</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">10</property>
+  </object>
+  <!-- Gain in dB. -->
+  <object class="GtkAdjustment" id="gain_adjustment">
+    <property name="lower">-30</property>
+    <property name="upper">12</property>
+    <property name="step-increment">0.1</property>
+    <property name="page-increment">1</property>
+  </object>
+
+  <!-- Properties of the item selected on the timeline. -->
+  <template class="NoxInspector" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="width-request">260</property>
+    <style>
+      <class name="inspector"/>
+    </style>
+    <child>
+      <object class="GtkLabel">
+        <property name="label" translatable="yes">Inspector</property>
+        <property name="xalign">0</property>
+        <style>
+          <class name="pane-title"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkStack" id="pages">
+        <property name="vexpand">true</property>
+        <child>
+          <object class="GtkStackPage">
+            <property name="name">empty</property>
+            <property name="child">
+              <object class="GtkLabel">
+                <property name="label" translatable="yes">Select a clip on the timeline to see its properties.</property>
+                <property name="wrap">true</property>
+                <property name="justify">center</property>
+                <property name="margin-start">16</property>
+                <property name="margin-end">16</property>
+                <style>
+                  <class name="dim-label"/>
+                </style>
+              </object>
+            </property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkStackPage">
+            <property name="name">item</property>
+            <property name="child">
+              <object class="GtkScrolledWindow">
+                <property name="hscrollbar-policy">never</property>
+                <property name="child">
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">14</property>
+                    <property name="margin-start">10</property>
+                    <property name="margin-end">10</property>
+                    <property name="margin-top">4</property>
+                    <property name="margin-bottom">10</property>
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">2</property>
+                        <child>
+                          <object class="GtkLabel" id="name_label">
+                            <property name="xalign">0</property>
+                            <property name="ellipsize">middle</property>
+                            <style>
+                              <class name="inspector-name"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel" id="details_label">
+                            <property name="xalign">0</property>
+                            <property name="ellipsize">end</property>
+                            <style>
+                              <class name="dim-label"/>
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="composite_section">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">Composite</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkGrid">
+                            <property name="row-spacing">6</property>
+                            <property name="column-spacing">8</property>
+                            <child>
+                              <object class="GtkLabel" id="opacity_label">
+                                <property name="label" translatable="yes">Opacity</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkScale" id="opacity_scale">
+                                <accessibility>
+                                  <relation name="labelled-by">opacity_label</relation>
+                                </accessibility>
+                                <property name="adjustment">opacity_adjustment</property>
+                                <property name="hexpand">true</property>
+                                <property name="draw-value">false</property>
+                                <property name="tooltip-text" translatable="yes">Opacity in percent</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">1</property>
+                                  <property name="column-span">3</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton">
+                                <property name="adjustment">opacity_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">opacity_label</relation>
+                                </accessibility>
+                                <property name="width-chars">4</property>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="blend_label">
+                                <property name="label" translatable="yes">Blend Mode</property>
+                                <property name="xalign">0</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">2</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkDropDown" id="blend_dropdown">
+                                <accessibility>
+                                  <relation name="labelled-by">blend_label</relation>
+                                </accessibility>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">2</property>
+                                  <property name="column-span">2</property>
+                                </layout>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="audio_section">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">Audio</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkGrid">
+                            <property name="row-spacing">2</property>
+                            <property name="column-spacing">8</property>
+                            <child>
+                              <object class="GtkLabel" id="gain_label">
+                                <property name="label" translatable="yes">Gain</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkScale" id="gain_scale">
+                                <accessibility>
+                                  <relation name="labelled-by">gain_label</relation>
+                                </accessibility>
+                                <property name="adjustment">gain_adjustment</property>
+                                <property name="hexpand">true</property>
+                                <property name="draw-value">false</property>
+                                <property name="tooltip-text" translatable="yes">Gain in decibels</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">1</property>
+                                  <property name="column-span">3</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton">
+                                <property name="adjustment">gain_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">gain_label</relation>
+                                </accessibility>
+                                <property name="digits">1</property>
+                                <property name="width-chars">5</property>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+              </object>
+            </property>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

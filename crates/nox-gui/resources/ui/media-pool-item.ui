@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- A media pool grid item (GtkBuilderListItemFactory in media-pool.ui):
+       a cell showing the list item's NoxMediaObject. -->
+  <template class="GtkListItem">
+    <property name="child">
+      <object class="NoxMediaCell">
+        <binding name="media">
+          <lookup name="item">GtkListItem</lookup>
+        </binding>
+      </object>
+    </property>
+  </template>
+</interface>

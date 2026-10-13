@@ -15,7 +15,8 @@ commands:
     --quality high|medium|low  (default: high)
     --software                 no hardware encoders
     --no-audio                 leave out the audio track
-    --frames START-END         sequence frames START..END (END exclusive)";
+    --frames START-END         sequence frames START..END (END exclusive)
+    --in-out                   only the frames between the In and Out marks";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -99,6 +100,7 @@ fn render(args: &[String]) -> Result<(), String> {
         range: None,
         audio: true,
     };
+    let mut in_out = false;
     let mut rest = args[2..].iter();
     while let Some(arg) = rest.next() {
         let mut value = || rest.next().ok_or(format!("{arg} needs a value"));
@@ -130,11 +132,17 @@ fn render(args: &[String]) -> Result<(), String> {
                     .ok_or(format!("invalid frame range {range}"))?;
                 settings.range = Some(start..end);
             }
+            "--in-out" => in_out = true,
             other => return Err(format!("unknown option {other}\n\n{USAGE}")),
         }
     }
     let timeline =
         nox_otio::read_file(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    if in_out {
+        let range = nox_engine::marked_range(&timeline)
+            .ok_or(format!("{} has no In and Out marks", project.display()))?;
+        settings.range = Some(range);
+    }
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let summary = nox_engine::export(&timeline, &settings, |done, total| {
         if interactive && (done % 10 == 0 || done == total) {

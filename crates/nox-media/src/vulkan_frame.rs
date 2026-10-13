@@ -51,7 +51,6 @@ fn log_path_once(fallback: Option<&'static str>) {
 /// Everything needed to describe the frame, gathered before locking it.
 struct Prepared {
     frames_ctx: *mut ffi::AVHWFramesContext,
-    vk_frames_ctx: *const ffi::AVVulkanFramesContext,
     vk_frame: *mut ffi::AVVkFrame,
     template: VkFrame,
 }
@@ -84,7 +83,7 @@ impl Prepared {
                 swap_chroma,
                 matrix,
                 chroma_offset,
-                tone,
+                color,
                 planes,
             } = classify(sw_format, frame).ok_or("unsupported decoder output format")?;
             if layout == Layout::Packed {
@@ -122,13 +121,12 @@ impl Prepared {
                 swap_chroma,
                 matrix,
                 chroma_offset,
-                tone,
+                color,
                 planes,
                 images: Vec::new(),
             };
             Ok(Self {
                 frames_ctx,
-                vk_frames_ctx,
                 vk_frame,
                 template,
             })
@@ -154,10 +152,7 @@ impl Prepared {
         // SAFETY: guaranteed by the caller; lock/unlock bracket all access to
         // the AVVkFrame state, as FFmpeg requires.
         unsafe {
-            let ctx = &*self.vk_frames_ctx;
-            if let Some(lock) = ctx.lock_frame {
-                lock(self.frames_ctx, self.vk_frame);
-            }
+            let _lock = FrameLock::new(self.frames_ctx, self.vk_frame);
             let vkf = &mut *self.vk_frame;
             self.template.images = (0..count)
                 .map(|i| ImageSync {
@@ -176,10 +171,53 @@ impl Prepared {
                 vkf.queue_family[i] = sync.queue_family;
                 vkf.sem_value[i] = sync.value;
             }
-            if let Some(unlock) = ctx.unlock_frame {
-                unlock(self.frames_ctx, self.vk_frame);
-            }
             result
         }
     }
+}
+
+/// FFmpeg's lock on an `AVVkFrame`, released on drop: a panic while it is
+/// held must not leave the frame locked, or FFmpeg's decoder and encoder
+/// threads would wait for it forever.
+pub(crate) struct FrameLock {
+    frames_ctx: *mut ffi::AVHWFramesContext,
+    frame: *mut ffi::AVVkFrame,
+}
+
+impl FrameLock {
+    /// # Safety
+    /// `frames_ctx` must be a Vulkan frames context and `frame` one of its
+    /// frames; both must outlive the lock.
+    pub(crate) unsafe fn new(
+        frames_ctx: *mut ffi::AVHWFramesContext,
+        frame: *mut ffi::AVVkFrame,
+    ) -> Self {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            if let Some(lock) = vulkan_frames_context(frames_ctx).lock_frame {
+                lock(frames_ctx, frame);
+            }
+        }
+        Self { frames_ctx, frame }
+    }
+}
+
+impl Drop for FrameLock {
+    fn drop(&mut self) {
+        // SAFETY: valid per `new`; we hold the lock.
+        unsafe {
+            if let Some(unlock) = vulkan_frames_context(self.frames_ctx).unlock_frame {
+                unlock(self.frames_ctx, self.frame);
+            }
+        }
+    }
+}
+
+/// # Safety
+/// `frames_ctx` must be a valid Vulkan frames context.
+unsafe fn vulkan_frames_context<'a>(
+    frames_ctx: *mut ffi::AVHWFramesContext,
+) -> &'a ffi::AVVulkanFramesContext {
+    // SAFETY: guaranteed by the caller.
+    unsafe { &*(*frames_ctx).hwctx.cast::<ffi::AVVulkanFramesContext>() }
 }

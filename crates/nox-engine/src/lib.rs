@@ -12,9 +12,9 @@ pub use audio::Mixer;
 pub use engine::Engine;
 pub use export::{
     EXPORT_AUDIO_RATE, Export, ExportError, ExportEvent, ExportSettings, ExportSummary, export,
-    full_range,
+    full_range, marked_range,
 };
-pub use nox_gpu::{DmabufFrame, FOURCC_ABGR8888, Image};
+pub use nox_gpu::{DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F, Image};
 pub use nox_media::{EncodeQuality, VideoCodec};
 
 /// Display-referred RGBA at the requested output size.

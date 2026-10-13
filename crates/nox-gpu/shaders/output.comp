@@ -1,10 +1,19 @@
-// Writes the accumulated picture to the 8-bit output image.
+// Writes the accumulated picture (linear working space) to the output
+// image through the output transform: RGBA8, or RGBA16F with HALF_FLOAT
+// defined (both hold BT.1886-encoded BT.709 R'G'B').
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "color.glsl"
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform readonly image2D accum;
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accum;
+#ifdef HALF_FLOAT
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D out_image;
+#else
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D out_image;
+#endif
 
 layout(push_constant) uniform Params {
     ivec2 size;
@@ -15,5 +24,5 @@ void main() {
     if (any(greaterThanEqual(pos, p.size))) {
         return;
     }
-    imageStore(out_image, pos, vec4(clamp(imageLoad(accum, pos).rgb, 0.0, 1.0), 1.0));
+    imageStore(out_image, pos, vec4(output_transform(imageLoad(accum, pos).rgb), 1.0));
 }

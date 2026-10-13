@@ -34,7 +34,7 @@ pub struct Playback {
 impl Playback {
     pub fn new(project: &Rc<Project>, viewer: &Viewer, timeline: &TimelineView) -> Rc<Self> {
         let (sender, receiver) = async_channel::unbounded();
-        let engine = Engine::new(importable_modifiers(), move |event| {
+        let engine = Engine::new(importable_formats(), move |event| {
             let _ = sender.send_blocking(event);
         });
         let playback = Rc::new(Self {
@@ -242,6 +242,15 @@ impl Playback {
         }
     }
 
+    /// Stops playback and the engine for good (see `Engine::shutdown`);
+    /// for when the window goes away.
+    pub fn shutdown(&self) {
+        if let Some(id) = self.tick.take() {
+            id.remove();
+        }
+        self.engine.shutdown();
+    }
+
     pub fn toggle(self: &Rc<Self>) {
         if self.engine.is_playing() {
             self.pause();
@@ -334,9 +343,10 @@ impl std::fmt::Display for Stats {
     }
 }
 
-/// DRM modifiers GTK can import for RGBA8 frames, i.e. whether the engine
-/// may hand over frames as DMA-BUF. `NOX_PRESENT=readback` disables it.
-fn importable_modifiers() -> Vec<u64> {
+/// The (DRM fourcc, modifier) pairs GTK can import of the formats the
+/// engine renders (`AB4H`, `AB24`), i.e. whether it may hand over frames as
+/// DMA-BUF. `NOX_PRESENT=readback` disables it.
+fn importable_formats() -> Vec<(u32, u64)> {
     if std::env::var("NOX_PRESENT").is_ok_and(|v| v == "readback") {
         tracing::info!("NOX_PRESENT=readback: not using DMA-BUF");
         return Vec::new();
@@ -347,7 +357,8 @@ fn importable_modifiers() -> Vec<u64> {
     let formats = display.dmabuf_formats();
     (0..formats.n_formats())
         .map(|i| formats.format(i))
-        .filter(|&(fourcc, _)| fourcc == nox_engine::FOURCC_ABGR8888)
-        .map(|(_, modifier)| modifier)
+        .filter(|&(fourcc, _)| {
+            fourcc == nox_engine::FOURCC_ABGR16161616F || fourcc == nox_engine::FOURCC_ABGR8888
+        })
         .collect()
 }

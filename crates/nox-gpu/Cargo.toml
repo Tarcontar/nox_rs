@@ -13,5 +13,8 @@ nox-color.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[build-dependencies]
+nox-color.workspace = true
+
 [lints]
 workspace = true

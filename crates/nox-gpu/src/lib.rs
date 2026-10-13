@@ -13,7 +13,7 @@ pub use converter::{
     Converter, CpuFrame, ImageSync, Input, Layout, Plane, PlaneFormat, VkFrame, VkPlane,
 };
 pub use device::{ExternalDevice, GpuDevice, QueueLock};
-pub use export::{DmabufFrame, FOURCC_ABGR8888};
+pub use export::{DmabufFormat, DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

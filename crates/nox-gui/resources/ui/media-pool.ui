@@ -19,6 +19,9 @@
           <object class="GtkButton">
             <property name="icon-name">list-add-symbolic</property>
             <property name="tooltip-text" translatable="yes">Import Media…</property>
+            <accessibility>
+              <property name="label" translatable="yes">Import Media…</property>
+            </accessibility>
             <signal name="clicked" handler="on_import_clicked" swapped="true"/>
             <style><class name="flat"/></style>
           </object>
@@ -48,6 +51,11 @@
                   <object class="GtkGridView" id="grid">
                     <property name="max-columns">12</property>
                     <property name="enable-rubberband">true</property>
+                    <property name="factory">
+                      <object class="GtkBuilderListItemFactory">
+                        <property name="resource">/io/github/nox/Nox/ui/media-pool-item.ui</property>
+                      </object>
+                    </property>
                   </object>
                 </property>
               </object>

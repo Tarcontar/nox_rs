@@ -4,11 +4,14 @@
 
 use gtk::{CompositeTemplate, gdk, gio, glib, prelude::*, subclass::prelude::*};
 use nox_project::{BlendMode, Edge, EditError, Rational, Time, TrackKind, supports_drop_frame};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::clip_strip::ClipStrip;
 use crate::i18n::{fill, gettext};
+use crate::inspector::Inspector;
 use crate::media_object::MediaObject;
 use crate::playback::Playback;
 use crate::project::Project;
@@ -26,6 +29,18 @@ mod imp {
         pub viewer: TemplateChild<Viewer>,
         #[template_child]
         pub timeline: TemplateChild<TimelineView>,
+        #[template_child]
+        pub pages: TemplateChild<gtk::Stack>,
+        #[template_child]
+        pub edit_viewer_slot: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub color_viewer_slot: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub inspector: TemplateChild<Inspector>,
+        #[template_child]
+        pub clip_strip: TemplateChild<ClipStrip>,
+        #[template_child]
+        pub color_paned: TemplateChild<gtk::Paned>,
     }
 
     #[glib::object_subclass]
@@ -38,6 +53,8 @@ mod imp {
             MediaPool::ensure_type();
             Viewer::ensure_type();
             TimelineView::ensure_type();
+            Inspector::ensure_type();
+            ClipStrip::ensure_type();
             klass.bind_template();
         }
 
@@ -87,17 +104,33 @@ pub fn build(app: &gtk::Application, files: &[gio::File]) -> Window {
         playback,
     });
     // The window owns the controller; handlers only hold weak references.
-    // GTK drops this handler on destroy, which breaks the window ↔ ui cycle.
-    window.connect_destroy(glib::clone!(
-        #[strong]
-        ui,
-        move |_| {
-            let _ = &ui;
+    // The strong one is released when the window leaves the application
+    // (closed, or destroyed after "discard changes"). Not on `destroy`:
+    // GTK 4 emits that only once the last reference is gone, which the
+    // window ↔ ui cycle prevents, so the controller and its render thread
+    // outlived the window. The thread then kept decoding while the GPU
+    // driver was unloaded at exit, and crashed in the driver.
+    let owner = RefCell::new(Some(ui.clone()));
+    app.connect_window_removed(glib::clone!(
+        #[weak]
+        window,
+        move |_, removed| {
+            if removed != window.upcast_ref::<gtk::Window>() {
+                return;
+            }
+            if let Some(ui) = owner.take() {
+                // Other closures may still hold the playback; stop it anyway.
+                ui.playback.shutdown();
+            }
         }
     ));
+    window.imp().inspector.set_timeline(&timeline);
+    window.imp().clip_strip.set_up(&timeline, &pool);
+    add_page_action(&window);
     add_transport_actions(window.upcast_ref(), &timeline, &project);
     add_project_actions(&ui);
     add_clip_actions(&ui);
+    add_track_actions(&ui);
     pool.connect_activate(glib::clone!(
         #[weak]
         ui,
@@ -325,21 +358,7 @@ impl Ui {
 
     /// Applies `change` to the selected clip as one undoable edit.
     fn edit_selected_clip(&self, label: &str, change: impl FnOnce(&mut nox_project::Item)) {
-        let Some(item) = self.timeline.selection() else {
-            return;
-        };
-        let _ = self.project.edit(label, |t| {
-            let track = t
-                .track_mut(item.track)
-                .ok_or(EditError::NoTrack(item.track))?;
-            let clip = track
-                .children
-                .get_mut(item.index)
-                .and_then(nox_project::Composable::as_clip_mut)
-                .ok_or(EditError::NotTrimmable)?;
-            change(&mut clip.item);
-            Ok::<_, EditError>(())
-        });
+        self.timeline.edit_selected_clip(label, None, change);
     }
 
     /// A one-second dissolve at the selected clip's edge nearest the
@@ -364,6 +383,17 @@ impl Ui {
         let one_second = Time::from_frames(nox_project::nominal_fps(fps) as i64, fps);
         let _ = self.project.edit(&gettext("Add Dissolve"), |t| {
             t.add_dissolve(item, edge, one_second)
+        });
+    }
+
+    /// Changes the In/Out marks as an undoable edit; `change` gets the
+    /// settings and the playhead's frame as a time.
+    fn mark(&self, label: &str, change: impl FnOnce(&mut nox_project::Settings, Time)) {
+        let fps = self.project.frame_rate();
+        let playhead = Time::from_frames(self.timeline.playhead(), fps);
+        let _ = self.project.edit(label, |t| {
+            change(&mut t.settings, playhead);
+            Ok::<_, EditError>(())
         });
     }
 
@@ -401,6 +431,65 @@ fn dialog_path(result: Result<gio::File, glib::Error>) -> Option<PathBuf> {
 
 /// File, edit and sequence actions. The `*-path` variants take a path
 /// instead of showing a dialog, for scripting over D-Bus.
+/// `win.page` ("edit" or "color"; Shift+4 and Shift+6 as in Resolve)
+/// switches pages. The one viewer moves to the visible page, so there is
+/// one engine and nothing renders twice.
+fn add_page_action(window: &Window) {
+    let imp = window.imp();
+    let page = gio::SimpleAction::new_stateful(
+        "page",
+        Some(glib::VariantTy::STRING),
+        &"edit".to_variant(),
+    );
+    page.connect_activate(glib::clone!(
+        #[weak]
+        window,
+        move |_, name| {
+            if let Some(name) = name.and_then(|n| n.get::<String>())
+                && window.imp().pages.child_by_name(&name).is_some()
+            {
+                window.imp().pages.set_visible_child_name(&name);
+            }
+        }
+    ));
+    imp.pages.connect_visible_child_name_notify(glib::clone!(
+        #[weak]
+        window,
+        #[weak]
+        page,
+        move |pages| {
+            let imp = window.imp();
+            let name = pages.visible_child_name().unwrap_or_default();
+            page.set_state(&name.to_variant());
+            let slot = if name == "color" {
+                &imp.color_viewer_slot
+            } else {
+                &imp.edit_viewer_slot
+            };
+            let viewer = imp.viewer.get();
+            if viewer.parent().as_ref() != Some(slot.upcast_ref()) {
+                // The slots are boxes; the viewer is their only child.
+                if let Some(parent) = viewer.parent().and_downcast::<gtk::Box>() {
+                    parent.remove(&viewer);
+                }
+                slot.append(&viewer);
+            }
+        }
+    ));
+    window.add_action(&page);
+
+    // The Color page's splitter starts with room for the clip strip and the
+    // wheels below the viewer (at most half the page); a fixed position
+    // hid them on small screens. Once set, the user's position is kept.
+    let paned = imp.color_paned.get();
+    paned.connect_max_position_notify(|paned| {
+        let max = paned.max_position();
+        if max > 0 && !paned.is_position_set() {
+            paned.set_position((max - 260).max(max / 2));
+        }
+    });
+}
+
 fn add_project_actions(ui: &Rc<Ui>) {
     let simple = |name: &str, f: fn(&Rc<Ui>)| {
         let action = gio::SimpleAction::new(name, None);
@@ -450,6 +539,32 @@ fn add_project_actions(ui: &Rc<Ui>) {
         simple("pause", |ui| ui.playback.pause()),
         simple("redo", |ui| ui.project.redo()),
         simple("delete-clip", |ui| ui.timeline.delete_selection()),
+        simple("ripple-delete", |ui| ui.timeline.ripple_delete_selection()),
+        // Marks as in Resolve: In at the playhead's frame, Out after it, so
+        // the frame under the playhead is included.
+        simple("set-in", |ui| {
+            ui.mark(&gettext("Mark In"), |s, playhead| {
+                s.set_mark_in(Some(playhead))
+            })
+        }),
+        simple("set-out", |ui| {
+            let frame = Time::from_frames(1, ui.project.frame_rate());
+            ui.mark(&gettext("Mark Out"), |s, playhead| {
+                s.set_mark_out(Some(playhead + frame))
+            })
+        }),
+        simple("clear-in", |ui| {
+            ui.mark(&gettext("Clear In"), |s, _| s.set_mark_in(None))
+        }),
+        simple("clear-out", |ui| {
+            ui.mark(&gettext("Clear Out"), |s, _| s.set_mark_out(None))
+        }),
+        simple("clear-in-out", |ui| {
+            ui.mark(&gettext("Clear In and Out"), |s, _| {
+                s.set_mark_in(None);
+                s.set_mark_out(None);
+            })
+        }),
         simple("split", |ui| {
             let time = Time::from_frames(ui.timeline.playhead(), ui.project.frame_rate());
             let _ = ui
@@ -499,6 +614,14 @@ fn add_project_actions(ui: &Rc<Ui>) {
                 tracing::warn!("screenshot failed: {err}");
             }
         }));
+        // Like the title bar's close button (close-request and all).
+        let close = gio::SimpleAction::new("close", None);
+        close.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            ui.window,
+            move |_, _| window.close()
+        ));
+        ui.window.add_action(&close);
     }
 
     let resolution = gio::SimpleAction::new_stateful(
@@ -650,6 +773,25 @@ fn add_clip_actions(ui: &Rc<Ui>) {
             ui.edit_selected_clip(&gettext("Change Gain"), |item| item.set_gain(gain));
         }
     });
+    // By stack and track index, for scripting; `(-1, -1)` clears.
+    let select = gio::SimpleAction::new("select-clip", Some(glib::VariantTy::new("(xx)").unwrap()));
+    select.connect_activate(glib::clone!(
+        #[weak]
+        ui,
+        move |_, parameter| {
+            let item = parameter
+                .and_then(|p| p.get::<(i64, i64)>())
+                .and_then(|(track, index)| {
+                    Some(nox_project::ItemRef {
+                        track: usize::try_from(track).ok()?,
+                        index: usize::try_from(index).ok()?,
+                    })
+                })
+                .filter(|&item| ui.project.timeline().item(item).is_ok());
+            ui.timeline.set_selection(item);
+        }
+    ));
+    ui.window.add_action(&select);
     let dissolve = gio::SimpleAction::new("add-dissolve", None);
     dissolve.connect_activate(glib::clone!(
         #[weak]
@@ -657,6 +799,56 @@ fn add_clip_actions(ui: &Rc<Ui>) {
         move |_, _| ui.add_dissolve()
     ));
     ui.window.add_action(&dissolve);
+}
+
+/// Track actions by stack index, for scripting (the track header menus use
+/// the timeline's own `track.*` actions): `delete-track(x)`,
+/// `set-track-enabled((xb))` (mute or hide), `set-track-locked((xb))` and
+/// `rename-track((xs))`.
+fn add_track_actions(ui: &Rc<Ui>) {
+    let with_param = |name: &str, ty: &str, f: fn(&Ui, &glib::Variant)| {
+        let ty = glib::VariantTy::new(ty).expect("variant type");
+        let action = gio::SimpleAction::new(name, Some(ty));
+        action.connect_activate(glib::clone!(
+            #[weak]
+            ui,
+            move |_, parameter| {
+                if let Some(parameter) = parameter {
+                    f(&ui, parameter);
+                }
+            }
+        ));
+        ui.window.add_action(&action);
+    };
+    fn index(i: i64) -> Option<usize> {
+        usize::try_from(i).ok()
+    }
+    with_param("delete-track", "x", |ui, value| {
+        if let Some(track) = value.get::<i64>().and_then(index) {
+            ui.timeline.delete_track(track);
+        }
+    });
+    with_param("set-track-enabled", "(xb)", |ui, value| {
+        if let Some((track, on)) = value.get::<(i64, bool)>()
+            && let Some(track) = index(track)
+        {
+            ui.timeline.set_track_enabled(track, on);
+        }
+    });
+    with_param("set-track-locked", "(xb)", |ui, value| {
+        if let Some((track, on)) = value.get::<(i64, bool)>()
+            && let Some(track) = index(track)
+        {
+            ui.timeline.set_track_locked(track, on);
+        }
+    });
+    with_param("rename-track", "(xs)", |ui, value| {
+        if let Some((track, name)) = value.get::<(i64, String)>()
+            && let Some(track) = index(track)
+        {
+            ui.timeline.rename_track(track, &name);
+        }
+    });
 }
 
 fn parse_rate(text: &str) -> Option<Rational> {
@@ -715,11 +907,26 @@ fn add_transport_actions(
             }
         ))
         .build();
+    let timeline_entry = |name: &str, f: fn(&TimelineView)| {
+        gio::ActionEntry::builder(name)
+            .activate(glib::clone!(
+                #[weak]
+                timeline,
+                move |_: &gtk::ApplicationWindow, _, _| f(&timeline)
+            ))
+            .build()
+    };
     window.add_action_entries([
         seek,
         step("previous-frame", -1),
         step("next-frame", 1),
         go_to_start,
         go_to_end,
+        timeline_entry("previous-edit", |t| t.go_to_edit_point(false)),
+        timeline_entry("next-edit", |t| t.go_to_edit_point(true)),
+        timeline_entry(
+            "select-clip-at-playhead",
+            TimelineView::select_clip_at_playhead,
+        ),
     ]);
 }

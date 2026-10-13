@@ -16,6 +16,7 @@ use ffmpeg::{ChannelLayout, Dictionary, codec, encoder, ffi, format, frame, soft
 use nox_project::Rational;
 use std::path::{Path, PathBuf};
 
+use crate::vulkan_frame::FrameLock;
 use crate::{CHANNELS, Error, HwDevice, Image, Result};
 use nox_color::ycbcr::{self, Coefficients, Quantization};
 use nox_gpu::{ImageSync, PlaneFormat, VkPlane, YuvTarget, vk};
@@ -583,7 +584,6 @@ unsafe fn render_into(
     // the AVVkFrame state, as FFmpeg requires.
     unsafe {
         let ctx = (*frames).data.cast::<ffi::AVHWFramesContext>();
-        let vk_ctx = &*(*ctx).hwctx.cast::<ffi::AVVulkanFramesContext>();
         let vkf = (*frame.as_ptr()).data[0].cast::<ffi::AVVkFrame>();
         let (width, height) = ((*ctx).width as u32, (*ctx).height as u32);
         let multi_planar = (*vkf).img[1] == 0;
@@ -598,9 +598,7 @@ unsafe fn render_into(
             width: w,
             height: h,
         };
-        if let Some(lock) = vk_ctx.lock_frame {
-            lock(ctx, vkf);
-        }
+        let _lock = FrameLock::new(ctx, vkf);
         let count = if multi_planar { 1 } else { 2 };
         let mut target = YuvTarget {
             width,
@@ -625,9 +623,6 @@ unsafe fn render_into(
             (*vkf).access[i] = sync.access.as_raw() as _;
             (*vkf).queue_family[i] = sync.queue_family;
             (*vkf).sem_value[i] = sync.value;
-        }
-        if let Some(unlock) = vk_ctx.unlock_frame {
-            unlock(ctx, vkf);
         }
         result.map_err(Error::from)
     }

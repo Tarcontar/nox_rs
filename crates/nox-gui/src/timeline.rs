@@ -2,13 +2,20 @@
 //! directly with `snapshot()`.
 //!
 //! Drag on the ruler or empty space to scrub, drag a clip to move it (also
-//! to another track of the same kind), drag a clip's edge to trim it. Drop
-//! media from the media pool onto a track to add it. Scroll to pan,
-//! Ctrl+scroll to zoom, N toggles snapping, Delete removes the selected
-//! clip. Edits go through the project, so they can be undone.
+//! to another track of the same kind), drag a clip's edge to trim it. With
+//! Ctrl held, a trim ripples: what follows on the track moves along. The
+//! middle of a cut between two clips rolls the cut. Drop media from the
+//! media pool onto a track to add it. Scroll to pan, Ctrl+scroll to zoom,
+//! N toggles snapping, Delete removes the selected clip and Shift+Delete
+//! ripple-deletes it. The In/Out marks show on the ruler, with everything
+//! outside them shaded.
+//!
+//! Track headers have toggles for mute (video: hide) and lock; their
+//! right-click menu also renames and deletes the track. Locked tracks
+//! can't be edited. Edits go through the project, so they can be undone.
 
-use gtk::{gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
-use nox_project::{Composable, Edge, ItemRef, Time, TimeRange, Timeline, TrackKind};
+use gtk::{gdk, gio, glib, graphene, gsk, prelude::*, subclass::prelude::*};
+use nox_project::{Composable, Edge, EditError, ItemRef, Time, TimeRange, Timeline, TrackKind};
 use std::rc::Rc;
 
 use crate::media_object::MediaObject;
@@ -20,6 +27,11 @@ const HEADER_WIDTH: f32 = 72.0;
 const MIN_TICK_SPACING: f64 = 90.0;
 /// How close (in pixels) the pointer must be to a clip edge to trim.
 const EDGE_GRAB: f64 = 6.0;
+/// How close the pointer must be to a cut between two clips to roll it.
+const ROLL_GRAB: f64 = 3.0;
+/// Size and spacing of the toggles in track headers.
+const HEADER_BUTTON: f32 = 16.0;
+const HEADER_BUTTON_X: [f32; 2] = [8.0, 30.0];
 /// Snapping distance in pixels.
 const SNAP_DISTANCE: f64 = 8.0;
 
@@ -38,6 +50,10 @@ const TICK: gdk::RGBA = rgb(0x70, 0x72, 0x78);
 const TEXT: gdk::RGBA = rgb(0xb0, 0xb2, 0xb8);
 const CLIP_TEXT: gdk::RGBA = rgb(0xe8, 0xea, 0xee);
 const PLAYHEAD: gdk::RGBA = rgb(0xe5, 0x3b, 0x3b);
+const MARK: gdk::RGBA = rgb(0x8c, 0xb4, 0xf0);
+const OUTSIDE_MARKS: gdk::RGBA = gdk::RGBA::new(0.0, 0.0, 0.0, 0.4);
+const HEADER_ICON: gdk::RGBA = rgb(0x80, 0x82, 0x88);
+const HEADER_ICON_ACTIVE: gdk::RGBA = rgb(0xf0, 0x8a, 0x40);
 
 const fn rgb(r: u8, g: u8, b: u8) -> gdk::RGBA {
     gdk::RGBA::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0)
@@ -98,6 +114,66 @@ pub(crate) fn clip_menu() -> gtk::gio::MenuModel {
     builder.object("clip_menu").expect("clip_menu in menus.ui")
 }
 
+/// The track header menus for video and audio tracks (`menus.ui`); their
+/// `track.*` actions work on the track the menu was opened for.
+pub(crate) fn track_menus() -> (gio::MenuModel, gio::MenuModel) {
+    let builder = gtk::Builder::new();
+    builder.set_translation_domain(Some(crate::i18n::DOMAIN));
+    builder
+        .add_from_resource("/io/github/nox/Nox/ui/menus.ui")
+        .expect("menus.ui is valid");
+    (
+        builder
+            .object("video_track_menu")
+            .expect("video_track_menu"),
+        builder
+            .object("audio_track_menu")
+            .expect("audio_track_menu"),
+    )
+}
+
+/// Undo labels (and menu texts) for toggling a track.
+fn enable_label(kind: &TrackKind, enabled: bool) -> String {
+    use crate::i18n::gettext;
+    match (kind, enabled) {
+        (TrackKind::Audio, true) => gettext("Unmute Track"),
+        (TrackKind::Audio, false) => gettext("Mute Track"),
+        (_, true) => gettext("Enable Track"),
+        (_, false) => gettext("Disable Track"),
+    }
+}
+
+fn lock_label(locked: bool) -> String {
+    if locked {
+        crate::i18n::gettext("Lock Track")
+    } else {
+        crate::i18n::gettext("Unlock Track")
+    }
+}
+
+/// The toggles in a track header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderButton {
+    /// Mute for audio, show/hide for video (the track's `enabled`).
+    Enabled,
+    Lock,
+}
+
+impl HeaderButton {
+    const ALL: [HeaderButton; 2] = [Self::Enabled, Self::Lock];
+
+    /// Where the toggle sits in a header row starting at `y`.
+    fn rect(self, y: f32) -> graphene::Rect {
+        let x = HEADER_BUTTON_X[self as usize];
+        graphene::Rect::new(
+            x,
+            y + TRACK_HEIGHT - HEADER_BUTTON - 6.0,
+            HEADER_BUTTON,
+            HEADER_BUTTON,
+        )
+    }
+}
+
 /// An interaction in progress.
 #[derive(Debug, Clone)]
 enum Drag {
@@ -117,9 +193,22 @@ enum Drag {
     Trim {
         item: ItemRef,
         edge: Edge,
+        /// Ripple trim: what follows moves along.
+        ripple: bool,
         range: TimeRange,
         min: Time,
         max: Option<Time>,
+        snap_points: Vec<f64>,
+        to: Time,
+        snapped: Option<f64>,
+    },
+    Roll {
+        item: ItemRef,
+        edge: Edge,
+        /// Where the cut was.
+        cut: Time,
+        min: Time,
+        max: Time,
         snap_points: Vec<f64>,
         to: Time,
         snapped: Option<f64>,
@@ -129,8 +218,19 @@ enum Drag {
 /// What is under the pointer.
 enum Hit {
     Ruler,
-    Item { item: ItemRef, edge: Option<Edge> },
+    /// A clip or transition; near an edge of a clip, the edge, and in the
+    /// middle of a cut between two clips, `roll`.
+    Item {
+        item: ItemRef,
+        edge: Option<Edge>,
+        roll: bool,
+    },
     Track,
+    /// A track header, and the toggle in it.
+    Header {
+        track: usize,
+        button: Option<HeaderButton>,
+    },
     Nothing,
 }
 
@@ -153,6 +253,12 @@ mod imp {
         pub pointer_x: Cell<f64>,
         /// Context menu for clips.
         pub menu: OnceCell<gtk::PopoverMenu>,
+        /// Context menus for video and audio tracks.
+        pub track_menus: OnceCell<(gtk::PopoverMenu, gtk::PopoverMenu)>,
+        /// The track (stack index) the track menu was opened for.
+        pub menu_track: Cell<Option<usize>>,
+        /// The `track.*` actions of the track menus.
+        pub track_actions: gio::SimpleActionGroup,
     }
 
     impl Default for TimelineView {
@@ -168,6 +274,9 @@ mod imp {
                 drop_hint: Cell::new(None),
                 pointer_x: Cell::new(0.0),
                 menu: OnceCell::new(),
+                track_menus: OnceCell::new(),
+                menu_track: Cell::new(None),
+                track_actions: gio::SimpleActionGroup::new(),
             }
         }
     }
@@ -180,6 +289,9 @@ mod imp {
 
         fn class_init(klass: &mut Self::Class) {
             klass.set_css_name("timeline");
+            // Drawn in code: one accessible element with a name and the
+            // keys to use; the selection is announced (`set_selection`).
+            klass.set_accessible_role(gtk::AccessibleRole::Group);
         }
     }
 
@@ -191,6 +303,8 @@ mod imp {
                     glib::subclass::Signal::builder("playhead-changed")
                         .param_types([i64::static_type()])
                         .build(),
+                    // The selected item changed (or went away).
+                    glib::subclass::Signal::builder("selection-changed").build(),
                 ]
             })
         }
@@ -200,12 +314,25 @@ mod imp {
             let obj = self.obj();
             obj.set_focusable(true);
             obj.set_overflow(gtk::Overflow::Hidden);
+            obj.update_property(&[
+                gtk::accessible::Property::Label(&crate::i18n::gettext("Timeline")),
+                gtk::accessible::Property::Description(&crate::i18n::gettext(
+                    "Left and Right step one frame, Up and Down jump to edit points, \
+                     Shift+V selects the clip at the playhead, Shift+F10 opens its menu, \
+                     Delete removes it.",
+                )),
+            ]);
 
             let drag = gtk::GestureDrag::new();
             drag.connect_drag_begin(glib::clone!(
                 #[weak]
                 obj,
-                move |_, x, y| obj.imp().drag_begin(x, y)
+                move |gesture, x, y| {
+                    let ripple = gesture
+                        .current_event_state()
+                        .contains(gdk::ModifierType::CONTROL_MASK);
+                    obj.imp().drag_begin(x, y, ripple)
+                }
             ));
             drag.connect_drag_update(glib::clone!(
                 #[weak]
@@ -250,6 +377,10 @@ mod imp {
 
             let shortcuts = gtk::ShortcutController::new();
             shortcuts.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Shift>Delete|<Shift>BackSpace"),
+                Some(gtk::NamedAction::new("win.ripple-delete")),
+            ));
+            shortcuts.add_shortcut(gtk::Shortcut::new(
                 gtk::ShortcutTrigger::parse_string("Delete|BackSpace"),
                 Some(gtk::CallbackAction::new(|widget, _| {
                     let view = widget
@@ -263,6 +394,17 @@ mod imp {
             shortcuts.add_shortcut(gtk::Shortcut::new(
                 gtk::ShortcutTrigger::parse_string("n"),
                 Some(gtk::NamedAction::new("win.snapping")),
+            ));
+            // The clip menu without a mouse.
+            shortcuts.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Shift>F10|Menu"),
+                Some(gtk::CallbackAction::new(|widget, _| {
+                    let view = widget
+                        .downcast_ref::<super::TimelineView>()
+                        .expect("timeline");
+                    view.imp().selection_menu();
+                    glib::Propagation::Stop
+                })),
             ));
             obj.add_controller(shortcuts);
 
@@ -324,11 +466,51 @@ mod imp {
                 move |_, _, x, y| obj.imp().context_menu(x, y)
             ));
             obj.add_controller(context);
+
+            let (video, audio) = track_menus();
+            let track_menu = |model: &gio::MenuModel| {
+                let menu = gtk::PopoverMenu::from_model(Some(model));
+                menu.set_parent(&*obj);
+                menu.set_has_arrow(false);
+                menu.set_halign(gtk::Align::Start);
+                menu
+            };
+            self.track_menus
+                .set((track_menu(&video), track_menu(&audio)))
+                .expect("menus set once");
+            self.add_track_actions();
+
+            obj.set_has_tooltip(true);
+            obj.connect_query_tooltip(|obj, x, y, _, tooltip| {
+                let imp = obj.imp();
+                let Hit::Header {
+                    track,
+                    button: Some(button),
+                } = imp.hit(x.into(), y.into())
+                else {
+                    return false;
+                };
+                let project = imp.project();
+                let timeline = project.timeline();
+                let Some(track) = timeline.track(track) else {
+                    return false;
+                };
+                // What clicking would do.
+                tooltip.set_text(Some(&match button {
+                    HeaderButton::Enabled => enable_label(&track.kind, !track.item.enabled),
+                    HeaderButton::Lock => lock_label(!track.item.locked()),
+                }));
+                true
+            });
         }
 
         fn dispose(&self) {
             if let Some(menu) = self.menu.get() {
                 menu.unparent();
+            }
+            if let Some((video, audio)) = self.track_menus.get() {
+                video.unparent();
+                audio.unparent();
             }
         }
     }
@@ -381,6 +563,7 @@ mod imp {
                 self.draw_track(snapshot, &timeline, index, row_y(row), drag.as_ref());
             }
             self.draw_drag(snapshot, &timeline, &rows, drag.as_ref(), height);
+            self.draw_marks(snapshot, &timeline, width, height);
             if let Some((index, frame)) = self.drop_hint.get()
                 && let Some(row) = rows.iter().position(|&i| i == index)
             {
@@ -398,18 +581,7 @@ mod imp {
 
             // Track headers on top of everything scrolled.
             for (row, &index) in rows.iter().enumerate() {
-                let track = timeline.track(index).expect("track");
-                let y = row_y(row);
-                snapshot.append_color(
-                    &TRACK_HEADER,
-                    &graphene::Rect::new(0.0, y, HEADER_WIDTH - 1.0, TRACK_HEIGHT - 1.0),
-                );
-                let name = if track.item.name.is_empty() {
-                    format!("{}{}", &track.kind.as_str()[..1], row + 1)
-                } else {
-                    track.item.name.clone()
-                };
-                self.draw_text(snapshot, &name, 8.0, y + 14.0, &TEXT);
+                self.draw_header(snapshot, &timeline, index, row);
             }
         }
     }
@@ -472,6 +644,128 @@ mod imp {
             }
         }
 
+        /// The In/Out marks: the range on the ruler, with brackets at the
+        /// marks, and everything outside it shaded.
+        fn draw_marks(
+            &self,
+            snapshot: &gtk::Snapshot,
+            timeline: &Timeline,
+            width: f32,
+            height: f32,
+        ) {
+            let settings = &timeline.settings;
+            if settings.mark_in.is_none() && settings.mark_out.is_none() {
+                return;
+            }
+            let x_of = |time: Time| self.frame_to_x(self.time_to_frames(time)) as f32;
+            let x0 = settings.mark_in.map_or(HEADER_WIDTH, x_of);
+            let x1 = settings.mark_out.map_or(width, x_of);
+            let tracks = height - RULER_HEIGHT;
+            if x0 > HEADER_WIDTH {
+                snapshot.append_color(
+                    &OUTSIDE_MARKS,
+                    &graphene::Rect::new(HEADER_WIDTH, RULER_HEIGHT, x0 - HEADER_WIDTH, tracks),
+                );
+            }
+            if x1 < width {
+                snapshot.append_color(
+                    &OUTSIDE_MARKS,
+                    &graphene::Rect::new(x1, RULER_HEIGHT, width - x1, tracks),
+                );
+            }
+            snapshot.append_color(
+                &with_alpha(MARK, 0.3),
+                &graphene::Rect::new(x0, RULER_HEIGHT - 8.0, (x1 - x0).max(0.0), 8.0),
+            );
+            // Brackets: [ at In, ] at Out.
+            let bracket = |x: f32, inward: f32| {
+                snapshot.append_color(&MARK, &graphene::Rect::new(x - 1.0, 0.0, 2.0, height));
+                let foot = if inward > 0.0 { x - 1.0 } else { x - 5.0 };
+                snapshot.append_color(&MARK, &graphene::Rect::new(foot, 0.0, 6.0, 2.0));
+                snapshot.append_color(
+                    &MARK,
+                    &graphene::Rect::new(foot, RULER_HEIGHT - 2.0, 6.0, 2.0),
+                );
+            };
+            if settings.mark_in.is_some() {
+                bracket(x0, 1.0);
+            }
+            if settings.mark_out.is_some() {
+                bracket(x1, -1.0);
+            }
+        }
+
+        /// A track header: name, mute (or show/hide) and lock toggles.
+        fn draw_header(
+            &self,
+            snapshot: &gtk::Snapshot,
+            timeline: &Timeline,
+            index: usize,
+            row: usize,
+        ) {
+            let track = timeline.track(index).expect("track");
+            let y = row_y(row);
+            let rect = graphene::Rect::new(0.0, y, HEADER_WIDTH - 1.0, TRACK_HEIGHT - 1.0);
+            snapshot.append_color(&TRACK_HEADER, &rect);
+            let name = if track.item.name.is_empty() {
+                format!("{}{}", &track.kind.as_str()[..1], row + 1)
+            } else {
+                track.item.name.clone()
+            };
+            snapshot.push_clip(&rect);
+            self.draw_text(snapshot, &name, 8.0, y + 4.0, &TEXT);
+            snapshot.pop();
+            for button in HeaderButton::ALL {
+                let (icon, active) = match button {
+                    HeaderButton::Enabled => {
+                        let icon = match (&track.kind, track.item.enabled) {
+                            (TrackKind::Audio, true) => "audio-volume-high-symbolic",
+                            (TrackKind::Audio, false) => "audio-volume-muted-symbolic",
+                            (_, true) => "view-reveal-symbolic",
+                            (_, false) => "view-conceal-symbolic",
+                        };
+                        (icon, !track.item.enabled)
+                    }
+                    HeaderButton::Lock if track.item.locked() => ("changes-prevent-symbolic", true),
+                    HeaderButton::Lock => ("changes-allow-symbolic", false),
+                };
+                let color = if active {
+                    HEADER_ICON_ACTIVE
+                } else {
+                    HEADER_ICON
+                };
+                self.draw_icon(snapshot, icon, button.rect(y), &color);
+            }
+        }
+
+        fn draw_icon(
+            &self,
+            snapshot: &gtk::Snapshot,
+            name: &str,
+            rect: graphene::Rect,
+            color: &gdk::RGBA,
+        ) {
+            let obj = self.obj();
+            let theme = gtk::IconTheme::for_display(&obj.display());
+            let icon = theme.lookup_icon(
+                name,
+                &[],
+                rect.width() as i32,
+                obj.scale_factor(),
+                gtk::TextDirection::None,
+                gtk::IconLookupFlags::empty(),
+            );
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(rect.x(), rect.y()));
+            icon.snapshot_symbolic(
+                snapshot,
+                rect.width().into(),
+                rect.height().into(),
+                &[*color],
+            );
+            snapshot.restore();
+        }
+
         fn draw_track(
             &self,
             snapshot: &gtk::Snapshot,
@@ -499,7 +793,8 @@ mod imp {
                     Composable::Clip(_) => AUDIO_CLIP,
                     _ => NESTED_CLIP,
                 };
-                let enabled = child.item().is_none_or(|i| i.enabled);
+                // Clips of muted or hidden tracks are dimmed like disabled clips.
+                let enabled = child.item().is_none_or(|i| i.enabled) && track.item.enabled;
                 let alpha = if moving.contains(&item) {
                     0.35
                 } else if enabled {
@@ -526,6 +821,24 @@ mod imp {
                         });
                     self.draw_transition(snapshot, range, y, selected);
                 }
+            }
+            if track.item.locked() {
+                // Diagonal stripes over the whole row, as other editors do.
+                let width = self.obj().width() as f32;
+                let row =
+                    graphene::Rect::new(HEADER_WIDTH, y, width - HEADER_WIDTH, TRACK_HEIGHT - 1.0);
+                snapshot.push_repeat(&row, Some(&graphene::Rect::new(0.0, y, 12.0, TRACK_HEIGHT)));
+                for step in 0..12 {
+                    let x = step as f32;
+                    let rect = graphene::Rect::new(
+                        x,
+                        y + x * TRACK_HEIGHT / 12.0,
+                        2.0,
+                        TRACK_HEIGHT / 12.0,
+                    );
+                    snapshot.append_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.3), &rect);
+                }
+                snapshot.pop();
             }
         }
 
@@ -631,6 +944,7 @@ mod imp {
                 Some(Drag::Trim {
                     item,
                     edge,
+                    ripple,
                     range,
                     to,
                     snapped,
@@ -638,6 +952,10 @@ mod imp {
                 }) => {
                     if let (Some(row), Ok(child)) = (row_of(item.track), timeline.item(*item)) {
                         let trimmed = match edge {
+                            // A ripple-trimmed start stays in place.
+                            Edge::Start if *ripple => {
+                                TimeRange::new(range.start, range.end() - *to)
+                            }
                             Edge::Start => TimeRange::from_start_end(*to, range.end()),
                             Edge::End => TimeRange::from_start_end(range.start, *to),
                         };
@@ -648,6 +966,18 @@ mod imp {
                             AUDIO_CLIP
                         };
                         self.draw_clip(snapshot, trimmed, row_y(row), child.name(), color, true);
+                    }
+                    *snapped
+                }
+                Some(Drag::Roll {
+                    item, to, snapped, ..
+                }) => {
+                    if let Some(row) = row_of(item.track) {
+                        let x = self.frame_to_x(self.time_to_frames(*to)) as f32;
+                        snapshot.append_color(
+                            &SELECTION,
+                            &graphene::Rect::new(x - 1.5, row_y(row), 3.0, TRACK_HEIGHT - 1.0),
+                        );
                     }
                     *snapped
                 }
@@ -703,17 +1033,25 @@ mod imp {
             if y < RULER_HEIGHT as f64 {
                 return Hit::Ruler;
             }
-            if x < HEADER_WIDTH as f64 {
-                return Hit::Nothing;
-            }
             let Some(track_index) = self.track_at_y(y) else {
                 return Hit::Nothing;
             };
+            let in_row = (y - RULER_HEIGHT as f64) % TRACK_HEIGHT as f64;
+            if x < HEADER_WIDTH as f64 {
+                let row_y = (y - in_row) as f32;
+                let point = graphene::Point::new(x as f32, y as f32);
+                let button = HeaderButton::ALL
+                    .into_iter()
+                    .find(|b| b.rect(row_y).contains_point(&point));
+                return Hit::Header {
+                    track: track_index,
+                    button,
+                };
+            }
             let project = self.project();
             let timeline = project.timeline();
             let track = timeline.track(track_index).expect("track");
             // Transitions are drawn over the lower half of the cut.
-            let in_row = (y - RULER_HEIGHT as f64) % TRACK_HEIGHT as f64;
             if in_row >= TRACK_HEIGHT as f64 / 2.0 {
                 for (index, (range, child)) in track.child_ranges().enumerate() {
                     if !matches!(child, Composable::Transition(_)) {
@@ -726,7 +1064,11 @@ mod imp {
                             track: track_index,
                             index,
                         };
-                        return Hit::Item { item, edge: None };
+                        return Hit::Item {
+                            item,
+                            edge: None,
+                            roll: false,
+                        };
                     }
                 }
             }
@@ -739,24 +1081,36 @@ mod imp {
                 if x < x0 - EDGE_GRAB || x > x1 + EDGE_GRAB {
                     continue;
                 }
+                let item = ItemRef {
+                    track: track_index,
+                    index,
+                };
                 // Edges only for clips, and only if the clip is wide enough
                 // to still be grabbed in the middle.
                 let trimmable = matches!(child, Composable::Clip(_)) && x1 - x0 > 3.0 * EDGE_GRAB;
                 let edge = if trimmable && (x - x0).abs() <= EDGE_GRAB {
-                    Some(Edge::Start)
+                    Edge::Start
                 } else if trimmable && (x - x1).abs() <= EDGE_GRAB {
-                    Some(Edge::End)
+                    Edge::End
                 } else if x < x0 || x > x1 {
                     continue;
                 } else {
-                    None
+                    return Hit::Item {
+                        item,
+                        edge: None,
+                        roll: false,
+                    };
                 };
+                let cut = timeline.is_cut(item, edge);
+                // Past the end of a clip at a cut: the next clip's start.
+                if edge == Edge::End && x > x1 && cut {
+                    continue;
+                }
+                let edge_x = if edge == Edge::Start { x0 } else { x1 };
                 return Hit::Item {
-                    item: ItemRef {
-                        track: track_index,
-                        index,
-                    },
-                    edge,
+                    item,
+                    edge: Some(edge),
+                    roll: cut && (x - edge_x).abs() <= ROLL_GRAB,
                 };
             }
             Hit::Track
@@ -768,7 +1122,15 @@ mod imp {
                 return;
             }
             let cursor = match self.hit(x, y) {
+                Hit::Item {
+                    edge: Some(_),
+                    roll: true,
+                    ..
+                } => Some("ew-resize"),
                 Hit::Item { edge: Some(_), .. } => Some("col-resize"),
+                Hit::Header {
+                    button: Some(_), ..
+                } => Some("pointer"),
                 _ => None,
             };
             self.obj().set_cursor_from_name(cursor);
@@ -824,12 +1186,34 @@ mod imp {
             }
         }
 
-        fn drag_begin(&self, x: f64, y: f64) {
+        /// Starts a drag at `x`, `y`. With `ripple` (Ctrl held), dragging
+        /// an edge ripple-trims instead of trimming or rolling.
+        fn drag_begin(&self, x: f64, y: f64, ripple: bool) {
             tracing::trace!("timeline press at {x:.0}, {y:.0}");
             let obj = self.obj();
             obj.grab_focus();
             let project = self.project().clone();
             let drag = match self.hit(x, y) {
+                Hit::Header { track, button } => {
+                    match button {
+                        Some(HeaderButton::Enabled) => {
+                            let enabled = project
+                                .timeline()
+                                .track(track)
+                                .is_some_and(|t| t.item.enabled);
+                            obj.set_track_enabled(track, !enabled);
+                        }
+                        Some(HeaderButton::Lock) => {
+                            let locked = project
+                                .timeline()
+                                .track(track)
+                                .is_some_and(|t| t.item.locked());
+                            obj.set_track_locked(track, !locked);
+                        }
+                        None => {}
+                    }
+                    return;
+                }
                 Hit::Ruler | Hit::Track | Hit::Nothing => {
                     if !matches!(self.hit(x, y), Hit::Ruler) {
                         self.set_selection(None);
@@ -837,37 +1221,62 @@ mod imp {
                     obj.scrub_to(x);
                     Drag::Scrub
                 }
-                Hit::Item { item, edge } => {
+                Hit::Item { item, edge, roll } => {
                     self.set_selection(Some(item));
                     let timeline = project.timeline();
-                    // Transitions are selected (to delete them), not dragged.
-                    if matches!(timeline.item(item), Ok(Composable::Transition(_))) {
+                    // Transitions are selected (to delete them), not dragged,
+                    // and clips on locked tracks stay where they are.
+                    if matches!(timeline.item(item), Ok(Composable::Transition(_)))
+                        || timeline.track(item.track).is_none_or(|t| t.item.locked())
+                    {
                         return;
                     }
                     let Ok(range) = timeline.item_range(item) else {
                         return;
                     };
+                    let original = |edge: Edge| match edge {
+                        Edge::Start => range.start,
+                        Edge::End => range.end(),
+                    };
                     match edge {
+                        Some(edge) if roll && !ripple => {
+                            let Ok((min, max)) = timeline.roll_limits(item, edge) else {
+                                return;
+                            };
+                            drop(timeline);
+                            Drag::Roll {
+                                item,
+                                edge,
+                                cut: original(edge),
+                                min,
+                                max,
+                                snap_points: self.snap_points(&[item]),
+                                to: original(edge),
+                                snapped: None,
+                            }
+                        }
                         Some(edge) => {
-                            let Ok((min, max)) = timeline
-                                .track(item.track)
-                                .expect("track")
-                                .trim_limits(item.index, edge)
-                            else {
+                            let limits = if ripple {
+                                timeline.ripple_limits(item, edge)
+                            } else {
+                                timeline
+                                    .track(item.track)
+                                    .expect("track")
+                                    .trim_limits(item.index, edge)
+                            };
+                            let Ok((min, max)) = limits else {
                                 return;
                             };
                             drop(timeline);
                             Drag::Trim {
                                 item,
                                 edge,
+                                ripple,
                                 range,
                                 min,
                                 max,
                                 snap_points: self.snap_points(&[item]),
-                                to: match edge {
-                                    Edge::Start => range.start,
-                                    Edge::End => range.end(),
-                                },
+                                to: original(edge),
                                 snapped: None,
                             }
                         }
@@ -939,7 +1348,9 @@ mod imp {
                     let project = self.project();
                     let timeline = project.timeline();
                     if let Some(track) = self.track_at_y(y + dy)
-                        && timeline.track(track).is_some_and(|t| t.kind == *kind)
+                        && timeline
+                            .track(track)
+                            .is_some_and(|t| t.kind == *kind && !t.item.locked())
                     {
                         *target_track = track;
                     }
@@ -974,6 +1385,22 @@ mod imp {
                     *to = time;
                     *snapped = snap.filter(|&s| (s - self.time_to_frames(time)).abs() < 1e-6);
                 }
+                Drag::Roll {
+                    cut,
+                    min,
+                    max,
+                    snap_points,
+                    to,
+                    snapped,
+                    ..
+                } => {
+                    let candidate = self.time_to_frames(*cut) + frames;
+                    let snap = self.snap(snap_points, &[candidate]).map(|(_, p)| p);
+                    let frame = snap.unwrap_or(candidate).round() as i64;
+                    let time = self.frame_time(frame).max(*min).min(*max);
+                    *to = time;
+                    *snapped = snap.filter(|&s| (s - self.time_to_frames(time)).abs() < 1e-6);
+                }
             }
             self.obj().queue_draw();
         }
@@ -1001,6 +1428,7 @@ mod imp {
                 Drag::Trim {
                     item,
                     edge,
+                    ripple,
                     range,
                     to,
                     ..
@@ -1010,12 +1438,39 @@ mod imp {
                         Edge::End => range.end(),
                     };
                     if to != original {
-                        let _ = project.edit(&crate::i18n::gettext("Trim Clip"), |t| {
-                            t.trim_item(item, edge, to)
+                        let start = if ripple {
+                            let _ = project.edit(&crate::i18n::gettext("Ripple Trim"), |t| {
+                                t.ripple_trim(item, edge, to)
+                            });
+                            range.start
+                        } else {
+                            let _ = project.edit(&crate::i18n::gettext("Trim Clip"), |t| {
+                                t.trim_item(item, edge, to)
+                            });
+                            match edge {
+                                Edge::Start => to,
+                                Edge::End => range.start,
+                            }
+                        };
+                        self.set_selection(project.timeline().item_at(item.track, start));
+                    }
+                }
+                Drag::Roll {
+                    item,
+                    edge,
+                    cut,
+                    to,
+                    ..
+                } => {
+                    if to != cut {
+                        let _ = project.edit(&crate::i18n::gettext("Roll Edit"), |t| {
+                            t.roll(item, edge, to)
                         });
                         let start = match edge {
                             Edge::Start => to,
-                            Edge::End => range.start,
+                            Edge::End => {
+                                project.timeline().item_range(item).map_or(to, |r| r.start)
+                            }
                         };
                         self.set_selection(project.timeline().item_at(item.track, start));
                     }
@@ -1025,18 +1480,167 @@ mod imp {
         }
 
         fn context_menu(&self, x: f64, y: f64) {
-            let Hit::Item { item, .. } = self.hit(x, y) else {
-                return;
+            let (menu, track) = match self.hit(x, y) {
+                Hit::Item { item, .. } => {
+                    self.set_selection(Some(item));
+                    (self.menu.get().expect("menu"), None)
+                }
+                Hit::Header { track, .. } => {
+                    let (video, audio) = self.track_menus.get().expect("track menus");
+                    let project = self.project();
+                    let is_video = project
+                        .timeline()
+                        .track(track)
+                        .is_some_and(|t| t.kind == TrackKind::Video);
+                    (if is_video { video } else { audio }, Some(track))
+                }
+                _ => return,
             };
-            self.set_selection(Some(item));
-            let menu = self.menu.get().expect("menu");
+            if let Some(track) = track {
+                self.menu_track.set(Some(track));
+                self.update_track_actions();
+            }
             menu.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
             menu.popup();
         }
 
+        /// The `track.*` actions of the track menus: `rename`, `delete`,
+        /// and the toggles `muted` (for video: hidden) and `locked`.
+        fn add_track_actions(&self) {
+            let obj = self.obj();
+            let group = &self.track_actions;
+            let toggle = |name: &str, f: fn(&super::TimelineView, usize, bool)| {
+                let action = gio::SimpleAction::new_stateful(name, None, &false.to_variant());
+                action.connect_change_state(glib::clone!(
+                    #[weak]
+                    obj,
+                    move |_, value| {
+                        if let (Some(track), Some(on)) = (
+                            obj.imp().menu_track.get(),
+                            value.and_then(|v| v.get::<bool>()),
+                        ) {
+                            f(&obj, track, on);
+                        }
+                    }
+                ));
+                group.add_action(&action);
+            };
+            toggle("muted", |view, track, muted| {
+                view.set_track_enabled(track, !muted)
+            });
+            toggle("locked", |view, track, locked| {
+                view.set_track_locked(track, locked)
+            });
+            let simple = |name: &str, f: fn(&super::TimelineView, usize)| {
+                let action = gio::SimpleAction::new(name, None);
+                action.connect_activate(glib::clone!(
+                    #[weak]
+                    obj,
+                    move |_, _| {
+                        if let Some(track) = obj.imp().menu_track.get() {
+                            f(&obj, track);
+                        }
+                    }
+                ));
+                group.add_action(&action);
+            };
+            simple("rename", |view, track| view.show_rename_dialog(track));
+            simple("delete", |view, track| view.delete_track(track));
+            obj.insert_action_group("track", Some(group));
+        }
+
+        /// Shows the state of the menu's track in the toggles.
+        fn update_track_actions(&self) {
+            let project = self.project();
+            let timeline = project.timeline();
+            let Some(track) = self.menu_track.get().and_then(|t| timeline.track(t)) else {
+                return;
+            };
+            let set = |name: &str, on: bool| {
+                if let Some(action) = self
+                    .track_actions
+                    .lookup_action(name)
+                    .and_downcast::<gio::SimpleAction>()
+                {
+                    action.set_state(&on.to_variant());
+                }
+            };
+            set("muted", !track.item.enabled);
+            set("locked", track.item.locked());
+            if let Some(delete) = self
+                .track_actions
+                .lookup_action("delete")
+                .and_downcast::<gio::SimpleAction>()
+            {
+                delete.set_enabled(!track.item.locked());
+            }
+        }
+
         pub fn set_selection(&self, item: Option<ItemRef>) {
-            self.selection.set(item);
+            if self.selection.replace(item) != item {
+                self.obj().emit_by_name::<()>("selection-changed", &[]);
+                if let Some(item) = item {
+                    self.announce_item(item);
+                }
+            }
             self.obj().queue_draw();
+        }
+
+        /// Tells screen readers what `item` is, since the selection is only
+        /// drawn.
+        fn announce_item(&self, item: ItemRef) {
+            use crate::i18n::{fill, gettext};
+            let project = self.project();
+            let model = project.timeline();
+            let (Ok(child), Ok(range)) = (model.item(item), model.item_range(item)) else {
+                return;
+            };
+            let fps = model.frame_rate();
+            let text = match child {
+                Composable::Transition(t) => fill(
+                    &gettext("Dissolve, {length}"),
+                    &[(
+                        "length",
+                        &project.timecode((t.in_offset + t.out_offset).frame(fps)),
+                    )],
+                ),
+                _ => fill(
+                    &gettext("{name}, {start} to {end}"),
+                    &[
+                        ("name", &child.name()),
+                        ("start", &project.timecode(range.start.frame(fps))),
+                        ("end", &project.timecode(range.end().frame(fps))),
+                    ],
+                ),
+            };
+            drop(model);
+            self.obj()
+                .announce(&text, gtk::AccessibleAnnouncementPriority::Medium);
+        }
+
+        /// Opens the clip menu at the selected clip (Shift+F10, Menu).
+        fn selection_menu(&self) {
+            let Some(item) = self.selection.get() else {
+                return;
+            };
+            let project = self.project();
+            let model = project.timeline();
+            let Ok(range) = model.item_range(item) else {
+                return;
+            };
+            let Some(row) = rows(&model).iter().position(|&t| t == item.track) else {
+                return;
+            };
+            drop(model);
+            let rect = self.clip_rect(range, row_y(row));
+            let menu = self.menu.get().expect("menu");
+            menu.set_pointing_to(Some(&gdk::Rectangle::new(
+                rect.x() as i32,
+                rect.y() as i32,
+                rect.width().max(1.0) as i32,
+                rect.height() as i32,
+            )));
+            menu.popup();
         }
 
         fn on_scroll(&self, zoom: bool, dx: f64, dy: f64) {
@@ -1077,7 +1681,7 @@ impl TimelineView {
                     .get()
                     .is_some_and(|item| project.timeline().item(item).is_ok_and(|c| !c.is_gap()));
                 if !valid {
-                    imp.selection.set(None);
+                    imp.set_selection(None);
                 }
                 view.queue_resize();
                 view.queue_draw();
@@ -1113,6 +1717,97 @@ impl TimelineView {
         })
     }
 
+    pub fn project(&self) -> Rc<Project> {
+        self.imp().project().clone()
+    }
+
+    /// Changes the selected clip's properties as one undoable edit called
+    /// `label`. With a `merge_key`, consecutive changes with the same key
+    /// make one undo step (e.g. while a slider is dragged).
+    pub fn edit_selected_clip(
+        &self,
+        label: &str,
+        merge_key: Option<&str>,
+        change: impl FnOnce(&mut nox_project::Item),
+    ) {
+        let Some(item) = self.selection() else {
+            return;
+        };
+        let edit = |t: &mut Timeline| {
+            let track = t
+                .track_mut(item.track)
+                .ok_or(EditError::NoTrack(item.track))?;
+            let clip = track
+                .children
+                .get_mut(item.index)
+                .and_then(Composable::as_clip_mut)
+                .ok_or(EditError::NotTrimmable)?;
+            change(&mut clip.item);
+            Ok::<_, EditError>(())
+        };
+        let project = self.project();
+        let _ = match merge_key {
+            // Per clip, so editing another clip starts a new step.
+            Some(key) => {
+                let key = format!("{key}:{}:{}", item.track, item.index);
+                project.edit_merging(label, &key, edit)
+            }
+            None => project.edit(label, edit),
+        };
+    }
+
+    /// Selects the clip under the playhead, topmost track first (as
+    /// shown); with none there, clears the selection.
+    pub fn select_clip_at_playhead(&self) {
+        let project = self.project();
+        let model = project.timeline();
+        let fps = model.frame_rate();
+        let frame = self.playhead();
+        let found = rows(&model).into_iter().find_map(|track_index| {
+            let track = model.track(track_index)?;
+            (0..track.children.len()).find_map(|index| {
+                let item = ItemRef {
+                    track: track_index,
+                    index,
+                };
+                let child = &track.children[index];
+                let range = model.item_range(item).ok()?;
+                let covers = range.start.frame(fps) <= frame && frame < range.end().frame(fps);
+                (covers && matches!(child, Composable::Clip(_))).then_some(item)
+            })
+        });
+        drop(model);
+        self.set_selection(found);
+    }
+
+    /// Moves the playhead to the next (or previous) clip boundary.
+    pub fn go_to_edit_point(&self, forward: bool) {
+        let project = self.project();
+        let fps = project.frame_rate();
+        let frame = self.playhead();
+        let points: Vec<i64> = project
+            .timeline()
+            .edit_points()
+            .into_iter()
+            .map(|t| t.frame(fps))
+            .collect();
+        let target = if forward {
+            points.into_iter().find(|&p| p > frame)
+        } else {
+            points.into_iter().rev().find(|&p| p < frame)
+        };
+        if let Some(target) = target {
+            self.set_playhead(target);
+        }
+    }
+
+    pub fn connect_selection_changed<F: Fn(&Self) + 'static>(&self, f: F) -> glib::SignalHandlerId {
+        self.connect_local("selection-changed", false, move |values| {
+            f(&values[0].get::<Self>().expect("TimelineView"));
+            None
+        })
+    }
+
     pub fn snapping(&self) -> bool {
         self.imp().snapping.get()
     }
@@ -1143,7 +1838,118 @@ impl TimelineView {
         }
     }
 
+    /// Removes the selected clip (and the clips linked to it) and closes
+    /// the gaps on their tracks.
+    pub fn ripple_delete_selection(&self) {
+        let Some(item) = self.selection() else { return };
+        let project = self.imp().project().clone();
+        if project
+            .edit(&crate::i18n::gettext("Ripple Delete"), |t| {
+                t.ripple_remove_item(item)
+            })
+            .is_ok()
+        {
+            self.set_selection(None);
+        }
+    }
+
+    /// Mutes (audio) or hides (video) track `index`, or turns it back on:
+    /// OTIO's `enabled`, which playback and export respect.
+    pub fn set_track_enabled(&self, index: usize, enabled: bool) {
+        let project = self.imp().project().clone();
+        let Some(kind) = project.timeline().track(index).map(|t| t.kind.clone()) else {
+            return;
+        };
+        let _ = project.edit(&enable_label(&kind, enabled), |t| {
+            let track = t.track_mut(index).ok_or(EditError::NoTrack(index))?;
+            track.item.enabled = enabled;
+            Ok::<_, EditError>(())
+        });
+    }
+
+    /// Locks or unlocks track `index`; locked tracks reject edits.
+    pub fn set_track_locked(&self, index: usize, locked: bool) {
+        let project = self.imp().project().clone();
+        let _ = project.edit(&lock_label(locked), |t| {
+            let track = t.track_mut(index).ok_or(EditError::NoTrack(index))?;
+            track.item.set_locked(locked);
+            Ok::<_, EditError>(())
+        });
+    }
+
+    pub fn rename_track(&self, index: usize, name: &str) {
+        let project = self.imp().project().clone();
+        let _ = project.edit(&crate::i18n::gettext("Rename Track"), |t| {
+            let track = t.track_mut(index).ok_or(EditError::NoTrack(index))?;
+            track.item.name = name.to_owned();
+            Ok::<_, EditError>(())
+        });
+    }
+
+    /// Deletes track `index` with its clips (not if it is locked).
+    pub fn delete_track(&self, index: usize) {
+        let project = self.imp().project().clone();
+        if project
+            .edit(&crate::i18n::gettext("Delete Track"), |t| {
+                t.remove_track(index)
+            })
+            .is_ok()
+        {
+            // Selections are by track index, which has changed.
+            self.set_selection(None);
+        }
+    }
+
+    /// Asks for a new name for track `index`.
+    pub fn show_rename_dialog(&self, index: usize) {
+        let project = self.imp().project().clone();
+        let Some(name) = project.timeline().track(index).map(|t| t.item.name.clone()) else {
+            return;
+        };
+        let builder = rename_dialog();
+        let dialog: gtk::Window = builder.object("dialog").expect("dialog");
+        let entry: gtk::Entry = builder.object("name").expect("name");
+        let cancel: gtk::Button = builder.object("cancel").expect("cancel");
+        let rename: gtk::Button = builder.object("rename").expect("rename");
+        dialog.set_transient_for(self.root().and_downcast_ref::<gtk::Window>());
+        entry.set_text(&name);
+        cancel.connect_clicked(glib::clone!(
+            #[weak]
+            dialog,
+            move |_| dialog.close()
+        ));
+        rename.connect_clicked(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            #[weak]
+            dialog,
+            #[weak]
+            entry,
+            move |_| {
+                view.rename_track(index, entry.text().trim());
+                dialog.close();
+            }
+        ));
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("Escape"),
+            Some(gtk::NamedAction::new("window.close")),
+        ));
+        dialog.add_controller(shortcuts);
+        dialog.present();
+    }
+
     fn scrub_to(&self, x: f64) {
         self.set_playhead(self.imp().x_to_frame(x));
     }
+}
+
+/// The rename dialog for tracks (`resources/ui/rename-track.ui`).
+pub(crate) fn rename_dialog() -> gtk::Builder {
+    let builder = gtk::Builder::new();
+    builder.set_translation_domain(Some(crate::i18n::DOMAIN));
+    builder
+        .add_from_resource("/io/github/nox/Nox/ui/rename-track.ui")
+        .expect("rename-track.ui is valid");
+    builder
 }

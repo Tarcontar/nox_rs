@@ -14,7 +14,34 @@ use crate::{Error, GpuDevice, Result};
 /// DRM fourcc `AB24` (DRM_FORMAT_ABGR8888): bytes R, G, B, A in memory,
 /// matching `VK_FORMAT_R8G8B8A8_UNORM`.
 pub const FOURCC_ABGR8888: u32 = u32::from_le_bytes(*b"AB24");
-pub(crate) const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+/// DRM fourcc `AB4H` (DRM_FORMAT_ABGR16161616F): half floats R, G, B, A,
+/// matching `VK_FORMAT_R16G16B16A16_SFLOAT`.
+pub const FOURCC_ABGR16161616F: u32 = u32::from_le_bytes(*b"AB4H");
+
+/// Pixel format of exported frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmabufFormat {
+    /// `AB24`.
+    Rgba8,
+    /// `AB4H`: no 8-bit rounding of 10-bit sources or of the blend.
+    Rgba16f,
+}
+
+impl DmabufFormat {
+    pub fn fourcc(self) -> u32 {
+        match self {
+            Self::Rgba8 => FOURCC_ABGR8888,
+            Self::Rgba16f => FOURCC_ABGR16161616F,
+        }
+    }
+
+    pub(crate) fn vk(self) -> vk::Format {
+        match self {
+            Self::Rgba8 => vk::Format::R8G8B8A8_UNORM,
+            Self::Rgba16f => vk::Format::R16G16B16A16_SFLOAT,
+        }
+    }
+}
 
 const EXTENSIONS: [&std::ffi::CStr; 3] = [
     ash::khr::external_memory_fd::NAME,
@@ -79,9 +106,10 @@ impl Drop for ExportImage {
     }
 }
 
-/// Pool of exportable images of one size.
+/// Pool of exportable images of one size and format.
 pub(crate) struct ExportPool {
     gpu: Arc<GpuDevice>,
+    format: DmabufFormat,
     modifiers: Vec<u64>,
     free: Arc<Mutex<Vec<ExportImage>>>,
     external_memory_fd: ash::khr::external_memory_fd::Device,
@@ -89,30 +117,35 @@ pub(crate) struct ExportPool {
 }
 
 impl ExportPool {
-    /// `importable` lists the modifiers the consumer accepts for AB24.
-    pub fn new(gpu: Arc<GpuDevice>, importable: &[u64]) -> Result<Self> {
+    /// `importable` lists the (fourcc, modifier) pairs the consumer accepts.
+    pub fn new(
+        gpu: Arc<GpuDevice>,
+        format: DmabufFormat,
+        importable: &[(u32, u64)],
+    ) -> Result<Self> {
         if let Some(missing) = EXTENSIONS.iter().find(|e| !gpu.has_extension(e)) {
             return Err(Error::Unsupported(format!(
                 "device lacks {}",
                 missing.to_string_lossy()
             )));
         }
-        let modifiers: Vec<u64> = exportable_modifiers(&gpu)
+        let modifiers: Vec<u64> = exportable_modifiers(&gpu, format)
             .into_iter()
-            .filter(|m| importable.contains(m))
+            .filter(|&m| importable.contains(&(format.fourcc(), m)))
             .collect();
         if modifiers.is_empty() {
-            return Err(Error::Unsupported(
-                "no DRM modifier both exportable and importable".into(),
-            ));
+            return Err(Error::Unsupported(format!(
+                "no {format:?} DRM modifier both exportable and importable"
+            )));
         }
-        tracing::info!("DMA-BUF export with modifiers {modifiers:x?}");
+        tracing::info!("DMA-BUF export as {format:?} with modifiers {modifiers:x?}");
         let external_memory_fd =
             ash::khr::external_memory_fd::Device::new(&gpu.instance, &gpu.device);
         let drm_modifier =
             ash::ext::image_drm_format_modifier::Device::new(&gpu.instance, &gpu.device);
         Ok(Self {
             gpu,
+            format,
             modifiers,
             free: Arc::default(),
             external_memory_fd,
@@ -149,7 +182,7 @@ impl ExportPool {
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
             width: image.width,
             height: image.height,
-            fourcc: FOURCC_ABGR8888,
+            fourcc: self.format.fourcc(),
             modifier: image.modifier,
             offset: image.offset,
             stride: image.stride,
@@ -170,7 +203,7 @@ impl ExportPool {
             let image = device.create_image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .format(FORMAT)
+                    .format(self.format.vk())
                     .extent(vk::Extent3D {
                         width,
                         height,
@@ -230,7 +263,7 @@ impl ExportPool {
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(FORMAT)
+                    .format(self.format.vk())
                     .subresource_range(crate::converter::color_range()),
                 None,
             )?;
@@ -254,11 +287,15 @@ impl ExportPool {
             Ok(export_image)
         }
     }
+
+    pub fn format(&self) -> DmabufFormat {
+        self.format
+    }
 }
 
-/// Single-plane modifiers for RGBA8 that support storage writes and DMA-BUF
-/// export.
-fn exportable_modifiers(gpu: &GpuDevice) -> Vec<u64> {
+/// Single-plane modifiers for `format` that support storage writes and
+/// DMA-BUF export.
+fn exportable_modifiers(gpu: &GpuDevice, format: DmabufFormat) -> Vec<u64> {
     let instance = &gpu.instance;
     // SAFETY: standard two-call enumeration on a valid physical device.
     let properties = unsafe {
@@ -266,7 +303,7 @@ fn exportable_modifiers(gpu: &GpuDevice) -> Vec<u64> {
         let mut format_properties = vk::FormatProperties2::default().push_next(&mut list);
         instance.get_physical_device_format_properties2(
             gpu.physical_device,
-            FORMAT,
+            format.vk(),
             &mut format_properties,
         );
         let mut properties = vec![
@@ -278,7 +315,7 @@ fn exportable_modifiers(gpu: &GpuDevice) -> Vec<u64> {
         let mut format_properties = vk::FormatProperties2::default().push_next(&mut list);
         instance.get_physical_device_format_properties2(
             gpu.physical_device,
-            FORMAT,
+            format.vk(),
             &mut format_properties,
         );
         properties
@@ -289,20 +326,20 @@ fn exportable_modifiers(gpu: &GpuDevice) -> Vec<u64> {
             p.drm_format_modifier_plane_count == 1
                 && p.drm_format_modifier_tiling_features
                     .contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
-                && is_exportable(gpu, p.drm_format_modifier)
+                && is_exportable(gpu, format, p.drm_format_modifier)
         })
         .map(|p| p.drm_format_modifier)
         .collect()
 }
 
-fn is_exportable(gpu: &GpuDevice, modifier: u64) -> bool {
+fn is_exportable(gpu: &GpuDevice, format: DmabufFormat, modifier: u64) -> bool {
     let mut modifier_info = vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
         .drm_format_modifier(modifier)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     let mut external_info = vk::PhysicalDeviceExternalImageFormatInfo::default()
         .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
     let info = vk::PhysicalDeviceImageFormatInfo2::default()
-        .format(FORMAT)
+        .format(format.vk())
         .ty(vk::ImageType::TYPE_2D)
         .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
         .usage(vk::ImageUsageFlags::STORAGE)

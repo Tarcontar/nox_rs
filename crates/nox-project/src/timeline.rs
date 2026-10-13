@@ -43,6 +43,10 @@ pub struct Settings {
     pub height: u32,
     /// How sources of another size or shape are placed.
     pub scaling: ScalingMode,
+    /// In and Out marks (timeline time, from zero): the range to export.
+    /// Out is exclusive, the end of the last marked frame.
+    pub mark_in: Option<Time>,
+    pub mark_out: Option<Time>,
 }
 
 impl Default for Settings {
@@ -52,6 +56,39 @@ impl Default for Settings {
             width: 1920,
             height: 1080,
             scaling: ScalingMode::Fit,
+            mark_in: None,
+            mark_out: None,
+        }
+    }
+}
+
+impl Settings {
+    /// The range between the In and Out marks, if both are set.
+    pub fn marked_range(&self) -> Option<TimeRange> {
+        match (self.mark_in, self.mark_out) {
+            (Some(start), Some(end)) if start < end => Some(TimeRange::from_start_end(start, end)),
+            _ => None,
+        }
+    }
+
+    /// Sets (or clears) the In mark. An Out mark at or before it is
+    /// cleared, so the marks never describe an empty range.
+    pub fn set_mark_in(&mut self, time: Option<Time>) {
+        self.mark_in = time;
+        if let (Some(start), Some(end)) = (self.mark_in, self.mark_out)
+            && end <= start
+        {
+            self.mark_out = None;
+        }
+    }
+
+    /// Sets (or clears) the Out mark, clearing an In mark at or after it.
+    pub fn set_mark_out(&mut self, time: Option<Time>) {
+        self.mark_out = time;
+        if let (Some(start), Some(end)) = (self.mark_in, self.mark_out)
+            && end <= start
+        {
+            self.mark_in = None;
         }
     }
 }
@@ -324,6 +361,17 @@ impl Item {
 
     pub fn set_link(&mut self, link: Option<i64>) {
         self.set_nox_value("link", link.map(Value::Int));
+    }
+
+    /// Whether a track is locked against edits (`metadata.nox.locked`).
+    pub fn locked(&self) -> bool {
+        self.nox_value("locked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    pub fn set_locked(&mut self, locked: bool) {
+        self.set_nox_value("locked", locked.then_some(Value::Bool(true)));
     }
 
     /// Opacity of a video clip, 0–1 (`metadata.nox.opacity`, default 1).
@@ -1115,6 +1163,40 @@ mod tests {
         assert_eq!(
             timeline.video_at(frames(3)).unwrap().source_time,
             frames(10)
+        );
+    }
+
+    #[test]
+    fn muted_audio_tracks_are_not_heard() {
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        timeline.track_mut(1).unwrap().children = vec![clip("a", 0, 10)];
+        let range = TimeRange::new(frames(0), frames(10));
+        assert_eq!(timeline.audio_segments(range).len(), 1);
+        timeline.track_mut(1).unwrap().item.enabled = false;
+        assert!(timeline.audio_segments(range).is_empty());
+    }
+
+    #[test]
+    fn in_and_out_marks() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.marked_range(), None);
+        settings.set_mark_in(Some(frames(10)));
+        assert_eq!(settings.marked_range(), None);
+        settings.set_mark_out(Some(frames(20)));
+        assert_eq!(
+            settings.marked_range(),
+            Some(TimeRange::new(frames(10), frames(10)))
+        );
+        // A mark on the wrong side of the other one clears it.
+        settings.set_mark_in(Some(frames(20)));
+        assert_eq!(
+            (settings.mark_in, settings.mark_out),
+            (Some(frames(20)), None)
+        );
+        settings.set_mark_out(Some(frames(5)));
+        assert_eq!(
+            (settings.mark_in, settings.mark_out),
+            (None, Some(frames(5)))
         );
     }
 

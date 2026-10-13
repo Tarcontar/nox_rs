@@ -161,18 +161,20 @@ impl Shared {
 
 pub struct Engine {
     shared: Arc<Shared>,
-    worker: Option<JoinHandle<()>>,
+    /// `None` once shut down.
+    worker: RefCell<Option<JoinHandle<()>>>,
     dmabuf_allowed: Arc<AtomicBool>,
     /// The output stream lives on the thread that created it.
     audio: RefCell<Option<AudioOutput>>,
 }
 
 impl Engine {
-    /// Starts the render worker. `dmabuf_modifiers` are the DRM modifiers
-    /// the consumer can import for `FOURCC_ABGR8888` (empty: always read
-    /// back). `on_event` is called on the worker thread.
+    /// Starts the render worker. `dmabuf_formats` are the (DRM fourcc,
+    /// modifier) pairs the consumer can import (empty: always read back);
+    /// `AB4H` is used if offered, else `AB24`. `on_event` is called on the
+    /// worker thread.
     pub fn new(
-        dmabuf_modifiers: Vec<u64>,
+        dmabuf_formats: Vec<(u32, u64)>,
         on_event: impl Fn(EngineEvent) + Send + 'static,
     ) -> Self {
         let budget = std::env::var("NOX_CACHE_MB")
@@ -193,19 +195,19 @@ impl Engine {
             cache: Mutex::new(FrameCache::new(budget << 20)),
             interrupts: AtomicU64::new(0),
         });
-        let dmabuf_allowed = Arc::new(AtomicBool::new(!dmabuf_modifiers.is_empty()));
+        let dmabuf_allowed = Arc::new(AtomicBool::new(!dmabuf_formats.is_empty()));
         let allowed = dmabuf_allowed.clone();
         let worker_shared = shared.clone();
         let worker = std::thread::Builder::new()
             .name("nox-render".into())
             .spawn(move || {
-                let renderer = Renderer::new(&dmabuf_modifiers, allowed);
+                let renderer = Renderer::new(&dmabuf_formats, allowed);
                 run(&worker_shared, renderer, on_event);
             })
             .expect("failed to spawn render thread");
         Self {
             shared,
-            worker: Some(worker),
+            worker: RefCell::new(Some(worker)),
             dmabuf_allowed,
             audio: RefCell::new(None),
         }
@@ -327,14 +329,27 @@ impl Engine {
     }
 }
 
-impl Drop for Engine {
-    fn drop(&mut self) {
+impl Engine {
+    /// Stops playback and the render worker, interrupting a render in
+    /// progress, and waits for it to finish. Call it before the process
+    /// exits: a worker still decoding while the GPU driver's libraries are
+    /// unloaded at exit crashes in the driver. Dropping the engine does the
+    /// same; later calls do nothing.
+    pub fn shutdown(&self) {
         self.audio.replace(None);
         self.shared.state().shutdown = true;
         self.shared.interrupt();
-        if let Some(worker) = self.worker.take() {
+        let worker = self.worker.borrow_mut().take();
+        if let Some(worker) = worker {
+            tracing::debug!("stopping the render worker");
             let _ = worker.join();
         }
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

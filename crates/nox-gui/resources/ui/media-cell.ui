@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface domain="nox">
-  <!-- A media pool item: thumbnail (or icon), name and duration. The
-       thumbnail size matches media_object::THUMBNAIL_WIDTH/HEIGHT. -->
+  <!-- A media pool item: thumbnail (or icon), name and duration of its
+       `media` (a NoxMediaObject). The thumbnail size matches
+       media_object::THUMBNAIL_WIDTH/HEIGHT. -->
   <template class="NoxMediaCell" parent="GtkBox">
+    <binding name="tooltip-text">
+      <lookup name="details" type="NoxMediaObject">
+        <lookup name="media">NoxMediaCell</lookup>
+      </lookup>
+    </binding>
     <property name="orientation">vertical</property>
     <property name="spacing">2</property>
     <property name="halign">center</property>
@@ -13,26 +19,53 @@
         <property name="overflow">hidden</property>
         <style><class name="thumbnail-frame"/></style>
         <property name="child">
-          <object class="GtkImage" id="icon">
+          <object class="GtkImage">
             <property name="pixel-size">32</property>
+            <binding name="icon-name">
+              <lookup name="icon-name" type="NoxMediaObject">
+                <lookup name="media">NoxMediaCell</lookup>
+              </lookup>
+            </binding>
+            <binding name="visible">
+              <closure type="gboolean" function="is_none">
+                <lookup name="thumbnail" type="NoxMediaObject">
+                  <lookup name="media">NoxMediaCell</lookup>
+                </lookup>
+              </closure>
+            </binding>
           </object>
         </property>
         <child type="overlay">
           <object class="GtkPicture" id="picture">
             <property name="content-fit">contain</property>
+            <binding name="paintable">
+              <lookup name="thumbnail" type="NoxMediaObject">
+                <lookup name="media">NoxMediaCell</lookup>
+              </lookup>
+            </binding>
           </object>
         </child>
       </object>
     </child>
     <!-- The thumbnail sets the width; labels ellipsize within it. -->
     <child>
-      <object class="GtkLabel" id="name">
+      <object class="GtkLabel">
         <property name="ellipsize">middle</property>
         <property name="max-width-chars">1</property>
+        <binding name="label">
+          <lookup name="name" type="NoxMediaObject">
+            <lookup name="media">NoxMediaCell</lookup>
+          </lookup>
+        </binding>
       </object>
     </child>
     <child>
-      <object class="GtkLabel" id="summary">
+      <object class="GtkLabel">
+        <binding name="label">
+          <lookup name="summary" type="NoxMediaObject">
+            <lookup name="media">NoxMediaCell</lookup>
+          </lookup>
+        </binding>
         <property name="ellipsize">end</property>
         <property name="max-width-chars">1</property>
         <style><class name="media-summary"/></style>

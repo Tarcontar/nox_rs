@@ -132,13 +132,13 @@ pub(crate) struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(dmabuf_modifiers: &[u64], dmabuf_allowed: Arc<AtomicBool>) -> Self {
+    pub fn new(dmabuf_formats: &[(u32, u64)], dmabuf_allowed: Arc<AtomicBool>) -> Self {
         let mut readback_reason =
             "viewer offered no DMA-BUF formats (NOX_PRESENT=readback or unsupported)".to_owned();
         let gpu = match HwDevice::vulkan().and_then(|(hw, gpu)| Ok((hw, Compositor::new(gpu)?))) {
             Ok((hw, mut compositor)) => {
-                if !dmabuf_modifiers.is_empty()
-                    && let Err(err) = compositor.enable_dmabuf(dmabuf_modifiers)
+                if !dmabuf_formats.is_empty()
+                    && let Err(err) = compositor.enable_dmabuf(dmabuf_formats)
                 {
                     readback_reason = format!("DMA-BUF export unavailable: {err}");
                 }

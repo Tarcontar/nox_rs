@@ -2,20 +2,29 @@
 //!
 //! Frames in system memory are uploaded plane by plane and converted by a
 //! compute shader, either into an image that is read back (`convert`) or into
-//! an exportable image handed out as DMA-BUF (`convert_to_dmabuf`). Work is
+//! an exportable image handed out as DMA-BUF (`convert_to_dmabuf`), both
+//! display-referred RGBA8; or, for the compositor, into the linear working
+//! space (`convert_into`, RGBA32F, `ycbcr_to_working`). Work is
 //! synchronous: both return when the GPU is done. Resources are cached and
 //! only recreated when the frame geometry or format changes.
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
-use nox_color::{Matrix3x4, ToneMapping};
+use nox_color::{InputTransform, Matrix3x4};
 use std::sync::Arc;
 
-use crate::export::{DmabufFrame, ExportPool};
+use crate::export::{DmabufFormat, DmabufFrame, ExportPool};
 use crate::{Error, GpuDevice, Image, Result};
 
 const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ycbcr_to_rgb.comp.spv"));
+const WORKING_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/ycbcr_to_working.comp.spv"));
+/// Format of images `convert_into` writes: the working space. 32-bit, as
+/// half floats lost up to 9 code values: converting saturated colors back
+/// to BT.709 subtracts large terms, and the 1/2.4 encoding magnifies what
+/// rounding leaves in a channel that should be 0.
+pub(crate) const WORKING_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
 const WORKGROUP_SIZE: u32 = 16;
 const MAX_PLANES: usize = 3;
 
@@ -96,8 +105,8 @@ pub struct CpuFrame<'a> {
     /// Where chroma samples sit relative to center-sited, in luma pixels
     /// (e.g. `(0.5, 0.0)` for left-sited 4:2:0, the MPEG-2/H.264 default).
     pub chroma_offset: [f32; 2],
-    /// HDR to SDR conversion, if the frame is HDR.
-    pub tone: ToneMapping,
+    /// Transfer, primaries and HDR tone mapping.
+    pub color: InputTransform,
     pub planes: Vec<Plane<'a>>,
 }
 
@@ -137,7 +146,7 @@ pub struct VkFrame {
     pub swap_chroma: bool,
     pub matrix: Matrix3x4,
     pub chroma_offset: [f32; 2],
-    pub tone: ToneMapping,
+    pub color: InputTransform,
     pub planes: Vec<VkPlane>,
     /// One entry per distinct image used by `planes`.
     pub images: Vec<ImageSync>,
@@ -171,7 +180,7 @@ struct Params {
     swap_chroma: bool,
     matrix: Matrix3x4,
     chroma_offset: [f32; 2],
-    tone: ToneMapping,
+    color: InputTransform,
 }
 
 impl Input<'_, '_> {
@@ -185,7 +194,7 @@ impl Input<'_, '_> {
                 swap_chroma: f.swap_chroma,
                 matrix: f.matrix,
                 chroma_offset: f.chroma_offset,
-                tone: f.tone,
+                color: f.color,
             },
             Input::Vulkan(f) => Params {
                 width: f.width,
@@ -195,7 +204,7 @@ impl Input<'_, '_> {
                 swap_chroma: f.swap_chroma,
                 matrix: f.matrix,
                 chroma_offset: f.chroma_offset,
-                tone: f.tone,
+                color: f.color,
             },
         }
     }
@@ -213,7 +222,8 @@ struct PushConstants {
     hdr_mode: i32,
     hdr_gamut: i32,
     source_peak: f32,
-    _pad: f32,
+    transfer: i32,
+    primaries: i32,
 }
 
 pub(crate) struct GpuImage {
@@ -276,7 +286,10 @@ pub struct Converter {
     gpu: Arc<GpuDevice>,
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
+    /// To display R'G'B' (RGBA8).
     pipeline: vk::Pipeline,
+    /// To the working space (RGBA32F).
+    working_pipeline: vk::Pipeline,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
     sampler: vk::Sampler,
@@ -318,24 +331,29 @@ impl Converter {
                 None,
             )?;
 
-            let code =
-                ash::util::read_spv(&mut std::io::Cursor::new(SHADER)).expect("valid SPIR-V");
-            let module = device
-                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)?;
-            let stage = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::COMPUTE)
-                .module(module)
-                .name(c"main");
-            let pipeline = device
-                .create_compute_pipelines(
+            let create = |spirv: &[u8]| -> Result<vk::Pipeline> {
+                let code =
+                    ash::util::read_spv(&mut std::io::Cursor::new(spirv)).expect("valid SPIR-V");
+                let module = device.create_shader_module(
+                    &vk::ShaderModuleCreateInfo::default().code(&code),
+                    None,
+                )?;
+                let stage = vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::COMPUTE)
+                    .module(module)
+                    .name(c"main");
+                let pipeline = device.create_compute_pipelines(
                     vk::PipelineCache::null(),
                     &[vk::ComputePipelineCreateInfo::default()
                         .stage(stage)
                         .layout(pipeline_layout)],
                     None,
-                )
-                .map_err(|(_, err)| err)?[0];
-            device.destroy_shader_module(module, None);
+                );
+                device.destroy_shader_module(module, None);
+                Ok(pipeline.map_err(|(_, err)| err)?[0])
+            };
+            let pipeline = create(SHADER)?;
+            let working_pipeline = create(WORKING_SHADER)?;
 
             let pool_sizes = [
                 vk::DescriptorPoolSize {
@@ -388,6 +406,7 @@ impl Converter {
                 set_layout,
                 pipeline_layout,
                 pipeline,
+                working_pipeline,
                 descriptor_pool,
                 descriptor_set,
                 sampler,
@@ -405,10 +424,14 @@ impl Converter {
         &self.gpu
     }
 
-    /// Enables `convert_to_dmabuf`. `importable_modifiers` are the DRM
-    /// modifiers the consumer can import for `FOURCC_ABGR8888`.
-    pub fn enable_dmabuf(&mut self, importable_modifiers: &[u64]) -> Result<()> {
-        self.export = Some(ExportPool::new(self.gpu.clone(), importable_modifiers)?);
+    /// Enables `convert_to_dmabuf`. `importable` lists the (DRM fourcc,
+    /// modifier) pairs the consumer can import; frames are `AB24`.
+    pub fn enable_dmabuf(&mut self, importable: &[(u32, u64)]) -> Result<()> {
+        self.export = Some(ExportPool::new(
+            self.gpu.clone(),
+            DmabufFormat::Rgba8,
+            importable,
+        )?);
         Ok(())
     }
 
@@ -441,8 +464,9 @@ impl Converter {
         image
     }
 
-    /// Converts `frame` into `image` (RGBA8, `width` × `height`, storage
-    /// usage), leaving it in GENERAL layout for later work on this queue.
+    /// Converts `frame` into `image` (`WORKING_FORMAT`, `width` × `height`,
+    /// storage usage) in the linear working space, leaving it in GENERAL
+    /// layout for later work on this queue.
     pub(crate) fn convert_into<'f, 'a: 'f>(
         &mut self,
         input: impl Into<Input<'f, 'a>>,
@@ -701,7 +725,11 @@ impl Converter {
                 &vk::DependencyInfo::default().image_memory_barriers(&barriers),
             );
 
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+            let pipeline = match target {
+                Target::Image(..) => self.working_pipeline,
+                Target::Readback(_) | Target::Export(..) => self.pipeline,
+            };
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -724,10 +752,11 @@ impl Converter {
                 size: [width as i32, height as i32],
                 layout_mode: params.layout as i32,
                 swap_chroma: params.swap_chroma.into(),
-                hdr_mode: params.tone.transfer as i32,
-                hdr_gamut: params.tone.gamut as i32,
-                source_peak: params.tone.source_peak,
-                _pad: 0.0,
+                hdr_mode: params.color.tone.transfer as i32,
+                hdr_gamut: params.color.tone.gamut as i32,
+                source_peak: params.color.tone.source_peak,
+                transfer: params.color.transfer as i32,
+                primaries: params.color.primaries as i32,
             };
             device.cmd_push_constants(
                 cmd,
@@ -1022,6 +1051,7 @@ impl Drop for Converter {
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline(self.working_pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
         }

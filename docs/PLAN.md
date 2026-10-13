@@ -2,7 +2,7 @@
 
 Nox is a video editor written in Rust: a GTK4 UI, FFmpeg for media I/O, and Vulkan for decoding, image processing and display, with hardware acceleration wherever possible. The UI follows common editors (DaVinci Resolve, Blender VSE): a media pool, a viewer and a timeline, with an inspector later.
 
-*Last updated: 2026-10-09 (end of M5; UI templates and translations).*
+*Last updated: 2026-10-13 (M6 started: linear working space and half-float output; In/Out marks, ripple and roll edits, track controls; Vulkan validation).*
 
 ## Status at a glance
 
@@ -14,19 +14,26 @@ Nox is a video editor written in Rust: a GTK4 UI, FFmpeg for media I/O, and Vulk
 | M3 – Project model (OTIO) and timeline editing | ✅ done |
 | M4 – Playback engine, audio, A/V sync | ✅ done |
 | M5 – Export | ✅ done |
-| M6 – Color management | ⏭ next |
+| M6 – Color management | 🚧 in progress (working space, output) |
 
 What works today:
 - **Import:** drag files onto the media pool (or use the import button, or `nox file…`). Each file is probed in the background and gets a thumbnail, its duration as timecode, and a tooltip with stream and color details.
-- **Timeline editing:** drag media from the pool onto a track, or double-click it to append. Files with audio become a linked video and audio clip. Drag clips to move them, also to another track of the same kind; drag their edges to trim. Clips snap to edit points and the playhead (N toggles snapping). Ctrl+B splits at the playhead, Delete removes the selected clip. Every edit can be undone (Ctrl+Z, Ctrl+Shift+Z).
+- **Timeline editing:** drag media from the pool onto a track, or double-click it to append. Files with audio become a linked video and audio clip. Drag clips to move them, also to another track of the same kind; drag their edges to trim. Clips snap to edit points and the playhead (N toggles snapping). Ctrl+B splits at the playhead, Delete removes the selected clip and Shift+Delete ripple-deletes it (the gap closes on its tracks). Ctrl+dragging an edge ripple-trims (what follows moves along), and dragging the middle of a cut between two clips rolls it, within both clips' media. Every edit can be undone (Ctrl+Z, Ctrl+Shift+Z).
+- **In/Out marks** (DaVinci Resolve's keys): I and O mark In and Out at the playhead, Alt+I and Alt+O clear one, Alt+X both. The range shows on the ruler with everything outside it shaded. Marks are undoable edits and are saved with the project.
+- **Track controls:** each track header has a mute toggle (video tracks: show/hide) and a lock toggle; right-click a header to rename or delete the track. Muted audio tracks aren't mixed and hidden video tracks aren't composited, in playback and export (OTIO's `enabled`). Locked tracks are striped and reject every edit, including edits of clips linked to their clips.
 - **Projects:** `.otio` files (OpenTimelineIO) open and save, from the header bar or with `nox edit.otio`. Opening a project imports its media into the pool. Unsaved changes are flagged in the title, and closing asks first.
 - **Sequence settings** (main menu): frame rate (23.976–60), drop-frame timecode for 29.97/59.94, adding video and audio tracks.
 - **Viewer:** shows the whole sequence at the playhead, composited on the GPU: every enabled video track, with per-clip opacity and blend mode (normal, add, multiply, screen), dissolves, and sources fitted to the sequence (letterboxed or pillarboxed). It renders at the viewer's size. Scrub by dragging the ruler or empty track space, step frames with ←/→, and jump with Home/End.
 - **Playback:** Space plays and pauses, L plays and K pauses. Audio tracks are mixed (clip gain, equal-power crossfades under dissolves) and played on the default output device, which also serves as the clock. Frames are rendered ahead into a cache, and frames that can't be ready in time are skipped. Scrubbing back over cached frames is instant.
+- **Edit and Color pages** (header bar, Shift+4 and Shift+6, as in Resolve):
+  - **Edit page:** has an inspector on the right for the selected clip (opacity, blend mode, gain) or dissolve. Dragging a slider makes one undo step.
+  - **Color page:** shows the viewer large, plus a strip of the timeline's video clips that selects a clip and jumps to its start. Scopes and color wheels have their places there but aren't built yet.
+  - **Viewer:** one viewer moves to whichever page is showing.
 - **Clip menu** (right-click): opacity, blend mode, gain, add dissolve (also Ctrl+T, at the selected clip's edge nearest the playhead), split, delete. Dissolves can be selected and deleted.
 - **Project settings** (Shift+9, Resolve-style: categories in a sidebar, Cancel/Save, one undoable edit): project name; timeline resolution (presets or custom), frame rate and drop-frame timecode; image scaling for mismatched sources (scale to fit, scale with crop, center crop 1:1, stretch). The first clip in an empty sequence sets frame rate and resolution (like Shotcut's "Automatic" video mode).
-- **Export** (Ctrl+E): presets (H.264 master, YouTube/web, HEVC, ProRes 422 HQ, review copy) or custom format, quality, hardware encoding and audio; progress, cancel, Open Folder. With hardware encoding the compositor writes straight into the Vulkan Video encoder's images (zero copy): 1080p exports of the test footage run at about 190 fps, against 57 fps with x264. `nox-cli render project.otio out.mp4` does the same headless.
+- **Export** (Ctrl+E): presets (H.264 master, YouTube/web, HEVC, ProRes 422 HQ, review copy) or custom format, quality, hardware encoding and audio; progress, cancel, Open Folder. With hardware encoding the compositor writes straight into the Vulkan Video encoder's images (zero copy): 1080p exports of the test footage run at about 190 fps, against 57 fps with x264. The range is the whole timeline or In to Out (the default when both marks are set, as on Resolve's Deliver page). `nox-cli render project.otio out.mp4` does the same headless; `--in-out` renders only the marked range, `--frames` any range.
 - **Translations:** every user-visible string goes through gettext; a German catalog (`po/de.po`) is the first. Run with `LANGUAGE=de` to see it.
+- **Color management (M6, first part):** pictures are composited in linear ACEScg. Each source enters through its transfer function and primaries (BT.601, BT.709, BT.2020, P3 and others are converted rather than shown as is), so opacity, blend modes and dissolves work in linear light. The viewer gets half-float frames (`AB4H`) with an explicit color state, so 10-bit sources are no longer rounded to 8 bit before the screen. SDR BT.709 footage looks exactly as before.
 - **Frame path on Linux/NVIDIA:** frames never leave the GPU between decoder and screen. Vulkan Video decodes, a compute shader converts to RGB directly on FFmpeg's images, and the result goes to GTK as a DMA-BUF texture.
 
 ## Architecture
@@ -71,9 +78,10 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
 6. **Color management without linking OpenColorIO.** `nox-color` implements the underlying standards: H.273, ACES, ASC CDL, `.cube`/CLF LUTs, camera log curves, and a subset of the `.ocio` config format. Where useful we port OCIO's BSD-licensed GPU code. OCIO itself is used only in tests, to produce reference values.
 7. **Shaders:** GLSL compiled to SPIR-V at build time by `glslc` or `glslangValidator` (from `PATH` or `$VULKAN_SDK/bin`).
 8. **GUI objects are thin wrappers.** Model types are plain Rust; the GUI wraps them in small GObject subclasses (`MediaObject`) so they can live in GTK list models.
-9. **Edits overwrite, OTIO-style.** Tracks are sequences with explicit gaps. Placing an item splits whatever is under it at the edges and replaces it. Trimming in leaves a gap, and trimming out may only consume gaps and available media. Transitions touching an edit are dropped. Tracks are normalized after every edit (gaps merged, trailing gaps removed). Linked clips (`metadata.nox.link`) move, trim and delete together, and splitting gives each half its own link. Ripple insert exists in the model but not yet in the UI.
+9. **Edits overwrite, OTIO-style.** Tracks are sequences with explicit gaps. Placing an item splits whatever is under it at the edges and replaces it. Trimming in leaves a gap, and trimming out may only consume gaps and available media. Transitions touching an edit are dropped. Tracks are normalized after every edit (gaps merged, trailing gaps removed). Linked clips (`metadata.nox.link`) move, trim and delete together, and splitting gives each half its own link. The ripple edits are the exception to overwriting: ripple delete and ripple trim move what follows, but only on the tracks of the edited clip and its linked clips (no sync lock across other tracks); ripple insert exists in the model but not in the UI. A roll changes two neighboring clips' source ranges, so nothing else moves. Linked clips with the same edge or cut are ripple-trimmed and rolled along, all or nothing, so they stay in sync. Locked tracks (`metadata.nox.locked`) reject every edit of their contents in the model itself (`EditError::Locked`), not just in the UI.
 10. **Undo by snapshots.** `Document::edit` keeps the timeline from before each edit (up to 500 steps). Timelines are small, and this makes undo exact by construction with no inverse operations. Failed edits leave the timeline untouched, and edits that change nothing aren't recorded.
-11. **Compositing in two steps.** Each layer is converted by the existing YUV→RGB shader into an RGBA8 image at its placed size (`Rect::fit` keeps the aspect ratio). `blend.comp` then blends the layers in order into an RGBA16F accumulator over black, and `output.comp` writes AB24 for DMA-BUF or readback. Blending works on display-referred R'G'B' (editors' usual "video" mode); M6 moves it to a linear working space. A dissolve resolves to both clips, with the incoming one's opacity scaled by progress, so it needs no separate code path. Per-clip settings live in `metadata.nox` (`opacity`, `blend`, `gain`).
+11. **Compositing in two steps.** Each layer is converted by the YUV→RGB shader (its `ycbcr_to_working` variant) into the linear working space, an RGBA32F image at its placed size (`Rect::fit` keeps the aspect ratio). `blend.comp` then blends the layers in order into an RGBA32F accumulator over black. `output.comp` applies the output transform and writes `AB4H` (or `AB24`) for DMA-BUF, or RGBA8 for readback. `output_yuv.comp` writes into an encoder's NV12 image instead. Blending happens in linear light (decision 20).
+    *Changed during M6:* blending used to work on display-referred R'G'B' (editors' "video" mode), with RGBA8 layers and an RGBA16F accumulator. Half floats turned out too coarse for a linear working space: converting saturated colors back to BT.709 subtracts large terms, and the 1/2.4 encoding magnified the leftover rounding to as much as 9 code values (cyan `0,254,192` became `9,254,192`). A dissolve resolves to both clips, with the incoming one's opacity scaled by progress, so it needs no separate code path. Per-clip settings live in `metadata.nox` (`opacity`, `blend`, `gain`).
     *Changed during M4:* the M3 viewer requested single source frames; the engine now renders whole sequence frames.
 12. **The engine renders sequence frames into a cache.** A worker thread owns the GPU and a pool of open decoders (up to 8, two per file). A decoder is reused by seeking rather than reopened; reopening is expensive, e.g. FFV1 sets up FFmpeg's Vulkan compute decoder. A second decoder per file is opened only when the file is on two layers of one frame. Rendered frames are cached by timeline version and output size, up to `NOX_CACHE_MB` (768 MB by default), least recently used first. While paused, the newest request wins. While playing, the worker renders up to 0.5 s ahead of the clock. If it falls behind, it aims ahead by its measured render time, so finished frames are still shown and the ones in between are skipped.
     Scrubbing in long-GOP footage (keyframes 4–8 s apart, so stepping back can mean decoding hundreds of 4K frames) works in three ways:
@@ -84,15 +92,58 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
     Decoders decode on rather than seek whenever the target is in the GOP they are already in (from the demuxer's keyframe index), not only within 2 s.
     Stills (photos) are decoded once, and every position maps to their single frame (image files can't seek, so treating them as 25 fps video reopened and re-decoded a 30 MP JPEG on every frame after 2 s). The compositor keeps converted stills on the GPU (8 entries, LRU, keyed by file and placed size), so a photo isn't uploaded and converted on every frame. Rendering ahead during playback only moves forward. When the lead shrinks after a slow frame, going back behind frames already rendered made decoders seek back to a keyframe, which was slow and made the lead grow again. That runaway made `noemi.otio` lag after its first photo.
 13. **Audio is the clock.** For each playback, a `cpal` stream on the default device (or `NOX_AUDIO_DEVICE`) pulls from a lock-free ring that a mixer thread keeps 250 ms full. The playback time is the frames the device has consumed, corrected by the output latency cpal reports. After an underrun the mixer skips the frames the device played as silence, so audio stays in step. If the audio clock drifts more than a second from wall time (ALSA's `null` device consumes samples as fast as it can), playback switches to wall time. Without a device it uses wall time from the start. Read raw, the audio clock moves in steps (per device callback) and its latency estimate jitters, which made 60 fps playback judder. So the playback clock is wall time plus an offset that slowly follows the audio clock (2% of the error per reading), snapping on errors over 50 ms. On every display refresh (a GTK tick callback), the GUI picks the frame for the moment that refresh will be shown, which is the frame clock's time plus one refresh interval.
-14. **HDR sources are tone-mapped for SDR display.** PQ (HDR10) and HLG frames are decoded to display light, converted from BT.2020/P3 to BT.709, mapped with the BT.2390 EETF on the largest component (content peak from MaxCLL or the mastering display, else 1000 nits, onto 203-nit reference white per BT.2408), and encoded with BT.1886 gamma. The same math runs in the YUV→RGB shader and in `nox_color::hdr` (the CPU path for thumbnails, and the reference in tests). Real HDR output is M6.
+14. **HDR sources are tone-mapped for SDR display.** PQ (HDR10) and HLG frames are decoded to display light, converted from BT.2020/P3 to BT.709, mapped with the BT.2390 EETF on the largest component (content peak from MaxCLL or the mastering display, else 1000 nits, onto 203-nit reference white per BT.2408), and encoded with BT.1886 gamma. The same math runs in the YUV→RGB shader and in `nox_color::hdr` (the CPU path for thumbnails, and the reference in tests). In the working space the same mapping is applied on the way in, without the final encoding. Real HDR output, with tone mapping moved to the output transform, comes with the ACES output transforms.
 15. **Export writes into the encoder's own images.** For Vulkan Video encoders (`h264_vulkan`, `hevc_vulkan`) on the shared device, `MediaWriter` creates an NV12 frames pool with storage usage (mutable and extended-usage images, so the compositor can view each plane). `output_yuv.comp` writes BT.709 limited-range Y'CbCr (left-sited 4:2:0 chroma, the matrix being the exact inverse of the decoding one) into a pool frame. It follows FFmpeg's protocol: lock, wait on the semaphore, signal the next value, record GENERAL layout and no access (the semaphore makes the writes available to the encode queue). The frame then goes to the encoder: no readback, no CPU conversion. Fallbacks, in order: NVENC (frames read back, converted by swscale), then software (x264, x265). ProRes is always software, with 24-bit PCM audio in MOV. Exports render at sequence resolution with their own renderer, mix audio frame by frame, tag BT.709, put keyframes every 2 s, and use `+faststart`; a cancelled export deletes its file.
 16. **Dialogs follow other editors.** Project settings are laid out like Resolve's (sidebar of categories). Export leads with presets like Resolve's Deliver page and Shotcut's export panel, with Shotcut's single "Use hardware encoder" switch, and shows what will be rendered (as Kdenlive does).
-17. **Layout in `.ui` templates, behavior in Rust.** The window, viewer, media pool and its cells, both dialogs and the menus are GTK composite templates in plain `.ui` XML (`crates/nox-gui/resources/ui/`; no Blueprint, so no extra compiler). They are compiled into a GResource by `build.rs` (`glib-build-tools`; `.ui` files compressed and with blanks stripped by `xml-stripblanks`, which needs `xmllint`; without it the build warns and embeds them unstripped) and embedded in the binary under `/io/github/nox/Nox/`, with `style.css`. Each template has a Rust subclass (`NoxWindow`, `NoxViewer`, `NoxMediaPool`, `NoxMediaCell`, `NoxProjectSettings`, `NoxExportDialog`) that binds its children by id (`TemplateChild`) and its signal handlers with `#[template_callbacks]`. Things computed at run time (dropdown models from the preset tables, the clip labels) stay in Rust. The timeline is drawn in code (`snapshot`), so it has no template; the window template places it, and `TimelineView::set_project` attaches the project.
+17. **Layout in `.ui` templates, behavior in Rust.** The window, viewer, media pool and its cells, both dialogs and the menus are GTK composite templates in plain `.ui` XML (`crates/nox-gui/resources/ui/`; no Blueprint, so no extra compiler). They are compiled into a GResource by `build.rs` (`glib-build-tools`; `.ui` files compressed and with blanks stripped by `xml-stripblanks`, which needs `xmllint`; without it the build warns and embeds them unstripped) and embedded in the binary under `/io/github/nox/Nox/`, with `style.css`. Each template has a Rust subclass (`NoxWindow`, `NoxViewer`, `NoxMediaPool`, `NoxMediaCell`, `NoxProjectSettings`, `NoxExportDialog`) that binds its children by id (`TemplateChild`) and its signal handlers with `#[template_callbacks]`. Things computed at run time (dropdown models from the preset tables, the clip labels) stay in Rust. List rows and their data are declared too:
+    - **Row templates:** the media pool and the clip strip use `GtkBuilderListItemFactory` with row templates (`media-pool-item.ui`, `clip-strip-item.ui`).
+    - **Data binding:** cells read their item through `<binding>`/`<lookup>` expressions, and `<closure>` calls template callbacks (`#[template_callback]`) where a value needs computing.
+    - **What Rust still does:** fill the list store and react to selection. GObject properties (`MediaObject:name`, `NoxMediaCell:media`, `NoxClipRow`) are the interface between the two. The timeline is drawn in code (`snapshot`), so it has no template; the window template places it, and `TimelineView::set_project` attaches the project.
 18. **Translations with gettext.** The domain is `nox`; `i18n::init` binds it at startup. Rust uses `gettext`, `pgettext` (context, e.g. "blend mode"), `ngettext` (plurals) and `n_` (marks entries of constant tables, translated where shown). Placeholders are named, `{name}`, and filled by `i18n::fill`, so translators can reorder them; `format!` around translated text is avoided. `.ui` files mark text `translatable="yes"` with `<interface domain="nox">`. `build.rs` compiles `po/<lang>.po` for every language in `po/LINGUAS` into `.mo` catalogs itself (a small writer, no gettext tools needed to build). The binary looks for catalogs in `NOX_LOCALEDIR`, then `../share/locale` next to an installed `bin/nox`, then the build directory. Format names (H.264, ProRes, OpenTimelineIO) and units stay untranslated.
+19. **Ripple and roll follow Premiere's and Resolve's selection tool.** There is no separate trim mode: Ctrl while dragging an edge makes it a ripple trim (Premiere's Ctrl-drag), and the middle 6 px of a cut between two clips rolls it (Resolve's selection mode); either side of that zone trims the clip on that side. A ripple-trimmed start stays where it is and the clip's media start moves, as in both editors. In/Out marks are stored as `RationalTime`s in the timeline's `metadata.nox` (`mark_in`, `mark_out`; Out is exclusive, so O includes the frame under the playhead), track mute/hide is OTIO's `enabled`, and the track lock is `metadata.nox.locked`. Track renaming opens a small window of its own (`rename-track.ui`) rather than an inline entry, because the main window's single-key accelerators (Space, I, O, …) would otherwise eat the typing.
+
+20. **Color management in a linear working space** (`nox_color::working`).
+    - **Working space:** linear ACEScg (AP1 primaries, ACES white), with SDR reference white at 1.0.
+    - **Input:** the R'G'B' signal is decoded with its transfer function. That is BT.1886 (a pure 2.4 power) for BT.709/601/2020 video and for untagged sources, so untagged JPEGs look as before, and the sRGB EOTF for sRGB-tagged ones. The result goes to AP1 from its tagged primaries (unknown ones count as BT.709), with Bradford adaptation from D65 to the ACES white, as OCIO's ACES configs do. HDR stays tone-mapped per source on the way in (decision 14).
+    - **Output:** AP1 to BT.709, clipped to the gamut, BT.1886-encoded. That is the inverse of the SDR input, so BT.709 footage comes out with the code values it went in with.
+    - **Viewer color state:** frames are tagged sRGB (`GdkColorState`). GTK then passes the code values to an SDR monitor unchanged, which treats the desktop monitor as the BT.1886 reference display, as video players do. Tagging them honestly as BT.709 (CICP 1/1) would have made GTK apply the BT.709 inverse OETF: dark grays would lift by about 6 code values at 10% (`0.1 → 0.16`), unlike every player. On an HDR monitor GTK maps sRGB to its SDR white.
+    - **One source of truth:** the matrices are computed in `nox-color` (from xy chromaticities, checked against published ACES and BT.2087 matrices) and written into `color_constants.glsl` by `nox-gpu`'s build script, which the shaders include.
+    - *Found during M6:* indexing a constant `mat3[]` array with a push constant returned wrong matrices (glslang 16, NVIDIA 580; colors came out hue-shifted while gray was right). The generated code uses a function with an `if` per primaries instead.
+    - Blend modes keep their formulas but now act on linear values. Multiply and screen differ from their gamma-space look, and screen is only meaningful for values up to 1. A working-space choice (ACEScct, closer to the "video" look for blend modes) may follow.
+
+21. **Edit and Color pages, as in DaVinci Resolve.**
+    - **Switching:** a switcher in the header bar swaps between two layouts of the same project, in a `GtkStack`. Each page is laid out for its job.
+    - **Edit:** media pool, viewer, a new inspector on the right (clip properties such as opacity, blend mode and gain, which only the clip menu has today, and later transforms and transitions), and the timeline.
+    - **Color:**
+      - a large viewer with the scopes beside it (2×2, or one enlarged)
+      - a clip strip of the timeline's clips
+      - the color wheels (lift, gamma, gain, offset) across the bottom, next to CDL/LUT controls
+    - **Shared viewer:** there is one viewer and one engine. The viewer widget moves to whichever page is visible, so nothing renders twice.
+    - **Cost:** scopes run only while the Color page is visible.
+    - **Rejected options:**
+      - A single page with a color tab in the inspector (Premiere's Lumetri): the wheels get cramped, and the scopes compete with the media pool.
+      - Dockable panels (Kdenlive, Blender; libpanel in GTK): the most flexible, but a new dependency and much UI work before any color feature ships. Saved workspaces can come later on top of the pages.
+
+    - *Found while building it:* the Color page's vertical splitter made GTK warn on every resize ("Trying to measure GtkBox for height of 168, but it needs at least 169"). When GTK computed the window's minimum size, the paned handed its non-shrinkable end child one pixel less than that child's minimum. The bottom area is now shrinkable and scrolls instead. A fixed splitter position hid the clip strip and wheels on small screens, so the initial position leaves the bottom 260 px, at most half the page, and the user's position is kept after that. The page stack sizes only to the visible page (`hhomogeneous`/`vhomogeneous` off).
+
+22. **Shortcuts: application accelerators only with Ctrl or Alt.**
+    - **The problem:** GTK runs application accelerators (`set_accels_for_action`) before the focused widget. As accelerators, Space, the arrow keys, Home/End and the single letters took keys from focused controls: Space from buttons, arrows from the inspector's spin buttons and from the media pool.
+    - **The rule:** application-wide, only shortcuts with Ctrl or Alt, in `main.rs`. Keys that type a character or navigate live in a window-level `GtkShortcutController` declared in `window.ui`, in the bubble phase, so the focused widget gets them first. That covers Space, L, K, I, O, the arrows, Home/End, Up/Down, Shift+V and the Shift+digit page keys.
+    - **Menus** show those keys through their `accel` attribute.
+    - **Dialogs** are separate windows without the application accelerators, so they can use mnemonics (`_Preset`, `_Save`). In the main window, labels are linked with `labelled-by` instead, because a mnemonic such as Alt+O would collide with Clear Out.
+23. **Accessibility basics.**
+    - Icon-only buttons have accessible names.
+    - Form labels are linked to their controls.
+    - Dialogs have default buttons. Escape during an export cancels it first, and the outcome is announced.
+    - The timeline, drawn in code, is one accessible element (role Group) with a name, a description of its keys and a focus ring. It announces the selected clip ("name, start to end").
+    - Keyboard: Up/Down jump to edit points, Shift+V selects the clip at the playhead (Resolve), and Shift+F10 or the Menu key opens its menu.
+    - *Not done yet:*
+      - The track header toggles (mute, lock) are drawn, not widgets, so assistive technology can't reach them. The track menu offers the same options, but only by right-click; only the clip menu has a keyboard shortcut.
+      - Clips can't be moved or trimmed by keyboard.
 
 ### Display formats
 
-GTK's Vulkan renderer on the development machine imports these DMA-BUF formats: `AB24`, `XB24`, `AR24`, `XR24` (8-bit RGB), `AB4H` (16-bit float RGBA), `AYUV`/`XYUV`/`AVUY`/`XVUY` (packed 8-bit YUV) and `R8`. Nox outputs `AB24` today. M6 switches to `AB4H` with an explicit `GdkColorState`, for 10-bit and HDR sources. Handing GTK the decoder's YUV directly isn't useful for an editor, since it would bypass compositing and color management.
+GTK's Vulkan renderer on the development machine imports these DMA-BUF formats: `AB24`, `XB24`, `AR24`, `XR24` (8-bit RGB), `AB4H` (16-bit float RGBA), `AYUV`/`XYUV`/`AVUY`/`XVUY` (packed 8-bit YUV) and `R8`. Nox outputs `AB4H` (half float) when GTK offers it, else `AB24`, in both cases tagged sRGB (decision 20). A headless GNOME Shell session on the development machine imported `AB4H` with NVIDIA's tiled modifiers, zero copy. Handing GTK the decoder's YUV directly isn't useful for an editor, since it would bypass compositing and color management.
 
 ## Building and running
 
@@ -104,6 +155,7 @@ sudo apt install libgtk-4-dev libavcodec-dev libavformat-dev libavutil-dev \
                  libasound2-dev glslang-tools libxml2-utils gettext
 cargo run -- clip.mp4 photo.jpg      # starts Nox and imports the files
 cargo test --workspace               # needs the `ffmpeg` CLI for test clips
+tools/vk-validate.sh cargo test --workspace -- --test-threads=1   # under validation
 ```
 
 Windows/macOS: `vcpkg.json` lists GTK and FFmpeg. Point `PKG_CONFIG_PATH` at `vcpkg_installed/<triplet>/lib/pkgconfig` (the `cargo xtask` helper for this doesn't exist yet). macOS needs MoltenVK and has no Vulkan Video; decoding falls back to VideoToolbox or software.
@@ -122,19 +174,22 @@ Windows/macOS: `vcpkg.json` lists GTK and FFmpeg. Point `PKG_CONFIG_PATH` at `vc
 |---|---|
 | `NOX_LOG` | log filter, e.g. `info,nox_engine=trace` (trace shows per-frame times) |
 | `NOX_GPU` | Vulkan device: index or name substring |
-| `NOX_VULKAN_DEBUG=1` | Vulkan validation layers (needs `vulkan-validationlayers`) |
 | `NOX_PRESENT=readback` | turn off DMA-BUF presentation |
 | `NOX_AUDIO_DEVICE` | output device by name substring; `none` plays without audio (wall clock). For tests, `Discard all samples` is ALSA's null device |
 | `NOX_CACHE_MB` | frame cache size (default 768) |
 | `NOX_LOCALEDIR` | where to find `<lang>/LC_MESSAGES/nox.mo` |
 | `LANGUAGE` | UI language, e.g. `de` (with a UTF-8 `LANG`) |
 | `NOX_LOG` for `nox-cli` | defaults to `warn`; `info` shows the encoder and speed |
-| `NOX_TEST_ACTIONS=1` | adds `win.screenshot(path)`, which renders the window content to PNG (tests only) |
+| `NOX_TEST_ACTIONS=1` | adds `win.screenshot(path)`, which renders the window content to PNG, and `win.close`, which closes the window like its close button (tests only) |
 | `NOX_OTIO_PYTHON` | tests: a Python with `opentimelineio`, to compare `nox-otio` output with the reference implementation |
 
 `--gapplication-app-id=…` runs a separate instance next to a running Nox. Window actions are exported over D-Bus (org.gtk.Actions), which tests use to script the app:
 - transport: `seek(frame)`, `next-frame`, `previous-frame`, `go-to-start`, `go-to-end`
-- editing: `undo`, `redo`, `split`, `delete-clip`, `add-video-track`, `add-audio-track`, `append-media(path)`
+- editing: `undo`, `redo`, `split`, `delete-clip`, `ripple-delete`, `add-video-track`, `add-audio-track`, `append-media(path)`, `select-clip((track, index))` (`(-1, -1)` clears), `clip-opacity(d)`, `clip-blend(s)`, `clip-gain(d)`
+- pages: `page` (state `'edit'` or `'color'`)
+- timeline: `previous-edit`, `next-edit`, `select-clip-at-playhead`
+- marks: `set-in`, `set-out` (at the playhead), `clear-in`, `clear-out`, `clear-in-out`
+- tracks, by stack index: `delete-track(x)`, `set-track-enabled((xb))`, `set-track-locked((xb))`, `rename-track((xs))`
 - files: `open-path(path)`, `save-path(path)`
 - settings: `frame-rate` (state such as `'30000/1001'`), `drop-frame`, `snapping`
 
@@ -142,7 +197,7 @@ For GUI tests, run Nox on Xvfb (`GDK_BACKEND=x11 DISPLAY=:99`) so no windows app
 
 ## Verification so far
 
-- **93 automated tests:**
+- **101 automated tests:**
   - time and timecode math, Y'CbCr matrices
   - exact time arithmetic across timebases, drop-frame timecode formatting and parsing (round trips at 23.976/25/29.97/59.94)
   - edit operations: overwrite, insert, lift, trim limits and trims, linked moves, removal and splits, normalization, transitions, and keeping the sequence timebase
@@ -168,7 +223,18 @@ For GUI tests, run Nox on Xvfb (`GDK_BACKEND=x11 DISPLAY=:99`) so no windows app
   - export end to end on a timeline with a dissolve and audio, with Vulkan zero copy, x264 and ProRes; the scaling mode reaching the file; cancelling deleting the file
   - RGB→Y'CbCr matrix round trips, placement rects for all scaling modes
   - the zero-copy encode path is clean under the validation layers. FFmpeg's own Vulkan encoder leaks 6 image views at shutdown and logs encode-command errors; the plain `ffmpeg` CLI does the same.
+- **M6 tests:**
+  - matrices against published ones (BT.709→XYZ, BT.2087, ACEScg→BT.709 with Bradford, AP0→AP1), round trips to and from AP1 for all primaries, transfer function inverses
+  - SDR BT.709 round-tripping through the working space, wide-gamut sources being converted, HDR via the working space matching the display path
+  - the compositor against a CPU reference that blends in ACEScg with `nox_color`'s transforms; a single layer matching plain conversion within 1 code value
+  - engine and export dissolves mixing in linear light
+- **M6 app check** (headless GNOME Shell, GPU-backed): frames reached GTK as `AB4H` DMA-BUF, zero copy. Picked colors of SMPTE bars in the viewer were within 1–3 code values of FFmpeg's own decode (downscaling and chroma interpolation account for the rest).
 - **M5 app checks** (Xvfb, real clicks): both dialogs open and lay out as intended; exporting 789 frames of the 1080p/4K test project through the dialog took 4.1 s with `h264_vulkan`, zero copy.
+- **Editing gaps closed (In/Out, ripple, roll, track controls):**
+  - model tests: ripple delete (track ranges, linked clips), ripple trims of both edges with their limits and linked followers, roll limits from both clips' handles and linked rolls, transitions dropped at edited edges, locked tracks rejecting moves, placement, ripple delete and track deletion, splits skipping locked tracks, mark setters and the marked range
+  - `.otio` round trip of marks, track `enabled`, lock and name; marks written without the other settings when those are defaults
+  - engine: a hidden video track isn't composited, a muted audio track isn't mixed; `marked_range` in frames, also for marks off the frame grid
+  - app checks on Xvfb with real XTEST input: I/O keys and the drawn range; Shift+Delete refused while the linked audio track was locked, then ripple-deleting after unlocking with the header toggle; Ctrl-drag ripple trim of a clip start (linked audio followed); a roll of a cut into the incoming clip's handle (saved file checked: 188 + 137 frames, source start 13); hiding V1 (viewer black) and the header menu; renaming through the rename window, typing an "i" without setting a mark; exporting In to Out from the dialog (50 frames, `h264_vulkan`, zero copy) and `nox-cli render --in-out` (50 frames)
 - **UI templates and translations:** the lint and template tests above. On Xvfb, the window and both dialogs look as before, and with `LANGUAGE=de` all of them show German text, including the plural forms ("1145 Bilder"). Renaming a template id or leaving a label untranslated makes the tests fail.
 - **Scrubbing** the 4K 60 fps clip (keyframes every 250 frames) with real mouse drags, forward and then back:
   - before: one step back froze the viewer for 963 ms, and only 1 frame was shown on the way back
@@ -193,6 +259,23 @@ For GUI tests, run Nox on Xvfb (`GDK_BACKEND=x11 DISPLAY=:99`) so no windows app
 
   Saved files were inspected with OTIO. Opening a saved project and saving it again gives a byte-identical file. The viewer showed the right layer at each position, and black where nothing is under the playhead.
 
+### Vulkan validation
+
+`tools/vk-validate.sh <command>` runs a command under the Khronos validation layer with synchronization validation, and fails on any message not in its allowlist. It replaces `NOX_VULKAN_DEBUG=1` (FFmpeg's `debug` option), for two reasons found in October 2026 (layer 1.4.341, NVIDIA 580):
+- The layer's handle wrapping crashes the NVIDIA driver inside FFmpeg's Vulkan Video decode (SIGSEGV in the first `vkCmdDecodeVideoKHR`). Every test binary that decodes on the GPU crashed. The script turns handle wrapping off.
+- FFmpeg's debug callback drops some messages; the script injects the layer through the loader and has it print everything.
+
+Results: the whole test suite passes under validation, and every message left also appears with the plain `ffmpeg` CLI, so they come from FFmpeg 8.0 and are allowlisted:
+- `VUID-VkImageCreateInfo-pNext-06811`, `…07142`, `…07240`, `…08206`: decode and encode images created `VIDEO_PROFILE_INDEPENDENT` with usage no video format property lists.
+- `VUID-VkImageViewCreateInfo-usage-02275`: whole-image views of NV12 inherit `STORAGE` usage.
+- `VUID-vkDestroyDevice-device-05137`: the Vulkan encoder leaks 6 image views at teardown.
+
+Positive controls confirmed the layer sees Nox's own commands (a wrong clear layout in the compositor is reported) and that synchronization validation works for transfers. It does **not** report hazards on storage images, storage buffers or sampled images accessed by shaders. A two-dispatch write-after-write on one storage buffer goes unreported on both NVIDIA and lavapipe, as does a barrier removed from the compositor's blend loop. So compute barriers are reviewed by hand.
+
+### Closing the window
+
+Closing the window during playback crashed: a SIGSEGV in the NVIDIA driver on the render thread. The window's controller (and with it the engine) was meant to be released on `destroy`. But GTK 4 emits `destroy` only once the last reference is gone, which the window ↔ controller cycle prevented, so the render thread kept decoding while the driver's libraries were unloaded at exit. The controller is now released when the window leaves the application (`window-removed`), and `Engine::shutdown` stops and joins the worker explicitly. Reproduced and checked in headless GNOME Shell: all five clips from `~/Videos/Footage` on the timeline, playing, then `win.close`. Before the fix it crashed every time (3 of 3), after it the process exited normally every time (3 of 3).
+
 ## Known gaps
 
 - Transparency is dropped; frames are shown opaque.
@@ -201,7 +284,8 @@ For GUI tests, run Nox on Xvfb (`GDK_BACKEND=x11 DISPLAY=:99`) so no windows app
 - FFmpeg's own log lines go to stderr instead of the tracing log.
 - Dropping folders onto the media pool isn't supported.
 - Not built or tested on Windows or macOS yet. The planned Vulkan→OpenGL interop path (for Windows) doesn't exist yet.
-- Vulkan synchronization hasn't been checked with validation layers; they aren't installed on the development machine.
+- Thumbnails (`Converter::convert`) stay display-referred. They tone-map HDR but don't convert the primaries of wide-gamut SDR sources, so a BT.2020 SDR clip's thumbnail is more saturated than the viewer shows it.
+- Synchronization validation can't see shader accesses through descriptors (see "Vulkan validation"), so compute barriers are only reviewed by hand.
 
 Translations:
 - German is the only catalog, written as a first example; it hasn't been reviewed by a native speaker.
@@ -209,7 +293,6 @@ Translations:
 - GTK's own strings (file dialogs, entry menus) come from GTK's catalogs, so they are only translated if the system has them.
 
 M5 limitations:
-- Only the whole timeline can be exported from the dialog. Timeline In/Out marks (and with them render ranges, as in Kdenlive) don't exist yet; `nox-cli render --frames` takes a range.
 - No custom presets, render queue, or advanced codec settings (bitrate modes, GOP, B-frames, 10-bit or HDR output).
 - AV1: the RTX 3060 has no AV1 encoder and this FFmpeg build no software one, so it isn't offered.
 - NVENC gets frames from memory (it can't read Vulkan images), so it only runs when Vulkan Video encoding isn't available.
@@ -220,14 +303,16 @@ M4 limitations:
 - Audio was only tested on ALSA's null device, not heard on real speakers; output latency compensation is unverified on PipeWire/PulseAudio.
 - Only `f32` output devices are supported (others play without audio). There is no audio while scrubbing, no reverse playback (J), and no audio meters or waveforms.
 - Only audio tracks are heard. Audio inside nested compositions or on video tracks is ignored.
-- Downscaling to the viewer is bilinear, so 4K footage in a small viewer aliases (mipmaps would fix it). Layers are 8-bit before blending.
+- Downscaling to the viewer is bilinear, so 4K footage in a small viewer aliases (mipmaps would fix it).
 - Only dissolves are rendered; other transition types play as dissolves.
 - Frames are cached at viewer size; resizing the viewer drops the cache.
 
 M3 limitations:
 - Time-warp effects from imported files are respected when resolving frames, but splits and trims ignore them.
 - Markers are kept but not shown. Nested compositions show as one block and can't be edited inside.
-- No ripple or roll edits in the UI (the model has `insert`), no track deletion, renaming, muting or locking, and no multi-selection.
+- No multi-selection, no ripple insert in the UI (the model has `insert`), no slip/slide edits, and ripple edits don't move other tracks (no sync lock).
+- Ripple-trim and roll previews show only the edited clip or cut, not the clips that will move.
+- Mark and track-state edits replace the engine's timeline like any edit, so they drop the frame cache.
 - No relinking of offline media (they show black and are logged once). Files can't be dropped straight onto the timeline, only via the media pool.
 - Dragging an imported clip whose edges aren't on the sequence's frame grid snaps the moved clip to the grid.
 - `Marker.3` colors are reduced to the nearest named color, since Nox writes `Marker.2`.
@@ -244,20 +329,28 @@ Everything planned is in: render-ahead into a frame cache, the GPU compositor wi
 Rendering through the compositor, hardware encoding (Vulkan Video with zero copy, NVENC) with software fallback, muxing, the export dialog and `nox-cli render` are all in. VAAPI was dropped: Vulkan Video covers hardware encoding on AMD and Intel too. Added beyond the plan: the Project Settings dialog (asked for in review, modeled on Resolve and Shotcut) and the image scaling modes.
 
 ### M6 – Color management
-- Viewer and export output as `AB4H` with an explicit `GdkColorState`.
-- ACEScct/ACEScg working space.
-- Input transforms from color tags and camera log curves.
+- ✅ Viewer output as `AB4H` with an explicit `GdkColorState`. Export still writes 8-bit 4:2:0. 10-bit and HDR export need encoder work (see M5 limitations).
+- ✅ ACEScg working space (linear; RGBA32F layers and accumulator). ACEScct as a choice for blending is open.
+- Input transforms: ✅ from color tags (transfer functions, primaries); camera log curves still to do.
 - CDL and `.cube`/CLF LUT nodes.
 - A reader for a subset of `.ocio` configs.
 - Display/view transforms, with ACES 2 output transforms as baked LUTs at first.
-- Primary color wheels in the inspector.
+- ✅ Edit and Color pages (decision 21): the header-bar switcher, the shared viewer moving between pages, the Edit page's inspector, and the Color page's layout with its clip strip. Consecutive edits of one property merge into one undo step (`Document::edit_merging`).
+- Primary color wheels (lift, gamma, gain, offset) on the Color page.
+- Scopes, on the Color page: waveform, RGB parade, vectorscope (BT.709 targets, skin-tone line) and histogram. They come with the color wheels, which are hard to use without them. Design, after Aras Pranckevičius's work on Blender's GPU scopes ("This many points is surely out of scope", https://aras-p.info/blog/2025/08/24/This-many-points-is-surely-out-of-scope/):
+  - **Input:** the composited picture is read where it already is on the GPU, with no readback.
+  - **Count pass:** a compute shader adds fixed-point counts per scope bin with atomics. Blender's first version drew one point per pixel with alpha blending and reached about 2 fps at 4K on Apple GPUs. Points pile up (most pixels sit near the vectorscope's center) and the blending hardware can't keep up. Atomics were 1.5–5× faster.
+  - **Resolve pass:** turns counts into brightness with a non-linear curve. Counting rather than blending is what makes that curve possible.
+  - **HDR:** a float axis with headroom above 1.0, not 256 bins. Blender's old scopes clipped HDR.
+  - **What they measure:** the output signal (after the output transform, Resolve's default) or the working space (shows the headroom).
+  - **Resolution:** the viewer-size frame by default, about 1M pixels instead of 8M at 4K.
+  - **If atomics in one spot get slow** (vectorscope of low-saturation footage; worst on AMD and Apple): subgroup reductions, or per-workgroup tallies in shared memory, which the histogram uses anyway.
+  - **Benchmarks** on more than one GPU vendor.
 - Tests against reference values produced by OCIO.
 
 ### Later
-- In/Out marks on the timeline, and export of that range.
-- More editing: ripple and roll edits, multi-selection, track controls (delete, rename, mute, lock), creating transitions, showing markers, relinking offline media.
+- More editing: multi-selection, slip and slide, ripple insert in the UI, sync lock, solo, creating transitions, showing markers, relinking offline media.
 - Inspector with transforms, transitions and keyframes.
-- Scopes (waveform, parade, vectorscope).
 - Proxies and audio waveform display.
 - A native ACES 2 port, and real OCIO as an optional feature.
 - An OpenFX host and CLAP audio plugins.

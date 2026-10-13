@@ -1,25 +1,26 @@
 //! Composites several frames into one picture on the GPU.
 //!
-//! Each layer is converted to RGBA8 at its placed size by the `Converter`
-//! (`ycbcr_to_rgb.comp`), then all layers are blended bottom to top into a
-//! 16-bit float accumulator (`blend.comp`) over a black background, which
-//! is finally written to an 8-bit output (`output.comp`), read back or
-//! exported as DMA-BUF. Blending happens on display-referred R'G'B' values,
-//! as in most editors' "video" mode; color management (M6) will move it to
-//! a linear working space.
+//! Each layer is converted into the linear working space (ACEScg, see
+//! `nox_color::working`) at its placed size by the `Converter`
+//! (`ycbcr_to_working`, RGBA32F), then all layers are blended bottom to top
+//! in linear light into a 32-bit float accumulator (`blend.comp`) over a
+//! black background. The output transform (`output.comp`) then writes BT.709
+//! R'G'B': 8 bit to read back, 8 bit or half float to export as DMA-BUF, or
+//! as Y'CbCr into an encoder's image (`output_yuv.comp`).
 
 use ash::vk;
 use std::sync::Arc;
 
 use crate::converter::{
-    GpuImage, Readback, color_range, image_barrier, queue_transfer, record_readback,
+    GpuImage, Readback, WORKING_FORMAT, color_range, image_barrier, queue_transfer, record_readback,
 };
-use crate::export::ExportPool;
+use crate::export::{DmabufFormat, ExportPool};
 use crate::{Converter, DmabufFrame, Error, GpuDevice, Image, ImageSync, Input, Result, VkPlane};
 use nox_color::Matrix3x4;
 
 const BLEND_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blend.comp.spv"));
 const OUTPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output.comp.spv"));
+const OUTPUT_F16_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output_f16.comp.spv"));
 const OUTPUT_YUV_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output_yuv.comp.spv"));
 const WORKGROUP_SIZE: u32 = 16;
 /// Layers per picture.
@@ -219,7 +220,11 @@ enum OutputViews {
 pub struct Compositor {
     converter: Converter,
     blend: Pipeline,
+    /// To RGBA8.
     output: Pipeline,
+    /// To RGBA16F (`AB4H` export); uses `output_set` (identical set
+    /// layouts).
+    output_f16: Pipeline,
     output_yuv: Pipeline,
     descriptor_pool: vk::DescriptorPool,
     blend_sets: Vec<vk::DescriptorSet>,
@@ -270,6 +275,12 @@ impl Compositor {
             let output = create_pipeline(
                 device,
                 OUTPUT_SHADER,
+                &[storage(0), storage(1)],
+                size_of::<OutputParams>(),
+            )?;
+            let output_f16 = create_pipeline(
+                device,
+                OUTPUT_F16_SHADER,
                 &[storage(0), storage(1)],
                 size_of::<OutputParams>(),
             )?;
@@ -337,6 +348,7 @@ impl Compositor {
                 converter,
                 blend,
                 output,
+                output_f16,
                 output_yuv,
                 descriptor_pool,
                 blend_sets,
@@ -364,11 +376,23 @@ impl Compositor {
         self.converter.gpu()
     }
 
-    /// Enables `finish_dmabuf`. `importable_modifiers` are the DRM
-    /// modifiers the consumer can import for `FOURCC_ABGR8888`.
-    pub fn enable_dmabuf(&mut self, importable_modifiers: &[u64]) -> Result<()> {
-        self.export = Some(ExportPool::new(self.gpu().clone(), importable_modifiers)?);
+    /// Enables `finish_dmabuf`. `importable` lists the (DRM fourcc,
+    /// modifier) pairs the consumer can import; half float (`AB4H`) is
+    /// preferred over `AB24`.
+    pub fn enable_dmabuf(&mut self, importable: &[(u32, u64)]) -> Result<()> {
+        let pool = ExportPool::new(self.gpu().clone(), DmabufFormat::Rgba16f, importable).or_else(
+            |err| {
+                tracing::info!("no half-float DMA-BUF ({err}), using 8 bit");
+                ExportPool::new(self.gpu().clone(), DmabufFormat::Rgba8, importable)
+            },
+        )?;
+        self.export = Some(pool);
         Ok(())
+    }
+
+    /// Format of `finish_dmabuf` frames, once enabled.
+    pub fn dmabuf_format(&self) -> Option<DmabufFormat> {
+        self.export.as_ref().map(ExportPool::format)
     }
 
     pub fn dmabuf_enabled(&self) -> bool {
@@ -449,7 +473,7 @@ impl Compositor {
             return Ok(());
         }
         let image = self.converter.create_image(
-            vk::Format::R8G8B8A8_UNORM,
+            WORKING_FORMAT,
             rect.width,
             rect.height,
             vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
@@ -530,7 +554,7 @@ impl Compositor {
             .is_none_or(|i| (i.width, i.height) != (rect.width, rect.height))
         {
             let image = self.converter.create_image(
-                vk::Format::R8G8B8A8_UNORM,
+                WORKING_FORMAT,
                 rect.width,
                 rect.height,
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
@@ -653,7 +677,7 @@ impl Compositor {
                 self.converter.destroy_image(old);
             }
             let image = self.converter.create_image(
-                vk::Format::R16G16B16A16_SFLOAT,
+                WORKING_FORMAT,
                 width,
                 height,
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST,
@@ -857,24 +881,16 @@ impl Compositor {
                 // Acquire the target from its last user. Its contents are
                 // overwritten, so the old layout's data doesn't matter.
                 let own = gpu.queue_family;
-                // One multi-planar image, or one image per plane.
-                let aspect = if target.images.len() == 1 {
-                    vk::ImageAspectFlags::PLANE_0 | vk::ImageAspectFlags::PLANE_1
-                } else {
-                    vk::ImageAspectFlags::COLOR
-                };
+                // COLOR also for one multi-planar image: per-plane aspects
+                // are only valid in barriers on disjoint images
+                // (VUID-VkImageMemoryBarrier2-image-09242), and FFmpeg's
+                // aren't.
                 let acquire: Vec<_> = target
                     .images
                     .iter()
                     .map(|sync| {
                         let (src, dst) = queue_transfer(sync.queue_family, own);
                         image_barrier(sync.image, sync.layout, vk::ImageLayout::GENERAL)
-                            .subresource_range(
-                                vk::ImageSubresourceRange::default()
-                                    .aspect_mask(aspect)
-                                    .level_count(1)
-                                    .layer_count(1),
-                            )
                             .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                             .src_access_mask(vk::AccessFlags2::from_raw(u64::from(
                                 sync.access.as_raw(),
@@ -931,11 +947,18 @@ impl Compositor {
                     &vk::DependencyInfo::default()
                         .image_memory_barriers(std::slice::from_ref(&to_output)),
                 );
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.output.pipeline);
+                let half_float = matches!(output, Output::Export(..))
+                    && self.dmabuf_format() == Some(DmabufFormat::Rgba16f);
+                let pipeline = if half_float {
+                    &self.output_f16
+                } else {
+                    &self.output
+                };
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline);
                 device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::COMPUTE,
-                    self.output.layout,
+                    pipeline.layout,
                     0,
                     &[self.output_set],
                     &[],
@@ -943,7 +966,7 @@ impl Compositor {
                 push(
                     device,
                     cmd,
-                    self.output.layout,
+                    pipeline.layout,
                     &OutputParams {
                         size: [width as i32, height as i32],
                     },
@@ -1048,7 +1071,12 @@ impl Drop for Compositor {
             device.destroy_command_pool(self.command_pool, None);
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
-            for pipeline in [&self.blend, &self.output, &self.output_yuv] {
+            for pipeline in [
+                &self.blend,
+                &self.output,
+                &self.output_f16,
+                &self.output_yuv,
+            ] {
                 device.destroy_pipeline(pipeline.pipeline, None);
                 device.destroy_pipeline_layout(pipeline.layout, None);
                 device.destroy_descriptor_set_layout(pipeline.set_layout, None);

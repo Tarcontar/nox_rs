@@ -178,7 +178,7 @@ fn vulkan_encode_without_copies() {
             swap_chroma: false,
             matrix: nox_color::ycbcr::rgb_to_rgb(nox_color::Quantization::eight_bit(true)),
             chroma_offset: [0.0, 0.0],
-            tone: Default::default(),
+            color: Default::default(),
             planes: vec![Plane {
                 format: PlaneFormat::Rgba8,
                 width: 320,

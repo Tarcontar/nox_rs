@@ -107,6 +107,26 @@ impl Project {
         result
     }
 
+    /// Like `edit`, but consecutive edits with the same `merge_key` make
+    /// one undo step (see `Document::edit_merging`), e.g. while a slider is
+    /// dragged.
+    pub fn edit_merging<T, E: std::fmt::Display>(
+        &self,
+        label: &str,
+        merge_key: &str,
+        edit: impl FnOnce(&mut Timeline) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let result = self
+            .document
+            .borrow_mut()
+            .edit_merging(label, merge_key, edit);
+        match &result {
+            Ok(_) => self.notify(),
+            Err(err) => tracing::info!("{label} not possible: {err}"),
+        }
+        result
+    }
+
     /// Adds `media` at sequence frame `frame`: its video on `track` (or the
     /// lowest video track) and its audio on `track` (or the first audio
     /// track), linked. Stills get a fixed length.

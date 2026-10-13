@@ -104,9 +104,13 @@ fn check(name: &str, codec: VideoCodec, hardware: bool) -> Option<&'static str> 
     let blue = center(&summary.path, 70);
     assert!(close(red, [0xC0, 0x30, 0x20]), "{name}: red {red:?}");
     assert!(close(blue, [0x20, 0x60, 0xE0]), "{name}: blue {blue:?}");
-    // The dissolve (45–55) is halfway at 50.
+    // The dissolve (45–55) is halfway at 50, mixing in linear light.
     let mid = center(&summary.path, 50);
-    let half = [0, 1, 2].map(|c| (red[c] + blue[c]) / 2);
+    let linear = |v: i32| (f64::from(v) / 255.0).powf(2.4);
+    let half = [0, 1, 2].map(|c| {
+        let l = (linear(red[c]) + linear(blue[c])) / 2.0;
+        (l.powf(1.0 / 2.4) * 255.0).round() as i32
+    });
     assert!(close(mid, half), "{name}: dissolve {mid:?} vs {half:?}");
 
     let mut audio = AudioDecoder::open(&summary.path, 48_000).unwrap();

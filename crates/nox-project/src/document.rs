@@ -14,6 +14,8 @@ struct Step {
     label: String,
     timeline: Timeline,
     revision: u64,
+    /// Set by `edit_merging`: later edits with the same key join this step.
+    merge_key: Option<String>,
 }
 
 /// A timeline with its undo history and saved state.
@@ -53,14 +55,63 @@ impl Document {
         label: impl Into<String>,
         edit: impl FnOnce(&mut Timeline) -> Result<T, E>,
     ) -> Result<T, E> {
+        self.record(label.into(), None, edit)
+    }
+
+    /// Like `edit`, but joins the previous step if that was made with the
+    /// same `merge_key` and nothing came in between: dragging a slider makes
+    /// one undo step, not one per value. If the merged edits end where they
+    /// started, the step is dropped.
+    pub fn edit_merging<T, E>(
+        &mut self,
+        label: impl Into<String>,
+        merge_key: &str,
+        edit: impl FnOnce(&mut Timeline) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mergeable = self.redo.is_empty()
+            && self
+                .undo
+                .last()
+                .is_some_and(|s| s.merge_key.as_deref() == Some(merge_key));
+        if !mergeable {
+            return self.record(label.into(), Some(merge_key.to_owned()), edit);
+        }
+        let before = self.timeline.clone();
+        match edit(&mut self.timeline) {
+            Ok(value) => {
+                let step = self.undo.last().expect("mergeable step");
+                if self.timeline == step.timeline {
+                    // Back where the step started: nothing to undo.
+                    let step = self.undo.pop().expect("mergeable step");
+                    self.revision = step.revision;
+                } else if self.timeline != before {
+                    self.revision = self.next_revision;
+                    self.next_revision += 1;
+                }
+                Ok(value)
+            }
+            Err(err) => {
+                self.timeline = before;
+                Err(err)
+            }
+        }
+    }
+
+    fn record<T, E>(
+        &mut self,
+        label: String,
+        merge_key: Option<String>,
+        edit: impl FnOnce(&mut Timeline) -> Result<T, E>,
+    ) -> Result<T, E> {
         let before = self.timeline.clone();
         match edit(&mut self.timeline) {
             Ok(value) => {
                 if self.timeline != before {
                     self.undo.push(Step {
-                        label: label.into(),
+                        label,
                         timeline: before,
                         revision: self.revision,
+                        merge_key,
                     });
                     if self.undo.len() > UNDO_LIMIT {
                         self.undo.remove(0);
@@ -102,6 +153,8 @@ impl Document {
             label: step.label,
             timeline: std::mem::replace(&mut self.timeline, step.timeline),
             revision: self.revision,
+            // Undone and redone steps don't merge with new edits.
+            merge_key: None,
         };
         self.revision = step.revision;
         current
@@ -163,6 +216,46 @@ mod tests {
         rename(&mut doc, "d");
         assert_eq!(doc.redo(), None);
         assert_eq!(doc.undo_label(), Some("Rename"));
+    }
+
+    fn rename_merging(doc: &mut Document, name: &str, key: &str) {
+        doc.edit_merging("Rename", key, |t| {
+            t.name = name.into();
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn merging_edits_make_one_step() {
+        let mut doc = Document::new(Timeline::new("a", Rational::new(25, 1)));
+        for name in ["b", "c", "d"] {
+            rename_merging(&mut doc, name, "name");
+        }
+        assert!(doc.is_modified());
+        assert_eq!(doc.undo(), Some("Rename".into()));
+        assert_eq!(doc.timeline().name, "a");
+        assert_eq!(doc.undo(), None);
+
+        // Another key, a plain edit or an undo in between starts a new step.
+        rename_merging(&mut doc, "b", "name");
+        rename_merging(&mut doc, "c", "other");
+        rename(&mut doc, "d");
+        rename_merging(&mut doc, "e", "other");
+        assert_eq!(doc.undo(), Some("Rename".into()));
+        assert_eq!(doc.timeline().name, "d");
+        rename_merging(&mut doc, "f", "other");
+        assert_eq!(doc.undo(), Some("Rename".into()));
+        assert_eq!(doc.timeline().name, "d");
+    }
+
+    #[test]
+    fn merging_back_to_the_start_drops_the_step() {
+        let mut doc = Document::new(Timeline::new("a", Rational::new(25, 1)));
+        rename_merging(&mut doc, "b", "name");
+        rename_merging(&mut doc, "a", "name");
+        assert_eq!(doc.undo_label(), None);
+        assert!(!doc.is_modified());
     }
 
     #[test]

@@ -4,7 +4,9 @@
 
 use gtk::{glib, prelude::*};
 
+use crate::clip_strip::ClipStrip;
 use crate::export_dialog::ExportDialog;
+use crate::inspector::Inspector;
 use crate::media_cell::MediaCell;
 use crate::media_pool::MediaPool;
 use crate::project::Project;
@@ -29,12 +31,51 @@ fn templates_build() {
     let timeline = window.imp_children().2;
     timeline.set_project(project.clone());
     assert!(window.titlebar().is_some(), "header bar");
+    // Bare keys run after the focused widget (bubble phase), not as
+    // application accelerators, which would take them from spin buttons
+    // and focused buttons.
+    let controllers = window.observe_controllers();
+    let keys = (0..controllers.n_items())
+        .filter_map(|i| {
+            controllers
+                .item(i)
+                .and_downcast::<gtk::ShortcutController>()
+        })
+        .find(|c| c.propagation_phase() == gtk::PropagationPhase::Bubble)
+        .expect("window shortcut controller");
+    let bound: Vec<(String, String)> = (0..keys.n_items())
+        .filter_map(|i| keys.item(i).and_downcast::<gtk::Shortcut>())
+        .map(|shortcut| {
+            let trigger = shortcut.trigger().map(|t| t.to_str().to_string());
+            let action = shortcut.action().map(|a| a.to_str().to_string());
+            (trigger.unwrap_or_default(), action.unwrap_or_default())
+        })
+        .collect();
+    for (trigger, action) in [
+        ("space", "action(win.play-pause)"),
+        ("Left", "action(win.previous-frame)"),
+        ("i", "action(win.set-in)"),
+        ("<Shift>4", "action(win.page)"),
+    ] {
+        assert!(
+            bound.iter().any(|(t, a)| t == trigger && a == action),
+            "{trigger} → {action} in {bound:?}"
+        );
+    }
 
     glib::Object::new::<MediaPool>();
     glib::Object::new::<MediaCell>();
     glib::Object::new::<Viewer>();
     glib::Object::new::<TimelineView>();
+    let inspector = glib::Object::new::<Inspector>();
+    inspector.set_timeline(&timeline);
+    glib::Object::new::<ClipStrip>().set_up(&timeline, &window.imp_children().0);
     assert!(crate::timeline::clip_menu().n_items() > 0, "clip menu");
+    let (video, audio) = crate::timeline::track_menus();
+    assert!(video.n_items() > 0 && audio.n_items() > 0, "track menus");
+    let rename = crate::timeline::rename_dialog();
+    let dialog: gtk::Window = rename.object("dialog").expect("rename dialog");
+    assert!(rename.object::<gtk::Entry>("name").is_some(), "name entry");
 
     let settings = glib::Object::builder::<ProjectSettings>()
         .property("transient-for", &window)
@@ -50,5 +91,6 @@ fn templates_build() {
 
     settings.destroy();
     export.destroy();
+    dialog.destroy();
     window.destroy();
 }

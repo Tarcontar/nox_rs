@@ -67,28 +67,36 @@ impl Viewer {
         let button = &self.imp().play_button;
         button.set_icon_name(icon);
         button.set_tooltip_text(Some(&tooltip));
+        button.update_property(&[gtk::accessible::Property::Label(&tooltip)]);
     }
 
     /// Shows a rendered frame; fails if GTK cannot import a DMA-BUF frame.
     /// The frame (shared with the engine's cache) stays alive while GTK
     /// uses it.
+    ///
+    /// Frames hold BT.1886-encoded BT.709 R'G'B' (the output transform,
+    /// `nox_color::OutputTransform`). They are tagged sRGB, which makes GTK
+    /// pass the code values to an SDR monitor unchanged: the desktop
+    /// monitor stands in for the BT.1886 reference display, as in video
+    /// players. On an HDR monitor GTK maps them to its SDR white.
     pub fn show_frame(&self, rendered: &Arc<RenderedFrame>) -> Result<(), glib::Error> {
         let imp = self.imp();
         let texture = match &rendered.image {
-            FrameImage::Pixels(image) => gdk::MemoryTexture::new(
-                image.width as i32,
-                image.height as i32,
-                gdk::MemoryFormat::R8g8b8a8,
-                &glib::Bytes::from(&image.data[..]),
-                image.stride,
-            )
-            .upcast(),
+            FrameImage::Pixels(image) => gdk::MemoryTextureBuilder::new()
+                .set_width(image.width as i32)
+                .set_height(image.height as i32)
+                .set_format(gdk::MemoryFormat::R8g8b8a8)
+                .set_bytes(Some(&glib::Bytes::from(&image.data[..])))
+                .set_stride(image.stride)
+                .set_color_state(&gdk::ColorState::srgb())
+                .build(),
             FrameImage::Dmabuf(frame) => {
                 let builder = gdk::DmabufTextureBuilder::new()
                     .set_display(&imp.picture.display())
                     .set_width(frame.width)
                     .set_height(frame.height)
                     .set_fourcc(frame.fourcc)
+                    .set_color_state(Some(&gdk::ColorState::srgb()))
                     .set_modifier(frame.modifier)
                     .set_n_planes(1)
                     .set_offset(0, frame.offset)
