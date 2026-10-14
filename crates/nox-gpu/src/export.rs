@@ -4,9 +4,12 @@
 //! can import, in exportable memory. A `DmabufFrame` hands out a file
 //! descriptor for one image; dropping the frame (when GTK releases its
 //! texture) returns the image to the pool for reuse.
+//!
+//! The types exist on every platform so callers needn't be conditional,
+//! but only Linux has DMA-BUF: elsewhere `ExportPool::new` fails and no
+//! frame is ever made.
 
 use ash::vk;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::{Error, GpuDevice, Result};
@@ -43,6 +46,13 @@ impl DmabufFormat {
     }
 }
 
+/// The file descriptor of an exported frame.
+#[cfg(target_os = "linux")]
+pub type DmabufFd = std::os::fd::OwnedFd;
+/// No DMA-BUF here: frames can't exist.
+#[cfg(not(target_os = "linux"))]
+pub type DmabufFd = std::convert::Infallible;
+
 const EXTENSIONS: [&std::ffi::CStr; 3] = [
     ash::khr::external_memory_fd::NAME,
     ash::ext::external_memory_dma_buf::NAME,
@@ -52,7 +62,7 @@ const EXTENSIONS: [&std::ffi::CStr; 3] = [
 /// A converted frame in an exported image, ready to be wrapped by the
 /// consumer (e.g. `GdkDmabufTexture`). The GPU has finished writing it.
 pub struct DmabufFrame {
-    pub fd: OwnedFd,
+    pub fd: DmabufFd,
     pub width: u32,
     pub height: u32,
     pub fourcc: u32,
@@ -112,6 +122,7 @@ pub(crate) struct ExportPool {
     format: DmabufFormat,
     modifiers: Vec<u64>,
     free: Arc<Mutex<Vec<ExportImage>>>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     external_memory_fd: ash::khr::external_memory_fd::Device,
     drm_modifier: ash::ext::image_drm_format_modifier::Device,
 }
@@ -123,6 +134,9 @@ impl ExportPool {
         format: DmabufFormat,
         importable: &[(u32, u64)],
     ) -> Result<Self> {
+        if !cfg!(target_os = "linux") {
+            return Err(Error::Unsupported("DMA-BUF is Linux only".into()));
+        }
         if let Some(missing) = EXTENSIONS.iter().find(|e| !gpu.has_extension(e)) {
             return Err(Error::Unsupported(format!(
                 "device lacks {}",
@@ -168,7 +182,15 @@ impl ExportPool {
     }
 
     /// Exports `image` (whose rendering has completed) as a frame.
+    #[cfg(not(target_os = "linux"))]
+    pub fn export(&self, _image: ExportImage) -> Result<DmabufFrame> {
+        Err(Error::Unsupported("DMA-BUF is Linux only".into()))
+    }
+
+    /// Exports `image` (whose rendering has completed) as a frame.
+    #[cfg(target_os = "linux")]
     pub fn export(&self, image: ExportImage) -> Result<DmabufFrame> {
+        use std::os::fd::FromRawFd;
         // SAFETY: the memory was allocated with DMA-BUF export enabled.
         let fd = unsafe {
             self.external_memory_fd.get_memory_fd(
@@ -179,7 +201,7 @@ impl ExportPool {
         };
         Ok(DmabufFrame {
             // SAFETY: vkGetMemoryFdKHR returns a new fd owned by the caller.
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            fd: unsafe { DmabufFd::from_raw_fd(fd) },
             width: image.width,
             height: image.height,
             fourcc: self.format.fourcc(),

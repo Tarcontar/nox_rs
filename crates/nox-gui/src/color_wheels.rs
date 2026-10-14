@@ -338,7 +338,7 @@ mod panel {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/color-wheels.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/color-wheels.ui")]
     pub struct ColorWheels {
         #[template_child]
         pub stack: TemplateChild<gtk::Stack>,

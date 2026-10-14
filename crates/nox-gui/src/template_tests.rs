@@ -92,7 +92,7 @@ fn templates_build() {
     export.load(&project);
 
     let css = gtk::CssProvider::new();
-    css.load_from_resource("/io/github/nox/Nox/style.css");
+    css.load_from_resource("/io/github/feliwir/Nox/style.css");
 
     settings.destroy();
     export.destroy();

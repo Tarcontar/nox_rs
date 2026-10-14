@@ -642,7 +642,12 @@ pub fn probe_encoders(
         encoding,
         peak_nits: 1000.0,
     };
-    codec
+    // Encoders that don't open say why on FFmpeg's log; here that's an
+    // answer, not an error.
+    // SAFETY: plain global setters.
+    let level = unsafe { ffi::av_log_get_level() };
+    unsafe { ffi::av_log_set_level(ffi::AV_LOG_QUIET) };
+    let found = codec
         .encoders(true)
         .iter()
         .filter_map(|&name| {
@@ -658,7 +663,10 @@ pub fn probe_encoders(
                 gpu_frames: frames.map(|f| f.api()),
             })
         })
-        .collect()
+        .collect();
+    // SAFETY: as above.
+    unsafe { ffi::av_log_set_level(level) };
+    found
 }
 
 /// Opens encoder `name`, taking frames from `gpu_frames` if given, and

@@ -1,0 +1,40 @@
+# Sets up Homebrew with what Nox builds against (GTK, librsvg, codecs,
+# Vulkan loader and MoltenVK, glslang) and FFmpeg from
+# packaging/ffmpeg/build.sh (cached) in ~/ffmpeg.
+name: macOS build environment
+description: Homebrew, FFmpeg and Rust for Nox
+runs:
+  using: composite
+  steps:
+    - name: Homebrew packages
+      shell: bash
+      run: |
+        brew install gtk4 librsvg adwaita-icon-theme gettext glslang pkgconf \
+            x264 x265 dav1d nasm molten-vk vulkan-loader vulkan-headers
+    - name: FFmpeg cache
+      id: ffmpeg
+      uses: actions/cache@v4
+      with:
+        path: ~/ffmpeg
+        key: ffmpeg-macos-${{ runner.arch }}-${{ hashFiles('packaging/ffmpeg/build.sh') }}
+    - name: Build FFmpeg
+      if: steps.ffmpeg.outputs.cache-hit != 'true'
+      shell: bash
+      run: packaging/ffmpeg/build.sh "$HOME/ffmpeg"
+    - name: Environment
+      shell: bash
+      run: |
+        {
+          echo "PKG_CONFIG_PATH=$HOME/ffmpeg/lib/pkgconfig"
+          echo "GETTEXT_DIR=$(brew --prefix gettext)"
+          # Our FFmpeg before any other on the link path.
+          echo "RUSTFLAGS=-L native=$HOME/ffmpeg/lib"
+        } >> "$GITHUB_ENV"
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2
+      with:
+        # FFmpeg's version too: cargo doesn't regenerate its bindings when
+        # only the headers change.
+        key: ${{ hashFiles('packaging/ffmpeg/build.sh') }}

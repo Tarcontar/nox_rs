@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/io/github/nox/Nox">
+  <gresource prefix="/io/github/feliwir/Nox">
     <file>style.css</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/window.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/viewer.ui</file>
@@ -28,5 +28,9 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/nox-overwrite-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/nox-ripple-delete-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/nox-snapping-symbolic.svg</file>
+    <!-- The app icon, for running uninstalled (installs put data/icons in
+         the icon theme). -->
+    <file alias="icons/scalable/apps/io.github.feliwir.Nox.svg" preprocess="xml-stripblanks">../../../data/icons/hicolor/scalable/apps/io.github.feliwir.Nox.svg</file>
+    <file alias="icons/symbolic/apps/io.github.feliwir.Nox-symbolic.svg" preprocess="xml-stripblanks">../../../data/icons/hicolor/symbolic/apps/io.github.feliwir.Nox-symbolic.svg</file>
   </gresource>
 </gresources>

@@ -16,7 +16,7 @@ mod imp {
     use std::cell::{Cell, OnceCell};
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/inspector.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/inspector.ui")]
     pub struct Inspector {
         #[template_child]
         pub pages: TemplateChild<gtk::Stack>,

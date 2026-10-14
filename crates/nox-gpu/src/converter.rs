@@ -130,7 +130,8 @@ pub struct VkPlane {
 pub struct ImageSync {
     pub image: vk::Image,
     pub layout: vk::ImageLayout,
-    pub access: vk::AccessFlags,
+    /// The last access, as synchronization2 flags.
+    pub access: vk::AccessFlags2,
     pub queue_family: u32,
     /// Timeline semaphore.
     pub semaphore: vk::Semaphore,
@@ -716,9 +717,7 @@ impl Converter {
                             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                         )
                         .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                        .src_access_mask(vk::AccessFlags2::from_raw(u64::from(
-                            sync.access.as_raw(),
-                        )))
+                        .src_access_mask(sync.access)
                         .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                         .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
                         .src_queue_family_index(src_family)
@@ -838,7 +837,7 @@ impl Converter {
                     // orders the next user. (SHADER_READ here would end up
                     // as the source access of FFmpeg's next barrier, which
                     // is invalid on its transfer queue.)
-                    sync.access = vk::AccessFlags::NONE;
+                    sync.access = vk::AccessFlags2::NONE;
                     sync.queue_family = dst_family;
                     sync.value += 1;
                 }

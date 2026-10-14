@@ -1,0 +1,17 @@
+# Builds the Linux build environment (packaging/linux/Dockerfile) as the
+# local image nox-build-linux, with its layers cached between runs (the
+# FFmpeg build takes a few minutes).
+name: Linux build environment
+description: Build the nox-build-linux image
+runs:
+  using: composite
+  steps:
+    - uses: docker/setup-buildx-action@v3
+    - uses: docker/build-push-action@v6
+      with:
+        context: packaging
+        file: packaging/linux/Dockerfile
+        tags: nox-build-linux
+        load: true
+        cache-from: type=gha,scope=nox-build-linux
+        cache-to: type=gha,mode=max,scope=nox-build-linux

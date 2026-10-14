@@ -26,7 +26,7 @@ mod imp {
     use std::cell::{Cell, RefCell};
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/track-header.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/track-header.ui")]
     pub struct TrackHeader {
         #[template_child]
         pub name: TemplateChild<gtk::Label>,

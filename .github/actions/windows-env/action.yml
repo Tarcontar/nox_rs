@@ -1,0 +1,51 @@
+# Sets up MSYS2 with what Nox builds against (GTK, librsvg, codecs, LLVM
+# for bindgen, glslang) and FFmpeg from packaging/ffmpeg/build.sh (cached),
+# and Rust for the matching gnullvm target. Run the build steps with
+# `shell: msys2 {0}`.
+name: Windows build environment
+description: MSYS2 (CLANG64 or CLANGARM64), FFmpeg and Rust for Nox
+inputs:
+  msystem:
+    description: CLANG64 (x64) or CLANGARM64 (arm64)
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: ${{ inputs.msystem }}
+        update: true
+        path-type: inherit
+        install: git make curl diffutils
+        pacboy: >-
+          toolchain:p clang:p pkgconf:p gtk4:p librsvg:p adwaita-icon-theme:p
+          gettext:p glslang:p x264:p x265:p dav1d:p vulkan-headers:p
+    - name: NASM (FFmpeg's x86 assembly)
+      if: inputs.msystem == 'CLANG64'
+      shell: msys2 {0}
+      run: pacman -S --noconfirm --needed mingw-w64-clang-x86_64-nasm
+    - name: FFmpeg cache
+      id: ffmpeg
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/ffmpeg
+        key: ffmpeg-${{ inputs.msystem }}-${{ hashFiles('packaging/ffmpeg/build.sh') }}
+    - name: Build FFmpeg
+      if: steps.ffmpeg.outputs.cache-hit != 'true'
+      shell: msys2 {0}
+      run: packaging/ffmpeg/build.sh "$(cygpath -u '${{ runner.temp }}')/ffmpeg"
+    - name: Install FFmpeg into the MSYS2 prefix
+      shell: msys2 {0}
+      run: cp -r "$(cygpath -u '${{ runner.temp }}')/ffmpeg/." "$MSYSTEM_PREFIX/"
+    - name: Rust
+      shell: pwsh
+      run: |
+        $triple = if ("${{ inputs.msystem }}" -eq "CLANGARM64") { "aarch64-pc-windows-gnullvm" } else { "x86_64-pc-windows-gnullvm" }
+        rustup set default-host $triple
+        rustup toolchain install stable --profile minimal --component clippy
+        rustup default stable
+        $upper = $triple.ToUpper().Replace("-", "_")
+        "CARGO_TARGET_${upper}_LINKER=clang" >> $env:GITHUB_ENV
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.msystem }}-${{ hashFiles('packaging/ffmpeg/build.sh') }}

@@ -9,7 +9,6 @@
 //! finish before returning, so the other API may read right after.
 
 use ash::vk;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use crate::{Error, GpuDevice, Result, YuvTarget};
@@ -75,14 +74,46 @@ pub enum MemoryHandle {
     /// A POSIX file descriptor of the driver's own kind (CUDA imports
     /// these on Linux).
     OpaqueFd,
+    /// A Windows NT handle of the driver's own kind (CUDA imports these on
+    /// Windows).
+    OpaqueWin32,
 }
 
 impl MemoryHandle {
+    /// The driver-specific kind this platform's APIs import, if any (none
+    /// on macOS).
+    pub fn native() -> Option<Self> {
+        if cfg!(windows) {
+            Some(Self::OpaqueWin32)
+        } else if cfg!(unix) && !cfg!(target_os = "macos") {
+            Some(Self::OpaqueFd)
+        } else {
+            None
+        }
+    }
+
     fn vk(self) -> vk::ExternalMemoryHandleTypeFlags {
         match self {
             Self::OpaqueFd => vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
+            Self::OpaqueWin32 => vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32,
         }
     }
+
+    /// The device extension that exports it.
+    fn extension(self) -> &'static std::ffi::CStr {
+        match self {
+            Self::OpaqueFd => ash::khr::external_memory_fd::NAME,
+            Self::OpaqueWin32 => ash::khr::external_memory_win32::NAME,
+        }
+    }
+}
+
+/// Memory exported from a `SharedBuffer`, for the importing API.
+pub enum ExportedMemory {
+    #[cfg(unix)]
+    Fd(std::os::fd::OwnedFd),
+    #[cfg(windows)]
+    Win32(std::os::windows::io::OwnedHandle),
 }
 
 /// A device-local buffer in memory another API can import.
@@ -101,10 +132,11 @@ unsafe impl Send for SharedBuffer {}
 impl SharedBuffer {
     /// A buffer of at least `size` bytes, exportable as `handle`.
     pub fn new(gpu: &Arc<GpuDevice>, size: u64, handle: MemoryHandle) -> Result<Self> {
-        if !gpu.has_extension(ash::khr::external_memory_fd::NAME) {
-            return Err(Error::Unsupported(
-                "the device can't export memory (VK_KHR_external_memory_fd)".into(),
-            ));
+        if !gpu.has_extension(handle.extension()) {
+            return Err(Error::Unsupported(format!(
+                "the device can't export memory ({})",
+                handle.extension().to_string_lossy()
+            )));
         }
         let device = &gpu.device;
         // SAFETY: valid create infos; the objects are owned by the returned
@@ -163,21 +195,50 @@ impl SharedBuffer {
         self.size
     }
 
-    /// A new file descriptor of the memory, for the importing API (which
-    /// usually takes ownership of it).
-    pub fn export_fd(&self) -> Result<OwnedFd> {
-        let loader =
-            ash::khr::external_memory_fd::Device::new(&self.gpu.instance, &self.gpu.device);
-        // SAFETY: memory allocated exportable as this handle type.
-        let fd = unsafe {
-            loader.get_memory_fd(
-                &vk::MemoryGetFdInfoKHR::default()
-                    .memory(self.memory)
-                    .handle_type(self.handle.vk()),
-            )?
-        };
-        // SAFETY: a fresh descriptor we own.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    /// A new handle of the memory, for the importing API.
+    pub fn export(&self) -> Result<ExportedMemory> {
+        match self.handle {
+            #[cfg(unix)]
+            MemoryHandle::OpaqueFd => {
+                use std::os::fd::{FromRawFd, OwnedFd};
+                let loader =
+                    ash::khr::external_memory_fd::Device::new(&self.gpu.instance, &self.gpu.device);
+                // SAFETY: memory allocated exportable as this handle type.
+                let fd = unsafe {
+                    loader.get_memory_fd(
+                        &vk::MemoryGetFdInfoKHR::default()
+                            .memory(self.memory)
+                            .handle_type(self.handle.vk()),
+                    )?
+                };
+                // SAFETY: a fresh descriptor we own.
+                Ok(ExportedMemory::Fd(unsafe { OwnedFd::from_raw_fd(fd) }))
+            }
+            #[cfg(windows)]
+            MemoryHandle::OpaqueWin32 => {
+                use std::os::windows::io::{FromRawHandle, OwnedHandle};
+                let loader = ash::khr::external_memory_win32::Device::new(
+                    &self.gpu.instance,
+                    &self.gpu.device,
+                );
+                // SAFETY: memory allocated exportable as this handle type.
+                let handle = unsafe {
+                    loader.get_memory_win32_handle(
+                        &vk::MemoryGetWin32HandleInfoKHR::default()
+                            .memory(self.memory)
+                            .handle_type(self.handle.vk()),
+                    )?
+                };
+                // SAFETY: a fresh NT handle we own.
+                Ok(ExportedMemory::Win32(unsafe {
+                    OwnedHandle::from_raw_handle(handle as *mut std::ffi::c_void)
+                }))
+            }
+            #[allow(unreachable_patterns)]
+            other => Err(Error::Unsupported(format!(
+                "{other:?} memory handles don't exist on this platform"
+            ))),
+        }
     }
 }
 

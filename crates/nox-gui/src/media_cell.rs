@@ -11,7 +11,7 @@ mod imp {
     use std::cell::RefCell;
 
     #[derive(Default, CompositeTemplate, glib::Properties)]
-    #[template(resource = "/io/github/nox/Nox/ui/media-cell.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/media-cell.ui")]
     #[properties(wrapper_type = super::MediaCell)]
     pub struct MediaCell {
         #[template_child]

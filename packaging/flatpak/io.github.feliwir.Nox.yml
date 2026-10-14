@@ -1,0 +1,131 @@
+# Flatpak build of Nox.
+#
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#       build/flatpak packaging/flatpak/io.github.feliwir.Nox.yml
+#
+# FFmpeg is built here, with x264, x265 (8 and 10 bit), NVENC, Vulkan and
+# VAAPI. The runtime's codecs-extra FFmpeg would do, but its NVENC needs
+# NVIDIA's driver 610 or newer (nv-codec-headers 13.1); ours uses
+# nv-codec-headers 13.0 (driver 570 or newer). Crates are vendored from
+# cargo-sources.json (`cargo xtask flatpak-sources` after dependency
+# changes), as builds have no network.
+id: io.github.feliwir.Nox
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang, for bindgen (FFmpeg's bindings).
+  - org.freedesktop.Sdk.Extension.llvm22
+command: nox
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  # Vulkan, and CUDA for NVENC, which needs /dev/nvidia-uvm besides the
+  # devices --device=dri covers.
+  - --device=all
+  # Projects refer to media files by path, anywhere.
+  - --filesystem=host
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm22/lib
+  env:
+    CARGO_HOME: /run/build/nox/cargo
+    CARGO_NET_OFFLINE: 'true'
+    CARGO_TARGET_DIR: /run/build/nox/target
+    LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
+    # Our FFmpeg in /app before the SDK's, for its headers (pkg-config) and
+    # for linking: alsa-sys puts the SDK's library directory on the link
+    # path, where the SDK's FFmpeg would be found first.
+    PKG_CONFIG_PATH: /app/lib/pkgconfig:/app/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+    RUSTFLAGS: -L native=/app/lib
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/ffmpeg
+  - '*.a'
+modules:
+  - name: x264
+    config-opts:
+      - --enable-shared
+      - --enable-pic
+      - --disable-cli
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/x264.git
+        commit: b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+
+  # One library for 8- and 10-bit (HDR) encoding: the 10-bit build is linked
+  # into the 8-bit one.
+  - name: x265
+    buildsystem: simple
+    build-commands:
+      - cmake -S source -B build-10 -G Ninja -DCMAKE_BUILD_TYPE=Release
+        -DHIGH_BIT_DEPTH=ON -DEXPORT_C_API=OFF -DENABLE_SHARED=OFF -DENABLE_CLI=OFF
+        -DENABLE_PIC=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+      - ninja -C build-10
+      - mkdir -p build-8 && cp build-10/libx265.a build-8/libx265_main10.a
+      - cmake -S source -B build-8 -G Ninja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_PREFIX=/app -DCMAKE_INSTALL_LIBDIR=lib
+        -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L. -DLINKED_10BIT=ON
+        -DENABLE_SHARED=ON -DENABLE_CLI=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+      - ninja -C build-8 install
+    sources:
+      - type: archive
+        url: https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz
+        sha256: 40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210
+
+  - name: nv-codec-headers
+    buildsystem: simple
+    build-commands:
+      - make install PREFIX=/app
+    sources:
+      - type: git
+        url: https://github.com/FFmpeg/nv-codec-headers.git
+        tag: n13.0.19.1
+        commit: 88fee5c37318c991a8762d423530f91681e32e3a
+
+  - name: ffmpeg
+    config-opts:
+      - --enable-shared
+      - --disable-static
+      - --disable-programs
+      - --disable-doc
+      - --enable-gpl
+      - --enable-libx264
+      - --enable-libx265
+      - --enable-libdav1d
+      - --enable-ffnvcodec
+      - --enable-nvenc
+      - --enable-nvdec
+      - --enable-vulkan
+      - --enable-vaapi
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+        sha256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+
+  - name: nox
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked --package nox-gui --package nox-cli
+      # Fail if the programs linked another FFmpeg than ours (whose headers
+      # the bindings came from).
+      - |
+        linked=$(objdump -p $CARGO_TARGET_DIR/release/nox | grep NEEDED | grep -o 'libavcodec\.so\.[0-9]*')
+        ours=$(objdump -p /app/lib/libavcodec.so | grep SONAME | grep -o 'libavcodec\.so\.[0-9]*')
+        echo "FFmpeg linked $linked, built $ours"
+        test "$linked" = "$ours"
+      - cargo run --locked --package xtask -- install --prefix /app --no-build
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build
+          - .git
+          - .claude
+          - vcpkg_installed
+      - cargo-sources.json

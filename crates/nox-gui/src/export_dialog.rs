@@ -105,7 +105,7 @@ mod imp {
     use std::cell::{Cell, OnceCell, RefCell};
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/export-dialog.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/export-dialog.ui")]
     pub struct ExportDialog {
         #[template_child]
         pub settings: TemplateChild<gtk::Grid>,

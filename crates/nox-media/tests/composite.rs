@@ -225,22 +225,26 @@ fn single_layer_matches_plain_conversion() {
         assert!(max <= 1, "frame {index}: max difference {max}");
     }
 
-    if let Err(err) = compositor.enable_dmabuf(&[
-        (nox_gpu::FOURCC_ABGR16161616F, 0),
-        (nox_gpu::FOURCC_ABGR8888, 0),
-    ]) {
-        eprintln!("skipping DMA-BUF part: {err}");
-        return;
+    // DMA-BUF is Linux only.
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(err) = compositor.enable_dmabuf(&[
+            (nox_gpu::FOURCC_ABGR16161616F, 0),
+            (nox_gpu::FOURCC_ABGR8888, 0),
+        ]) {
+            eprintln!("skipping DMA-BUF part: {err}");
+            return;
+        }
+        compositor.begin(w, h).unwrap();
+        let frame = decoder.frame_at(2).unwrap();
+        nox_media::with_gpu_input(&frame, |input| {
+            compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), LayerStyle::default())
+        })
+        .unwrap()
+        .unwrap();
+        let exported = compositor.finish_dmabuf().unwrap();
+        assert_eq!((exported.width, exported.height), (w, h));
     }
-    compositor.begin(w, h).unwrap();
-    let frame = decoder.frame_at(2).unwrap();
-    nox_media::with_gpu_input(&frame, |input| {
-        compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), LayerStyle::default())
-    })
-    .unwrap()
-    .unwrap();
-    let exported = compositor.finish_dmabuf().unwrap();
-    assert_eq!((exported.width, exported.height), (w, h));
 }
 
 /// Scopes of solid colours land where the BT.709 signal says: gray on one

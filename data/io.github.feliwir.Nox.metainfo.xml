@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.feliwir.Nox</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Nox</name>
+  <summary>Edit videos with GPU compositing and HDR export</summary>
+  <summary xml:lang="de">Videos bearbeiten, mit GPU-Compositing und HDR-Export</summary>
+  <developer id="io.github.feliwir">
+    <name>Stephan Vedder</name>
+  </developer>
+  <description>
+    <p>
+      Nox is a video editor for GNOME. Clips are decoded, composited and
+      graded on the GPU with Vulkan, and exports go straight from the GPU
+      to hardware encoders.
+    </p>
+    <p xml:lang="de">
+      Nox ist ein Videoeditor für GNOME. Clips werden mit Vulkan auf der GPU
+      dekodiert, zusammengesetzt und farbkorrigiert, und Exporte gehen direkt
+      von der GPU zu Hardware-Encodern.
+    </p>
+    <ul>
+      <li>Multi-track timeline with transitions, fades, speed changes and keyframes</li>
+      <li xml:lang="de">Timeline mit mehreren Spuren, Übergängen, Blenden, Geschwindigkeit und Keyframes</li>
+      <li>Color grading with color wheels and scopes</li>
+      <li xml:lang="de">Farbkorrektur mit Farbrädern und Scopes</li>
+      <li>SDR, HDR10 and HLG export in H.264, HEVC and ProRes</li>
+      <li xml:lang="de">Export in SDR, HDR10 und HLG als H.264, HEVC und ProRes</li>
+      <li>Hardware encoding with Vulkan Video and NVENC</li>
+      <li xml:lang="de">Hardware-Kodierung mit Vulkan Video und NVENC</li>
+      <li>Projects in the open OpenTimelineIO format</li>
+      <li xml:lang="de">Projekte im offenen Format OpenTimelineIO</li>
+    </ul>
+  </description>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+    <category>AudioVideoEditing</category>
+  </categories>
+  <launchable type="desktop-id">io.github.feliwir.Nox.desktop</launchable>
+  <icon type="stock">io.github.feliwir.Nox</icon>
+  <url type="homepage">https://github.com/feliwir/nox_rs</url>
+  <url type="bugtracker">https://github.com/feliwir/nox_rs/issues</url>
+  <url type="vcs-browser">https://github.com/feliwir/nox_rs</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Editing a timeline</caption>
+      <image>https://raw.githubusercontent.com/feliwir/nox_rs/HEAD/data/screenshots/edit.png</image>
+    </screenshot>
+  </screenshots>
+  <branding>
+    <color type="primary" scheme_preference="light">#9a9cd9</color>
+    <color type="primary" scheme_preference="dark">#24265e</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+  <provides>
+    <binary>nox</binary>
+    <mediatype>application/x-opentimelineio</mediatype>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-10-14">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

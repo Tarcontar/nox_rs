@@ -250,7 +250,7 @@ mod panel {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/scopes-panel.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/scopes-panel.ui")]
     pub struct ScopesPanel {
         #[template_child]
         pub waveform: TemplateChild<ScopeView>,

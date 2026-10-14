@@ -3,7 +3,6 @@
 
 use gtk::{CompositeTemplate, gdk, glib, prelude::*, subclass::prelude::*};
 use nox_engine::{FrameImage, RenderedFrame};
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use crate::i18n::gettext;
@@ -12,7 +11,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/viewer.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/viewer.ui")]
     pub struct Viewer {
         #[template_child]
         pub picture: TemplateChild<gtk::Picture>,
@@ -98,7 +97,12 @@ impl Viewer {
                 .set_stride(image.stride)
                 .set_color_state(&gdk::ColorState::srgb())
                 .build(),
+            // Only Linux has DMA-BUF; elsewhere no such frame exists.
+            #[cfg(not(target_os = "linux"))]
+            FrameImage::Dmabuf(frame) => match frame.fd {},
+            #[cfg(target_os = "linux")]
             FrameImage::Dmabuf(frame) => {
+                use std::os::fd::AsRawFd;
                 let builder = gdk::DmabufTextureBuilder::new()
                     .set_display(&imp.picture.display())
                     .set_width(frame.width)

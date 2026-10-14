@@ -159,7 +159,7 @@ fn menu_model(id: &str) -> gtk::gio::MenuModel {
     let builder = gtk::Builder::new();
     builder.set_translation_domain(Some(crate::i18n::DOMAIN));
     builder
-        .add_from_resource("/io/github/nox/Nox/ui/menus.ui")
+        .add_from_resource("/io/github/feliwir/Nox/ui/menus.ui")
         .expect("menus.ui is valid");
     builder
         .object(id)
@@ -172,7 +172,7 @@ pub(crate) fn track_menus() -> (gio::MenuModel, gio::MenuModel) {
     let builder = gtk::Builder::new();
     builder.set_translation_domain(Some(crate::i18n::DOMAIN));
     builder
-        .add_from_resource("/io/github/nox/Nox/ui/menus.ui")
+        .add_from_resource("/io/github/feliwir/Nox/ui/menus.ui")
         .expect("menus.ui is valid");
     (
         builder
@@ -3163,7 +3163,7 @@ pub(crate) fn rename_dialog() -> gtk::Builder {
     let builder = gtk::Builder::new();
     builder.set_translation_domain(Some(crate::i18n::DOMAIN));
     builder
-        .add_from_resource("/io/github/nox/Nox/ui/rename-track.ui")
+        .add_from_resource("/io/github/feliwir/Nox/ui/rename-track.ui")
         .expect("rename-track.ui is valid");
     builder
 }

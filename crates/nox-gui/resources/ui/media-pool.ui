@@ -67,7 +67,7 @@
                     <property name="enable-rubberband">false</property>
                     <property name="factory">
                       <object class="GtkBuilderListItemFactory">
-                        <property name="resource">/io/github/nox/Nox/ui/media-pool-item.ui</property>
+                        <property name="resource">/io/github/feliwir/Nox/ui/media-pool-item.ui</property>
                       </object>
                     </property>
                   </object>

@@ -18,9 +18,10 @@ pub use converter::{
     Converter, CpuFrame, ImageSync, Input, Layout, Plane, PlaneFormat, VkFrame, VkPlane,
 };
 pub use device::{ExternalDevice, GpuDevice, QueueLock};
-pub use export::{DmabufFormat, DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F};
+pub use export::{DmabufFd, DmabufFormat, DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F};
 pub use interop::{
-    BufferTarget, FrameLight, GpuTarget, LinearFormat, LinearLayout, MemoryHandle, SharedBuffer,
+    BufferTarget, ExportedMemory, FrameLight, GpuTarget, LinearFormat, LinearLayout, MemoryHandle,
+    SharedBuffer,
 };
 pub use scopes::ScopeImages;
 /// Sizes of the scope images.

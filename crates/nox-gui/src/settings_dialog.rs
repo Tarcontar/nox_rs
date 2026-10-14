@@ -39,7 +39,7 @@ mod imp {
     use std::cell::OnceCell;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/project-settings.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/project-settings.ui")]
     pub struct ProjectSettings {
         #[template_child]
         pub stack: TemplateChild<gtk::Stack>,

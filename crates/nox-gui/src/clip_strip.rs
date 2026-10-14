@@ -55,7 +55,7 @@ mod imp {
     use std::cell::{Cell, OnceCell};
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/clip-strip.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/clip-strip.ui")]
     pub struct ClipStrip {
         #[template_child]
         pub stack: TemplateChild<gtk::Stack>,

@@ -1,3 +1,5 @@
+// No console window for release builds on Windows.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod clip_strip;
 mod color_wheels;
 mod export_dialog;
@@ -22,7 +24,7 @@ mod window;
 
 use gtk::{gdk, gio, glib, prelude::*};
 
-const APP_ID: &str = "io.github.nox.Nox";
+const APP_ID: &str = "io.github.feliwir.Nox";
 
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
@@ -42,14 +44,24 @@ fn main() -> glib::ExitCode {
         .build();
     app.connect_startup(|_| {
         if let Some(settings) = gtk::Settings::default() {
-            settings.set_gtk_application_prefer_dark_theme(true);
+            // GTK 4.20 replaced the dark-theme preference with a color
+            // scheme (GtkInterfaceColorScheme); older GTKs (e.g. Debian 13's
+            // 4.18) only have the former.
+            let dark = glib::Type::from_name("GtkInterfaceColorScheme")
+                .and_then(glib::EnumClass::with_type)
+                .and_then(|class| class.to_value_by_nick("dark"));
+            match dark {
+                Some(dark) => settings.set_property("gtk-interface-color-scheme", dark),
+                None => settings.set_gtk_application_prefer_dark_theme(true),
+            }
         }
-        // The app's own symbolic icons (timeline tools), also when run
-        // with another app id.
+        // The app's own icons (timeline tools, the app icon), also when run
+        // uninstalled or with another app id.
         gtk::IconTheme::for_display(&gdk::Display::default().expect("no display"))
-            .add_resource_path("/io/github/nox/Nox/icons");
+            .add_resource_path("/io/github/feliwir/Nox/icons");
+        gtk::Window::set_default_icon_name(APP_ID);
         let provider = gtk::CssProvider::new();
-        provider.load_from_resource("/io/github/nox/Nox/style.css");
+        provider.load_from_resource("/io/github/feliwir/Nox/style.css");
         gtk::style_context_add_provider_for_display(
             &gdk::Display::default().expect("no display"),
             &provider,

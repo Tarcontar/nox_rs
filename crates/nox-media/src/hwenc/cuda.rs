@@ -9,10 +9,10 @@
 use ffmpeg::{ffi, format, frame};
 use libloading::Library;
 use nox_gpu::{
-    BufferTarget, GpuDevice, GpuTarget, LinearFormat, LinearLayout, MemoryHandle, SharedBuffer,
+    BufferTarget, ExportedMemory, GpuDevice, GpuTarget, LinearFormat, LinearLayout, MemoryHandle,
+    SharedBuffer,
 };
 use std::ffi::{CString, c_void};
-use std::os::fd::IntoRawFd;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -31,7 +31,10 @@ type CuContext = *mut c_void;
 type CuDevicePtr = u64;
 type CuExternalMemory = *mut c_void;
 
+#[cfg(unix)]
 const CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
+#[cfg(windows)]
+const CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32: u32 = 2;
 /// The memory is a dedicated allocation (as `SharedBuffer`s are).
 const CUDA_EXTERNAL_MEMORY_DEDICATED: u32 = 1;
 
@@ -59,6 +62,13 @@ struct ExternalMemoryBufferDesc {
     flags: u32,
     reserved: [u32; 16],
 }
+
+/// The CUDA driver library.
+const LIBRARY: &str = if cfg!(windows) {
+    "nvcuda.dll"
+} else {
+    "libcuda.so.1"
+};
 
 /// The CUDA driver API functions Nox uses.
 struct Cuda {
@@ -93,8 +103,7 @@ impl Cuda {
         // SAFETY: libcuda's initializers have no preconditions; the symbols
         // have the signatures of the CUDA driver API (cuda.h).
         unsafe {
-            let library =
-                Library::new("libcuda.so.1").map_err(|err| format!("no CUDA driver ({err})"))?;
+            let library = Library::new(LIBRARY).map_err(|err| format!("no CUDA driver ({err})"))?;
             macro_rules! symbol {
                 ($name:literal) => {
                     *library
@@ -225,25 +234,49 @@ unsafe impl Sync for Slot {}
 impl Slot {
     fn new(gpu: &Arc<GpuDevice>, device: &Arc<CudaDevice>, size: u64) -> Result<Self> {
         let cuda = Cuda::get()?;
-        let buffer = SharedBuffer::new(gpu, size, MemoryHandle::OpaqueFd)?;
-        let fd = buffer.export_fd()?;
+        let handle = MemoryHandle::native()
+            .ok_or_else(|| Error::Encode("no memory sharing with CUDA here".into()))?;
+        let buffer = SharedBuffer::new(gpu, size, handle)?;
+        let exported = buffer.export()?;
         device.with(cuda, || {
+            let (kind, handle) = match &exported {
+                // CUDA takes the descriptor on success (closed below if not).
+                #[cfg(unix)]
+                ExportedMemory::Fd(fd) => (
+                    CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+                    ExternalMemoryHandle {
+                        fd: std::os::fd::AsRawFd::as_raw_fd(fd),
+                    },
+                ),
+                // CUDA doesn't take NT handles: ours is closed when
+                // `exported` drops.
+                #[cfg(windows)]
+                ExportedMemory::Win32(owned) => (
+                    CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32,
+                    ExternalMemoryHandle {
+                        win32: [
+                            std::os::windows::io::AsRawHandle::as_raw_handle(owned).cast_const(),
+                            ptr::null(),
+                        ],
+                    },
+                ),
+            };
             let desc = ExternalMemoryHandleDesc {
-                kind: CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
-                handle: ExternalMemoryHandle {
-                    fd: fd.into_raw_fd(),
-                },
+                kind,
+                handle,
                 size: buffer.size(),
                 flags: CUDA_EXTERNAL_MEMORY_DEDICATED,
                 reserved: [0; 16],
             };
             let mut memory = ptr::null_mut();
-            // SAFETY: a valid descriptor; on success CUDA owns the fd.
+            // SAFETY: a valid descriptor of live memory.
             let imported = unsafe { (cuda.import_external_memory)(&mut memory, &desc) };
-            if imported != 0 {
-                // SAFETY: the fd is still ours.
-                unsafe { libc_close(desc.handle.fd) };
-                check(imported, "cuImportExternalMemory")?;
+            check(imported, "cuImportExternalMemory")?;
+            // Imported: a descriptor is CUDA's now.
+            #[cfg(unix)]
+            {
+                let ExportedMemory::Fd(fd) = exported;
+                std::mem::forget(fd);
             }
             let mut pointer = 0;
             let mapping = ExternalMemoryBufferDesc {
@@ -463,14 +496,4 @@ impl GpuFrames for CudaFrames {
         }
         Ok(frame)
     }
-}
-
-/// `close(2)`, without a libc dependency.
-///
-/// # Safety
-/// `fd` must be an open descriptor we own.
-unsafe fn libc_close(fd: i32) {
-    use std::os::fd::{FromRawFd, OwnedFd};
-    // SAFETY: guaranteed by the caller.
-    drop(unsafe { OwnedFd::from_raw_fd(fd) });
 }

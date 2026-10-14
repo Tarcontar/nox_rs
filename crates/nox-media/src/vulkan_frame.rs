@@ -158,7 +158,7 @@ impl Prepared {
                 .map(|i| ImageSync {
                     image: vk::Handle::from_raw(vkf.img[i]),
                     layout: vk::ImageLayout::from_raw(vkf.layout[i]),
-                    access: vk::AccessFlags::from_raw(vkf.access[i] as u32),
+                    access: vkf.access[i].to_flags2(),
                     queue_family: vkf.queue_family[i],
                     semaphore: vk::Handle::from_raw(vkf.sem[i]),
                     value: vkf.sem_value[i],
@@ -167,12 +167,43 @@ impl Prepared {
             let result = f(Input::Vulkan(&mut self.template));
             for (i, sync) in self.template.images.iter().enumerate() {
                 vkf.layout[i] = sync.layout.as_raw();
-                vkf.access[i] = sync.access.as_raw() as i32;
+                vkf.access[i] = AccessField::from_flags2(sync.access);
                 vkf.queue_family[i] = sync.queue_family;
                 vkf.sem_value[i] = sync.value;
             }
             result
         }
+    }
+}
+
+/// `AVVkFrame::access`: `VkAccessFlagBits` (32 bit) up to FFmpeg 8,
+/// `VkAccessFlags2` (64 bit) from FFmpeg 9. Converted by type, so it works
+/// with either, without losing synchronization2's high bits (e.g. video
+/// decode writes, bit 35).
+pub(crate) trait AccessField: Copy {
+    fn to_flags2(self) -> vk::AccessFlags2;
+    fn from_flags2(flags: vk::AccessFlags2) -> Self;
+}
+
+impl AccessField for i32 {
+    fn to_flags2(self) -> vk::AccessFlags2 {
+        // The 32-bit flags are the low bits of their synchronization2 forms.
+        vk::AccessFlags2::from_raw(u64::from(self as u32))
+    }
+
+    fn from_flags2(flags: vk::AccessFlags2) -> Self {
+        // Only the 32-bit range exists in FFmpeg 8's field.
+        flags.as_raw() as u32 as i32
+    }
+}
+
+impl AccessField for u64 {
+    fn to_flags2(self) -> vk::AccessFlags2 {
+        vk::AccessFlags2::from_raw(self)
+    }
+
+    fn from_flags2(flags: vk::AccessFlags2) -> Self {
+        flags.as_raw()
     }
 }
 

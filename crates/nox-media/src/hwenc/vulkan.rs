@@ -6,7 +6,7 @@ use ffmpeg::{ffi, format, frame};
 use nox_gpu::{GpuTarget, ImageSync, PlaneFormat, VkPlane, YuvTarget, vk};
 
 use super::{GpuFrames, Render, ycbcr_matrix};
-use crate::vulkan_frame::FrameLock;
+use crate::vulkan_frame::{AccessField, FrameLock};
 use crate::{Error, HwDevice, Result};
 
 /// The encoder's frames pool: NV12 images, or P010 for HDR.
@@ -180,7 +180,7 @@ unsafe fn render_into(
                 .map(|i| ImageSync {
                     image: vk::Handle::from_raw((*vkf).img[i]),
                     layout: vk::ImageLayout::from_raw((*vkf).layout[i]),
-                    access: vk::AccessFlags::from_raw((*vkf).access[i] as u32),
+                    access: (*vkf).access[i].to_flags2(),
                     queue_family: (*vkf).queue_family[i],
                     semaphore: vk::Handle::from_raw((*vkf).sem[i]),
                     value: (*vkf).sem_value[i],
@@ -191,7 +191,7 @@ unsafe fn render_into(
         let result = render(&mut target);
         for (i, sync) in target.images.iter().enumerate() {
             (*vkf).layout[i] = sync.layout.as_raw();
-            (*vkf).access[i] = sync.access.as_raw() as _;
+            (*vkf).access[i] = AccessField::from_flags2(sync.access);
             (*vkf).queue_family[i] = sync.queue_family;
             (*vkf).sem_value[i] = sync.value;
         }

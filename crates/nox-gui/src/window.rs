@@ -24,7 +24,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/window.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/window.ui")]
     pub struct Window {
         #[template_child]
         pub media_pool: TemplateChild<MediaPool>,

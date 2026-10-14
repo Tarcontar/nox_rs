@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Nox
+GenericName=Video Editor
+GenericName[de]=Videoeditor
+Comment=Edit videos with GPU compositing, color grading and HDR export
+Comment[de]=Videos bearbeiten, mit GPU-Compositing, Farbkorrektur und HDR-Export
+Exec=nox %F
+Icon=io.github.feliwir.Nox
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Video;AudioVideoEditing;GTK;
+Keywords=video;editor;timeline;cut;color;grading;hdr;otio;
+Keywords[de]=Video;Editor;Schnitt;Timeline;Farbkorrektur;HDR;otio;
+MimeType=application/x-opentimelineio;video/mp4;video/quicktime;video/x-matroska;video/webm;

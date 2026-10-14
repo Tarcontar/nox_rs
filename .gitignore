@@ -1,3 +1,7 @@
 /target
 /vcpkg_installed
 /build
+/.flatpak-builder
+/.cargo
+/.claude
+/.ci

@@ -12,7 +12,7 @@ mod imp {
     use super::*;
 
     #[derive(CompositeTemplate)]
-    #[template(resource = "/io/github/nox/Nox/ui/media-pool.ui")]
+    #[template(resource = "/io/github/feliwir/Nox/ui/media-pool.ui")]
     pub struct MediaPool {
         #[template_child]
         pub stack: TemplateChild<gtk::Stack>,

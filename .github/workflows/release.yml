@@ -1,0 +1,133 @@
+# Builds the packages: on a version tag (v1.2.3) into a draft GitHub
+# release with checksums, or by hand (Actions → Release → Run workflow)
+# as workflow artifacts only.
+#
+# - Linux: self-contained ZIP (xtask dist, in the Debian 13 environment)
+# - Flatpak: single-file bundle (.flatpak)
+# - Windows x64 and ARM64: self-contained ZIP and installer (MSYS2)
+# - macOS ARM64: Nox.app in a ZIP (Homebrew), signed ad hoc
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-zip:
+    name: Linux ZIP
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/linux-env
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .ci/cargo-home/registry
+            target/debian13
+          key: linux-dist-${{ hashFiles('Cargo.lock', 'packaging/ffmpeg/build.sh') }}
+          restore-keys: linux-dist-
+      - run: .github/scripts/in-linux-env.sh cargo run --locked --package xtask -- dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-zip
+          path: target/debian13/dist/*.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2022
+            msystem: CLANG64
+          - arch: arm64
+            runner: windows-11-arm
+            msystem: CLANGARM64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/windows-env
+        with:
+          msystem: ${{ matrix.msystem }}
+      - name: Package
+        shell: msys2 {0}
+        run: cargo run --locked --package xtask -- dist
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://jrsoftware.org/download.php/is.exe -OutFile is.exe
+          Start-Process .\is.exe -Wait -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER',"/DIR=$env:RUNNER_TEMP\inno"
+      - name: Installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          & "$env:RUNNER_TEMP\inno\ISCC.exe" "/DVersion=$version" "/DArch=${{ matrix.arch }}" `
+            "/DSource=$PWD\target\dist\nox-$version-windows-${{ matrix.arch }}" `
+            "/DOutput=$PWD\target\dist" packaging\windows\nox.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            target/dist/*.zip
+            target/dist/*-setup.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/macos-env
+      - run: cargo run --locked --package xtask -- dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: target/dist/*.zip
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak bundle
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v5
+      - name: Bundle name
+        id: name
+        run: echo "bundle=nox-${GITHUB_REF_NAME#v}-linux-x86_64.flatpak" >> "$GITHUB_OUTPUT"
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+        with:
+          manifest-path: packaging/flatpak/io.github.feliwir.Nox.yml
+          bundle: ${{ steps.name.outputs.bundle }}
+          cache-key: flatpak-builder-${{ hashFiles('packaging/flatpak/*') }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: ${{ steps.name.outputs.bundle }}
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux-zip, flatpak, windows, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Checksums
+        working-directory: packages
+        run: sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: packages/*

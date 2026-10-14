@@ -1307,9 +1307,7 @@ impl Compositor {
                         let (src, dst) = queue_transfer(sync.queue_family, own);
                         image_barrier(sync.image, sync.layout, vk::ImageLayout::GENERAL)
                             .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                            .src_access_mask(vk::AccessFlags2::from_raw(u64::from(
-                                sync.access.as_raw(),
-                            )))
+                            .src_access_mask(sync.access)
                             .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                             .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
                             .src_queue_family_index(src)
@@ -1539,7 +1537,7 @@ impl Compositor {
                 for sync in &mut target.images {
                     let (_, dst) = queue_transfer(sync.queue_family, gpu.queue_family);
                     sync.layout = vk::ImageLayout::GENERAL;
-                    sync.access = vk::AccessFlags::NONE;
+                    sync.access = vk::AccessFlags2::NONE;
                     sync.queue_family = dst;
                     sync.value += 1;
                 }

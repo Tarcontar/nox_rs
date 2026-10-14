@@ -371,14 +371,20 @@ fn importable_formats() -> Vec<(u32, u64)> {
         tracing::info!("NOX_PRESENT=readback: not using DMA-BUF");
         return Vec::new();
     }
-    let Some(display) = gdk::Display::default() else {
-        return Vec::new();
-    };
-    let formats = display.dmabuf_formats();
-    (0..formats.n_formats())
-        .map(|i| formats.format(i))
-        .filter(|&(fourcc, _)| {
-            fourcc == nox_engine::FOURCC_ABGR16161616F || fourcc == nox_engine::FOURCC_ABGR8888
-        })
-        .collect()
+    // Only Linux has DMA-BUF (and GTK's import of it).
+    #[cfg(target_os = "linux")]
+    {
+        let Some(display) = gdk::Display::default() else {
+            return Vec::new();
+        };
+        let formats = display.dmabuf_formats();
+        (0..formats.n_formats())
+            .map(|i| formats.format(i))
+            .filter(|&(fourcc, _)| {
+                fourcc == nox_engine::FOURCC_ABGR16161616F || fourcc == nox_engine::FOURCC_ABGR8888
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    Vec::new()
 }

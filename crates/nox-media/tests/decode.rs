@@ -344,6 +344,7 @@ fn still_image_any_index() {
 
 /// DMA-BUF export: with the linear modifier the buffer can be mapped, so
 /// the exported pixels can be compared with the readback path.
+#[cfg(target_os = "linux")]
 #[test]
 fn dmabuf_export_matches_readback() {
     use std::os::fd::AsRawFd;
@@ -467,6 +468,7 @@ fn vulkan_zero_copy_matches_download() {
 /// DMA-BUF frames, with the consumer holding the last few frames (as GTK
 /// does). Exercises decoder seeks, frame locking, timeline semaphores and
 /// export-pool reuse.
+#[cfg(target_os = "linux")]
 #[test]
 fn vulkan_zero_copy_dmabuf_stress() {
     let Some((hw, gpu)) = gpu() else { return };

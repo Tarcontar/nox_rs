@@ -1,0 +1,84 @@
+# Checks every push and pull request: formatting, lints and the test suite
+# on Linux (in the Debian 13 build environment, with lavapipe as the
+# Vulkan driver, as runners have no GPU), lints and tests on Windows and
+# macOS (GPU tests skip themselves there), and that the Flatpak builds.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (build, lint, test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build environment
+        uses: ./.github/actions/linux-env
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci/cargo-home/registry
+            target/debian13
+          # FFmpeg's version is in the key: cargo doesn't regenerate its
+          # bindings when only the headers change.
+          key: linux-cargo-${{ hashFiles('Cargo.lock', 'packaging/ffmpeg/build.sh') }}
+          restore-keys: linux-cargo-
+
+      - name: Format
+        run: .github/scripts/in-linux-env.sh cargo fmt --all --check
+
+      - name: Lint
+        run: .github/scripts/in-linux-env.sh cargo clippy --workspace --all-targets --locked
+
+      - name: Test
+        run: .github/scripts/in-linux-env.sh cargo test --workspace --locked -- --test-threads=1
+
+  windows:
+    name: Windows x64 (build, lint, test)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/windows-env
+        with:
+          msystem: CLANG64
+      - name: Lint
+        shell: msys2 {0}
+        run: cargo clippy --workspace --all-targets --locked
+      - name: Test
+        shell: msys2 {0}
+        run: cargo test --workspace --locked -- --test-threads=1
+
+  macos:
+    name: macOS (build, lint, test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/macos-env
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked
+      - name: Test
+        run: cargo test --workspace --locked -- --test-threads=1
+
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v5
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+        with:
+          manifest-path: packaging/flatpak/io.github.feliwir.Nox.yml
+          bundle: nox.flatpak
+          cache-key: flatpak-builder-${{ hashFiles('packaging/flatpak/*') }}
+          upload-artifact: false
