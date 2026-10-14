@@ -92,11 +92,11 @@ fn clip_label(child: &Composable) -> String {
         if item.blend_mode() != nox_project::BlendMode::Normal {
             label += &format!(" · {}", crate::i18n::blend_mode_name(item.blend_mode()));
         }
-        if item.gain() != 1.0 {
-            label += &if item.gain() == 0.0 {
+        if item.volume() != 1.0 {
+            label += &if item.volume() == 0.0 {
                 format!(" · {}", crate::i18n::gettext("muted"))
             } else {
-                format!(" · {:+.0} dB", 20.0 * item.gain().log10())
+                format!(" · {:+.0} dB", 20.0 * item.volume().log10())
             };
         }
     }

@@ -1,7 +1,7 @@
 //! Renders sequence frames: decodes every layer, composites them on the
 //! GPU and hands out the result as DMA-BUF or in system memory.
 
-use nox_gpu::{BlendMode, Compositor, Image, Placement, Rect, YuvTarget};
+use nox_gpu::{BlendMode, Compositor, Image, LayerStyle, Placement, Rect, YuvTarget};
 use nox_media::{HwDevice, VideoDecoder};
 use nox_project::{Time, Timeline};
 use std::path::{Path, PathBuf};
@@ -129,6 +129,8 @@ pub(crate) struct Renderer {
     present_path: Option<PresentPath>,
     /// Files that failed to open, logged once.
     failed: std::collections::HashSet<PathBuf>,
+    /// Measure scopes with every frame.
+    scopes: bool,
 }
 
 impl Renderer {
@@ -156,10 +158,25 @@ impl Renderer {
             readback_reason,
             present_path: None,
             failed: Default::default(),
+            scopes: false,
         }
     }
 
-    /// The video layers of `frame`: file, time in it, opacity, blend mode.
+    /// Measures scopes with every frame rendered from now on (GPU only).
+    pub fn set_scopes(&mut self, enabled: bool) {
+        if self.scopes == enabled {
+            return;
+        }
+        self.scopes = enabled;
+        if let Some((_, compositor)) = &mut self.gpu
+            && let Err(err) = compositor.set_scopes(enabled)
+        {
+            tracing::warn!("no scopes: {err}");
+        }
+    }
+
+    /// The video layers of `frame`: file, time in it, opacity, blend mode,
+    /// grade.
     fn layers(timeline: &Timeline, frame: i64) -> Vec<Layer> {
         let time = Time::from_frames(frame, timeline.frame_rate());
         timeline
@@ -167,7 +184,13 @@ impl Renderer {
             .into_iter()
             .filter_map(|layer| {
                 let path = layer.clip.media_reference()?.path()?;
-                Some((path, layer.file_time(), layer.opacity, layer.blend_mode()))
+                Some((
+                    path,
+                    layer.file_time(),
+                    layer.opacity,
+                    layer.blend_mode(),
+                    layer.clip.item.grade(),
+                ))
             })
             .collect()
     }
@@ -178,7 +201,7 @@ impl Renderer {
         self.decoders.begin_frame();
         let hw = self.gpu.as_ref().map(|(hw, _)| hw.clone());
         let mut cost = 0;
-        for (path, time, _, _) in Self::layers(timeline, frame) {
+        for (path, time, ..) in Self::layers(timeline, frame) {
             if self.failed.contains(&path) {
                 continue;
             }
@@ -203,11 +226,16 @@ impl Renderer {
         let layers = Self::layers(timeline, frame);
         let framing = Framing::of(timeline);
         self.decoders.begin_frame();
-        let image = if self.gpu.is_some() {
+        let (image, scopes) = if self.gpu.is_some() {
             self.compose(&layers, &framing, width, height, quality, stop)?;
-            self.finish()?
+            let image = self.finish()?;
+            let (_, compositor) = self.gpu.as_mut().expect("gpu");
+            (image, compositor.take_scopes().map(Arc::new))
         } else {
-            self.render_cpu(&layers, &framing, width, height, quality, stop)?
+            (
+                self.render_cpu(&layers, &framing, width, height, quality, stop)?,
+                None,
+            )
         };
         let path = match (&image, &self.gpu) {
             (FrameImage::Dmabuf(dmabuf), _) => PresentPath::Dmabuf {
@@ -223,6 +251,7 @@ impl Renderer {
             frame,
             image,
             exact: quality == Quality::Exact,
+            scopes,
         })
     }
 
@@ -270,7 +299,7 @@ impl Renderer {
     ) -> nox_media::Result<()> {
         let (hw, compositor) = self.gpu.as_mut().expect("gpu");
         compositor.begin(width, height)?;
-        for (path, time, opacity, mode) in layers {
+        for (path, time, opacity, mode, grade) in layers {
             if self.failed.contains(path) {
                 continue;
             }
@@ -291,18 +320,22 @@ impl Renderer {
                 }
             };
             let rect = framing.place(nox_media::display_size(&decoded), (width, height));
-            let (opacity, mode) = (*opacity as f32, blend_mode(*mode));
+            let style = LayerStyle {
+                opacity: *opacity as f32,
+                mode: blend_mode(*mode),
+                grade: *grade,
+            };
             if still {
                 // Stills are converted once and kept on the GPU.
                 let key = still_key(path);
-                if !compositor.try_cached_layer(key, rect, opacity, mode) {
+                if !compositor.try_cached_layer(key, rect, style) {
                     nox_media::with_gpu_input(&decoded, |input| {
-                        compositor.add_cached_layer(key, input, rect, opacity, mode)
+                        compositor.add_cached_layer(key, input, rect, style)
                     })??;
                 }
             } else {
                 nox_media::with_gpu_input(&decoded, |input| {
-                    compositor.add_layer(input, rect, opacity, mode)
+                    compositor.add_layer(input, rect, style)
                 })??;
             }
         }
@@ -344,7 +377,7 @@ impl Renderer {
             stride: width as usize * 4,
             data: [0, 0, 0, 255].repeat(width as usize * height as usize),
         };
-        if let Some((path, time, _, _)) = layers.last() {
+        if let Some((path, time, ..)) = layers.last() {
             let (decoder, index) = self.decoders.get(path, *time, None)?;
             let decoded = decode(decoder, index, quality, stop)?;
             let rect = framing.place(nox_media::display_size(&decoded), (width, height));
@@ -420,8 +453,14 @@ fn still_key(path: &Path) -> u64 {
     hasher.finish()
 }
 
-/// A video layer: file, time in it, opacity, blend mode.
-type Layer = (PathBuf, Time, f64, nox_project::BlendMode);
+/// A video layer: file, time in it, opacity, blend mode, grade.
+type Layer = (
+    PathBuf,
+    Time,
+    f64,
+    nox_project::BlendMode,
+    nox_project::Grade,
+);
 
 fn decode(
     decoder: &mut VideoDecoder,

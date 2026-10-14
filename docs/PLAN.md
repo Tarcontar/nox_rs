@@ -24,12 +24,12 @@ What works today:
 - **Projects:** `.otio` files (OpenTimelineIO) open and save, from the header bar or with `nox edit.otio`. Opening a project imports its media into the pool. Unsaved changes are flagged in the title, and closing asks first.
 - **Sequence settings** (main menu): frame rate (23.976–60), drop-frame timecode for 29.97/59.94, adding video and audio tracks.
 - **Viewer:** shows the whole sequence at the playhead, composited on the GPU: every enabled video track, with per-clip opacity and blend mode (normal, add, multiply, screen), dissolves, and sources fitted to the sequence (letterboxed or pillarboxed). It renders at the viewer's size. Scrub by dragging the ruler or empty track space, step frames with ←/→, and jump with Home/End.
-- **Playback:** Space plays and pauses, L plays and K pauses. Audio tracks are mixed (clip gain, equal-power crossfades under dissolves) and played on the default output device, which also serves as the clock. Frames are rendered ahead into a cache, and frames that can't be ready in time are skipped. Scrubbing back over cached frames is instant.
+- **Playback:** Space plays and pauses, L plays and K pauses. Audio tracks are mixed (clip volume, equal-power crossfades under dissolves) and played on the default output device, which also serves as the clock. Frames are rendered ahead into a cache, and frames that can't be ready in time are skipped. Scrubbing back over cached frames is instant.
 - **Edit and Color pages** (header bar, Shift+4 and Shift+6, as in Resolve):
-  - **Edit page:** has an inspector on the right for the selected clip (opacity, blend mode, gain) or dissolve. Dragging a slider makes one undo step.
-  - **Color page:** shows the viewer large, plus a strip of the timeline's video clips that selects a clip and jumps to its start. Scopes and color wheels have their places there but aren't built yet.
+  - **Edit page:** has an inspector on the right for the selected clip (opacity, blend mode, volume) or dissolve. Dragging a slider makes one undo step.
+  - **Color page:** shows the viewer large with live scopes beside it: waveform, RGB parade, vectorscope and histogram of the frame on screen. Below them is a strip of the timeline's video clips that selects a clip and jumps to its start, and the primary wheels (lift, gamma, gain, offset) that grade the selected clip: drag a wheel's puck to shift the color balance, and use its slider for the master value. Grades are undoable and saved with the project.
   - **Viewer:** one viewer moves to whichever page is showing.
-- **Clip menu** (right-click): opacity, blend mode, gain, add dissolve (also Ctrl+T, at the selected clip's edge nearest the playhead), split, delete. Dissolves can be selected and deleted.
+- **Clip menu** (right-click): opacity, blend mode, volume, add dissolve (also Ctrl+T, at the selected clip's edge nearest the playhead), split, delete. Dissolves can be selected and deleted.
 - **Project settings** (Shift+9, Resolve-style: categories in a sidebar, Cancel/Save, one undoable edit): project name; timeline resolution (presets or custom), frame rate and drop-frame timecode; image scaling for mismatched sources (scale to fit, scale with crop, center crop 1:1, stretch). The first clip in an empty sequence sets frame rate and resolution (like Shotcut's "Automatic" video mode).
 - **Export** (Ctrl+E): presets (H.264 master, YouTube/web, HEVC, ProRes 422 HQ, review copy) or custom format, quality, hardware encoding and audio; progress, cancel, Open Folder. With hardware encoding the compositor writes straight into the Vulkan Video encoder's images (zero copy): 1080p exports of the test footage run at about 190 fps, against 57 fps with x264. The range is the whole timeline or In to Out (the default when both marks are set, as on Resolve's Deliver page). `nox-cli render project.otio out.mp4` does the same headless; `--in-out` renders only the marked range, `--frames` any range.
 - **Translations:** every user-visible string goes through gettext; a German catalog (`po/de.po`) is the first. Run with `LANGUAGE=de` to see it.
@@ -42,7 +42,8 @@ What works today:
 
 ```
 crates/
-  nox-color    color science: H.273 color tags, Y'CbCr→R'G'B' matrices (pure Rust)
+  nox-color    color science: H.273 color tags, Y'CbCr→R'G'B' matrices, primaries,
+               transfer functions, the working space, ACEScct and grades (pure Rust)
   nox-project  timeline model shaped like OTIO, edit operations, undo; rational
                time, drop-frame timecode (pure Rust)
   nox-otio     .otio reading and writing (pure Rust, no OTIO library)
@@ -56,7 +57,7 @@ crates/
   nox-cli      headless tools (`nox-cli probe`, `nox-cli render`, `nox-cli version`)
 ```
 
-Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project}`, `otio → project`, `media → {gpu, color, project}`, and `gpu → color`. `nox-color`, `nox-project` and `nox-otio` have no heavy dependencies. Nothing below `nox-gui` depends on GTK or GLib, so the core can be tested headless and used by the CLI.
+Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project}`, `otio → project`, `project → color`, `media → {gpu, color, project}`, and `gpu → color`. `nox-color`, `nox-project` and `nox-otio` have no heavy dependencies. Nothing below `nox-gui` depends on GTK or GLib, so the core can be tested headless and used by the CLI.
 
 ### Key decisions
 
@@ -81,7 +82,7 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
 9. **Edits overwrite, OTIO-style.** Tracks are sequences with explicit gaps. Placing an item splits whatever is under it at the edges and replaces it. Trimming in leaves a gap, and trimming out may only consume gaps and available media. Transitions touching an edit are dropped. Tracks are normalized after every edit (gaps merged, trailing gaps removed). Linked clips (`metadata.nox.link`) move, trim and delete together, and splitting gives each half its own link. The ripple edits are the exception to overwriting: ripple delete and ripple trim move what follows, but only on the tracks of the edited clip and its linked clips (no sync lock across other tracks); ripple insert exists in the model but not in the UI. A roll changes two neighboring clips' source ranges, so nothing else moves. Linked clips with the same edge or cut are ripple-trimmed and rolled along, all or nothing, so they stay in sync. Locked tracks (`metadata.nox.locked`) reject every edit of their contents in the model itself (`EditError::Locked`), not just in the UI.
 10. **Undo by snapshots.** `Document::edit` keeps the timeline from before each edit (up to 500 steps). Timelines are small, and this makes undo exact by construction with no inverse operations. Failed edits leave the timeline untouched, and edits that change nothing aren't recorded.
 11. **Compositing in two steps.** Each layer is converted by the YUV→RGB shader (its `ycbcr_to_working` variant) into the linear working space, an RGBA32F image at its placed size (`Rect::fit` keeps the aspect ratio). `blend.comp` then blends the layers in order into an RGBA32F accumulator over black. `output.comp` applies the output transform and writes `AB4H` (or `AB24`) for DMA-BUF, or RGBA8 for readback. `output_yuv.comp` writes into an encoder's NV12 image instead. Blending happens in linear light (decision 20).
-    *Changed during M6:* blending used to work on display-referred R'G'B' (editors' "video" mode), with RGBA8 layers and an RGBA16F accumulator. Half floats turned out too coarse for a linear working space: converting saturated colors back to BT.709 subtracts large terms, and the 1/2.4 encoding magnified the leftover rounding to as much as 9 code values (cyan `0,254,192` became `9,254,192`). A dissolve resolves to both clips, with the incoming one's opacity scaled by progress, so it needs no separate code path. Per-clip settings live in `metadata.nox` (`opacity`, `blend`, `gain`).
+    *Changed during M6:* blending used to work on display-referred R'G'B' (editors' "video" mode), with RGBA8 layers and an RGBA16F accumulator. Half floats turned out too coarse for a linear working space: converting saturated colors back to BT.709 subtracts large terms, and the 1/2.4 encoding magnified the leftover rounding to as much as 9 code values (cyan `0,254,192` became `9,254,192`). A dissolve resolves to both clips, with the incoming one's opacity scaled by progress, so it needs no separate code path. Per-clip settings live in `metadata.nox` (`opacity`, `blend`, `volume`, `grade`).
     *Changed during M4:* the M3 viewer requested single source frames; the engine now renders whole sequence frames.
 12. **The engine renders sequence frames into a cache.** A worker thread owns the GPU and a pool of open decoders (up to 8, two per file). A decoder is reused by seeking rather than reopened; reopening is expensive, e.g. FFV1 sets up FFmpeg's Vulkan compute decoder. A second decoder per file is opened only when the file is on two layers of one frame. Rendered frames are cached by timeline version and output size, up to `NOX_CACHE_MB` (768 MB by default), least recently used first. While paused, the newest request wins. While playing, the worker renders up to 0.5 s ahead of the clock. If it falls behind, it aims ahead by its measured render time, so finished frames are still shown and the ones in between are skipped.
     Scrubbing in long-GOP footage (keyframes 4–8 s apart, so stepping back can mean decoding hundreds of 4K frames) works in three ways:
@@ -113,7 +114,7 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
 
 21. **Edit and Color pages, as in DaVinci Resolve.**
     - **Switching:** a switcher in the header bar swaps between two layouts of the same project, in a `GtkStack`. Each page is laid out for its job.
-    - **Edit:** media pool, viewer, a new inspector on the right (clip properties such as opacity, blend mode and gain, which only the clip menu has today, and later transforms and transitions), and the timeline.
+    - **Edit:** media pool, viewer, a new inspector on the right (clip properties such as opacity, blend mode and volume, which only the clip menu has today, and later transforms and transitions), and the timeline.
     - **Color:**
       - a large viewer with the scopes beside it (2×2, or one enlarged)
       - a clip strip of the timeline's clips
@@ -124,7 +125,7 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
       - A single page with a color tab in the inspector (Premiere's Lumetri): the wheels get cramped, and the scopes compete with the media pool.
       - Dockable panels (Kdenlive, Blender; libpanel in GTK): the most flexible, but a new dependency and much UI work before any color feature ships. Saved workspaces can come later on top of the pages.
 
-    - *Found while building it:* the Color page's vertical splitter made GTK warn on every resize ("Trying to measure GtkBox for height of 168, but it needs at least 169"). When GTK computed the window's minimum size, the paned handed its non-shrinkable end child one pixel less than that child's minimum. The bottom area is now shrinkable and scrolls instead. A fixed splitter position hid the clip strip and wheels on small screens, so the initial position leaves the bottom 260 px, at most half the page, and the user's position is kept after that. The page stack sizes only to the visible page (`hhomogeneous`/`vhomogeneous` off).
+    - *Found while building it:* the Color page's vertical splitter made GTK warn on every resize ("Trying to measure GtkBox for height of 168, but it needs at least 169"). When GTK computed the window's minimum size, the paned handed its non-shrinkable end child one pixel less than that child's minimum. The bottom area is now shrinkable and scrolls instead. A fixed splitter position hid the clip strip and wheels on small screens, so the initial position leaves the bottom 380 px (clip strip and wheels), at most half the page, and the user's position is kept after that. The page stack sizes only to the visible page (`hhomogeneous`/`vhomogeneous` off).
 
 22. **Shortcuts: application accelerators only with Ctrl or Alt.**
     - **The problem:** GTK runs application accelerators (`set_accels_for_action`) before the focused widget. As accelerators, Space, the arrow keys, Home/End and the single letters took keys from focused controls: Space from buttons, arrows from the inspector's spin buttons and from the media pool.
@@ -140,6 +141,35 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
     - *Not done yet:*
       - The track header toggles (mute, lock) are drawn, not widgets, so assistive technology can't reach them. The track menu offers the same options, but only by right-click; only the clip menu has a keyboard shortcut.
       - Clips can't be moved or trimmed by keyboard.
+
+24. **Scopes are counted on the GPU, then drawn** (`nox_gpu::scopes`, after Aras Pranckevičius's Blender GPU scopes: "This many points is surely out of scope", https://aras-p.info/blog/2025/08/24/This-many-points-is-surely-out-of-scope/).
+    - **Why not draw points:** drawing one blended point per pixel stalls where points pile up, and most pixels sit near the vectorscope's center.
+    - **Count pass** (`scope_count.comp`):
+      - runs on the accumulator the compositor just blended, in the same submission
+      - measures after the output transform, which is what an export contains
+      - adds one per pixel to a bin with atomics; a picture narrower than a scope fills every column its pixels cover
+      - tallies the histogram's few bins in shared memory per workgroup first, because they would be contended
+    - **Resolve pass** (`scope_resolve.comp`): writes four small RGBA8 images, with brightness the logarithm of the count relative to a picture-size reference. They are read back with the frame.
+    - **Layout:** the sizes and the count buffer layout are in `src/scope_layout.rs`, which `build.rs` also includes and writes into `scope_layout.glsl`.
+    - **GUI:** the GUI draws the graticules: levels in percent, the 75% bar targets, and the skin-tone line at about 123° from +Cb.
+    - **When:** scopes are measured only while the Color page is visible (`Engine::set_scopes`). Turning them on renders cached frames again.
+    - **Cost:** at 1280×720 about 0.1–0.3 ms per frame, readback included (RTX 5060, release build).
+
+25. **Primary grades per clip, in ACEScct** (`nox_color::grade`).
+    - **Storage:** a clip's grade lives in `metadata.nox.grade` as `lift`, `gamma`, `gain` and `offset`, each `[r, g, b, master]`, and is left out when neutral.
+    - **Where it runs:** in the blend pass (`blend.comp`), on the layer's linear ACEScg values. They are converted to ACEScct, graded, and converted back before blending. So the grade comes before compositing, as in Resolve, and cached stills are graded without a copy.
+    - **The formula:** per channel, `v' = max(v·(gain−lift) + lift + offset, 0)^(1/gamma)`.
+      - Lift pivots at 1.0, gain at 0, and gamma bends the middle.
+      - The RGB and master values fold into one slope, add and power per channel, which the shader gets as push constants.
+      - Neutral is an exact identity.
+    - **Why ACEScct:** in linear light, lift and gamma would act almost only on the darkest shadows. ACEScct is the encoding ACES defines for grading.
+    - **The wheels** (`color_wheels.rs`):
+      - A puck position is a Cb/Cr direction, turned into luma-neutral (BT.709) R, G and B changes, so the ring shows the hue a push goes toward.
+      - Lift and offset add, up to ±0.1 in ACEScct; gamma and gain multiply, up to 2^±0.5.
+      - The master sliders cover −1…1, mapped per wheel.
+      - Each drag is one undo step (`edit_merging`). Double-click or Home resets a wheel.
+    - **Naming:** "Gain" means only the wheel. The audio level of a clip is its **volume** (`metadata.nox.volume`), as in Resolve's and Premiere's inspectors. *Changed during M6:* it was called gain, in the UI and in the project format.
+    - **Caveat:** the channels graded are AP1's. Pushing a wheel toward red therefore also lowers BT.709 green and blue a little, as in Resolve's ACES modes. The ring's hues are a BT.709 approximation.
 
 ### Display formats
 
@@ -185,7 +215,7 @@ Windows/macOS: `vcpkg.json` lists GTK and FFmpeg. Point `PKG_CONFIG_PATH` at `vc
 
 `--gapplication-app-id=…` runs a separate instance next to a running Nox. Window actions are exported over D-Bus (org.gtk.Actions), which tests use to script the app:
 - transport: `seek(frame)`, `next-frame`, `previous-frame`, `go-to-start`, `go-to-end`
-- editing: `undo`, `redo`, `split`, `delete-clip`, `ripple-delete`, `add-video-track`, `add-audio-track`, `append-media(path)`, `select-clip((track, index))` (`(-1, -1)` clears), `clip-opacity(d)`, `clip-blend(s)`, `clip-gain(d)`
+- editing: `undo`, `redo`, `split`, `delete-clip`, `ripple-delete`, `add-video-track`, `add-audio-track`, `append-media(path)`, `select-clip((track, index))` (`(-1, -1)` clears), `clip-opacity(d)`, `clip-blend(s)`, `clip-volume(d)`
 - pages: `page` (state `'edit'` or `'color'`)
 - timeline: `previous-edit`, `next-edit`, `select-clip-at-playhead`
 - marks: `set-in`, `set-out` (at the playhead), `clear-in`, `clear-out`, `clear-in-out`
@@ -217,7 +247,7 @@ For GUI tests, run Nox on Xvfb (`GDK_BACKEND=x11 DISPLAY=:99`) so no windows app
   - `add_dissolve` limited by media handles, clip properties
   - the compositor against a CPU reference: every blend mode, stacking, pillarboxing, empty frames, and Vulkan-decoded input and DMA-BUF output against plain conversion
   - audio decoding: sample-accurate seeks with resampling (WAV 44.1 → 48 kHz, AAC)
-  - the engine end to end: tracks with opacity, a dissolve, the cache, mixer placement and gain, four layers from one file, playback on the wall clock, and on ALSA's null device (the drift guard)
+  - the engine end to end: tracks with opacity, a dissolve, the cache, mixer placement and volume, four layers from one file, playback on the wall clock, and on ALSA's null device (the drift guard)
 - **M5 tests:**
   - media writer round trips (decode the file and compare frames, colors, rate, tags, duration and audio level): x264, NVENC, HEVC, ProRes with PCM, and zero-copy Vulkan encoding from the compositor
   - export end to end on a timeline with a dissolve and audio, with Vulkan zero copy, x264 and ProRes; the scaling mode reaching the file; cancelling deleting the file
@@ -336,16 +366,11 @@ Rendering through the compositor, hardware encoding (Vulkan Video with zero copy
 - A reader for a subset of `.ocio` configs.
 - Display/view transforms, with ACES 2 output transforms as baked LUTs at first.
 - ✅ Edit and Color pages (decision 21): the header-bar switcher, the shared viewer moving between pages, the Edit page's inspector, and the Color page's layout with its clip strip. Consecutive edits of one property merge into one undo step (`Document::edit_merging`).
-- Primary color wheels (lift, gamma, gain, offset) on the Color page.
-- Scopes, on the Color page: waveform, RGB parade, vectorscope (BT.709 targets, skin-tone line) and histogram. They come with the color wheels, which are hard to use without them. Design, after Aras Pranckevičius's work on Blender's GPU scopes ("This many points is surely out of scope", https://aras-p.info/blog/2025/08/24/This-many-points-is-surely-out-of-scope/):
-  - **Input:** the composited picture is read where it already is on the GPU, with no readback.
-  - **Count pass:** a compute shader adds fixed-point counts per scope bin with atomics. Blender's first version drew one point per pixel with alpha blending and reached about 2 fps at 4K on Apple GPUs. Points pile up (most pixels sit near the vectorscope's center) and the blending hardware can't keep up. Atomics were 1.5–5× faster.
-  - **Resolve pass:** turns counts into brightness with a non-linear curve. Counting rather than blending is what makes that curve possible.
-  - **HDR:** a float axis with headroom above 1.0, not 256 bins. Blender's old scopes clipped HDR.
-  - **What they measure:** the output signal (after the output transform, Resolve's default) or the working space (shows the headroom).
-  - **Resolution:** the viewer-size frame by default, about 1M pixels instead of 8M at 4K.
-  - **If atomics in one spot get slow** (vectorscope of low-saturation footage; worst on AMD and Apple): subgroup reductions, or per-workgroup tallies in shared memory, which the histogram uses anyway.
-  - **Benchmarks** on more than one GPU vendor.
+- ✅ Primary color wheels (lift, gamma, gain, offset) on the Color page (decision 25). Still open: power windows and qualifiers (secondaries), curves, and a node graph for several corrections per clip.
+- ✅ Scopes, on the Color page: waveform, RGB parade, vectorscope (75% bar targets, skin-tone line) and histogram (decision 24). Still open:
+  - measuring the working space, with HDR headroom above 100%
+  - a choice of which scopes to show
+  - benchmarks on AMD, Intel and Apple GPUs
 - Tests against reference values produced by OCIO.
 
 ### Later

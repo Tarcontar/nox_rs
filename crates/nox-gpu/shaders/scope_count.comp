@@ -1,0 +1,87 @@
+// Counts the picture's pixels into the scopes' bins (scopes.rs). One
+// invocation per pixel of the accumulated picture, which is measured after
+// the output transform, as it will be exported. Bins are added to with
+// atomics; the histogram's few bins would be contended, so each workgroup
+// tallies them in shared memory first.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "color.glsl"
+#include "scope_layout.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accum;
+layout(set = 0, binding = 1, std430) buffer Counts {
+    uint counts[];
+};
+
+layout(push_constant) uniform Params {
+    ivec2 size;
+} p;
+
+shared uint histogram[4 * HISTOGRAM_BINS];
+
+// BT.709 luma and color differences of R'G'B'.
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+int level(float v, int levels) {
+    return clamp(int(v * float(levels - 1) + 0.5), 0, levels - 1);
+}
+
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    // 256 invocations clear (and later flush) four bins each.
+    for (uint i = local; i < 4 * HISTOGRAM_BINS; i += 256) {
+        histogram[i] = 0;
+    }
+    barrier();
+
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (all(lessThan(pos, p.size))) {
+        vec3 rgb = output_transform(imageLoad(accum, pos).rgb);
+        float y = dot(LUMA, rgb);
+
+        // Waveform: luma by column, 100% at the top. A picture narrower
+        // than the scope fills every column its pixels cover.
+        int row = LEVELS - 1 - level(y, LEVELS);
+        int first = pos.x * WAVEFORM_WIDTH / p.size.x;
+        int end = max((pos.x + 1) * WAVEFORM_WIDTH / p.size.x, first + 1);
+        for (int column = first; column < end; column++) {
+            atomicAdd(counts[WAVEFORM_OFFSET + row * WAVEFORM_WIDTH + column], 1);
+        }
+
+        // Parade: R, G and B side by side.
+        int part = PARADE_WIDTH / 3;
+        first = pos.x * part / p.size.x;
+        end = max((pos.x + 1) * part / p.size.x, first + 1);
+        for (int c = 0; c < 3; c++) {
+            int r = LEVELS - 1 - level(rgb[c], LEVELS);
+            for (int column = first; column < end; column++) {
+                atomicAdd(counts[PARADE_OFFSET + r * PARADE_WIDTH + c * part + column], 1);
+            }
+        }
+
+        // Vectorscope: Cb to the right, Cr up, each ±0.5.
+        float cb = (rgb.b - y) / 1.8556;
+        float cr = (rgb.r - y) / 1.5748;
+        int vx = level(cb + 0.5, VECTOR_SIZE);
+        int vy = VECTOR_SIZE - 1 - level(cr + 0.5, VECTOR_SIZE);
+        atomicAdd(counts[VECTOR_OFFSET + vy * VECTOR_SIZE + vx], 1);
+
+        // Histogram: R, G, B and luma.
+        atomicAdd(histogram[level(rgb.r, HISTOGRAM_BINS)], 1);
+        atomicAdd(histogram[HISTOGRAM_BINS + level(rgb.g, HISTOGRAM_BINS)], 1);
+        atomicAdd(histogram[2 * HISTOGRAM_BINS + level(rgb.b, HISTOGRAM_BINS)], 1);
+        atomicAdd(histogram[3 * HISTOGRAM_BINS + level(y, HISTOGRAM_BINS)], 1);
+    }
+
+    barrier();
+    for (uint i = local; i < 4 * HISTOGRAM_BINS; i += 256) {
+        uint n = histogram[i];
+        if (n > 0) {
+            uint total = atomicAdd(counts[HISTOGRAM_OFFSET + i], n) + n;
+            atomicMax(counts[HISTOGRAM_MAX_OFFSET], total);
+        }
+    }
+}

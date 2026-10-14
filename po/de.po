@@ -306,10 +306,6 @@ msgstr "Deckkraft ändern"
 msgid "Change Blend Mode"
 msgstr "Mischmodus ändern"
 
-#: src/window.rs:650
-msgid "Change Gain"
-msgstr "Pegel ändern"
-
 #: resources/ui/export-dialog.ui:6 resources/ui/export-dialog.ui:178
 msgid "Export"
 msgstr "Exportieren"
@@ -344,7 +340,7 @@ msgstr "Mischmodus"
 
 #: resources/ui/menus.ui:53
 msgid "Gain"
-msgstr "Pegel"
+msgstr "Gain"
 
 #: resources/ui/menus.ui:75
 msgid "Mute"
@@ -551,10 +547,6 @@ msgstr "Deckkraft in Prozent"
 msgid "Audio"
 msgstr "Audio"
 
-#: resources/ui/inspector.ui:195
-msgid "Gain in decibels"
-msgstr "Pegel in Dezibel"
-
 #: resources/ui/window.ui:129
 msgid "Edit"
 msgstr "Schnitt"
@@ -567,17 +559,9 @@ msgstr "Farbe"
 msgid "Scopes"
 msgstr "Messinstrumente"
 
-#: resources/ui/window.ui:220
-msgid "Waveform, parade, vectorscope and histogram are not implemented yet."
-msgstr "Waveform, Parade, Vektorskop und Histogramm sind noch nicht umgesetzt."
-
 #: resources/ui/window.ui:246
 msgid "Color Wheels"
 msgstr "Farbräder"
-
-#: resources/ui/window.ui:255
-msgid "Lift, gamma, gain and offset wheels are not implemented yet."
-msgstr "Farbräder für Lift, Gamma, Gain und Offset sind noch nicht umgesetzt."
 
 #: src/inspector.rs:161
 msgid "Video clip"
@@ -702,3 +686,79 @@ msgstr "{name}, {start} bis {end}"
 #: src/timeline.rs:320
 msgid "Left and Right step one frame, Up and Down jump to edit points, Shift+V selects the clip at the playhead, Shift+F10 opens its menu, Delete removes it."
 msgstr "Links und Rechts gehen ein Bild weiter, Hoch und Runter springen zu Schnittpunkten, Umschalt+V wählt den Clip am Abspielkopf, Umschalt+F10 öffnet sein Menü, Entf entfernt ihn."
+
+#: src/scopes.rs:25
+msgid "Waveform"
+msgstr "Waveform"
+
+#: src/scopes.rs:26
+msgid "RGB Parade"
+msgstr "RGB-Parade"
+
+#: src/scopes.rs:27
+msgid "Vectorscope"
+msgstr "Vektorskop"
+
+#: src/scopes.rs:28
+msgid "Histogram"
+msgstr "Histogramm"
+
+#: src/color_wheels.rs:50
+msgid "Lift"
+msgstr "Lift"
+
+#: src/color_wheels.rs:51
+msgid "Gamma"
+msgstr "Gamma"
+
+#: src/color_wheels.rs:53
+msgid "Offset"
+msgstr "Offset"
+
+#: src/color_wheels.rs:515
+msgid "Change {wheel}"
+msgstr "{wheel} ändern"
+
+#: src/color_wheels.rs:555
+msgid "Red {r}, green {g}, blue {b}, master {master}"
+msgstr "Rot {r}, Grün {g}, Blau {b}, Master {master}"
+
+#: resources/ui/color-wheels.ui:86
+msgid "Reset Lift"
+msgstr "Lift zurücksetzen"
+
+#: resources/ui/color-wheels.ui:135
+msgid "Reset Gamma"
+msgstr "Gamma zurücksetzen"
+
+#: resources/ui/color-wheels.ui:184
+msgid "Reset Gain"
+msgstr "Gain zurücksetzen"
+
+#: resources/ui/color-wheels.ui:233
+msgid "Reset Offset"
+msgstr "Offset zurücksetzen"
+
+#: resources/ui/color-wheels.ui:99
+msgid "Drag to shift the color balance; double-click to reset"
+msgstr "Ziehen verschiebt die Farbbalance, Doppelklick setzt zurück"
+
+#: resources/ui/color-wheels.ui:106
+msgid "Master"
+msgstr "Master"
+
+#: resources/ui/color-wheels.ui:52
+msgid "Select a video clip to grade it."
+msgstr "Wähle einen Videoclip, um ihn zu graden."
+
+#: resources/ui/menus.ui:53
+msgid "Volume"
+msgstr "Lautstärke"
+
+#: resources/ui/inspector.ui:211
+msgid "Volume in decibels"
+msgstr "Lautstärke in Dezibel"
+
+#: src/inspector.rs:97
+msgid "Change Volume"
+msgstr "Lautstärke ändern"

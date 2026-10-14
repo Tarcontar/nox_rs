@@ -117,6 +117,13 @@ impl ClipStrip {
             self,
             move |_| strip.show_selection()
         ));
+        // Opening a project imports its media after the timeline is shown;
+        // rows need the pool's items for their thumbnails.
+        pool.connect_items_changed(glib::clone!(
+            #[weak(rename_to = strip)]
+            self,
+            move || strip.rebuild()
+        ));
         self.rebuild();
     }
 

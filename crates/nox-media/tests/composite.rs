@@ -4,7 +4,7 @@ mod common;
 
 use common::fixture;
 use nox_color::{InputTransform, OutputTransform};
-use nox_gpu::{BlendMode, Compositor, Converter, Rect};
+use nox_gpu::{BlendMode, Compositor, Converter, LayerStyle, Rect};
 use nox_media::{HwDevice, VideoDecoder, ffmpeg, with_cpu_frame};
 use std::sync::{Arc, OnceLock};
 
@@ -119,12 +119,12 @@ fn layers_blend_like_the_cpu_reference() {
     ] {
         compositor.begin(128, 72).unwrap();
         with_cpu_frame(&red, |cpu| {
-            compositor.add_layer(cpu, full, 1.0, BlendMode::Normal)
+            compositor.add_layer(cpu, full, LayerStyle::default())
         })
         .unwrap()
         .unwrap();
         with_cpu_frame(&blue, |cpu| {
-            compositor.add_layer(cpu, center, opacity as f32, mode)
+            compositor.add_layer(cpu, center, LayerStyle::blend(opacity as f32, mode))
         })
         .unwrap()
         .unwrap();
@@ -141,17 +141,17 @@ fn layers_blend_like_the_cpu_reference() {
     // A third layer on top, and a 4:3 picture pillarboxed over black.
     compositor.begin(128, 72).unwrap();
     with_cpu_frame(&red, |cpu| {
-        compositor.add_layer(cpu, full, 1.0, BlendMode::Normal)
+        compositor.add_layer(cpu, full, LayerStyle::default())
     })
     .unwrap()
     .unwrap();
     with_cpu_frame(&blue, |cpu| {
-        compositor.add_layer(cpu, center, 1.0, BlendMode::Normal)
+        compositor.add_layer(cpu, center, LayerStyle::default())
     })
     .unwrap()
     .unwrap();
     with_cpu_frame(&gray, |cpu| {
-        compositor.add_layer(cpu, center, 0.5, BlendMode::Normal)
+        compositor.add_layer(cpu, center, LayerStyle::blend(0.5, BlendMode::Normal))
     })
     .unwrap()
     .unwrap();
@@ -170,7 +170,7 @@ fn layers_blend_like_the_cpu_reference() {
         }
     );
     with_cpu_frame(&gray, |cpu| {
-        compositor.add_layer(cpu, boxed, 1.0, BlendMode::Normal)
+        compositor.add_layer(cpu, boxed, LayerStyle::default())
     })
     .unwrap()
     .unwrap();
@@ -210,7 +210,7 @@ fn single_layer_matches_plain_conversion() {
             .unwrap();
         compositor.begin(w, h).unwrap();
         nox_media::with_gpu_input(&frame, |input| {
-            compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), 1.0, BlendMode::Normal)
+            compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), LayerStyle::default())
         })
         .unwrap()
         .unwrap();
@@ -235,10 +235,158 @@ fn single_layer_matches_plain_conversion() {
     compositor.begin(w, h).unwrap();
     let frame = decoder.frame_at(2).unwrap();
     nox_media::with_gpu_input(&frame, |input| {
-        compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), 1.0, BlendMode::Normal)
+        compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), LayerStyle::default())
     })
     .unwrap()
     .unwrap();
     let exported = compositor.finish_dmabuf().unwrap();
     assert_eq!((exported.width, exported.height), (w, h));
+}
+
+/// Scopes of solid colours land where the BT.709 signal says: gray on one
+/// waveform row and the vectorscope's centre, red off-centre towards Cr.
+#[test]
+fn scopes_measure_the_output_signal() {
+    let Some((_, gpu)) = gpu() else { return };
+    let (Some(gray), Some(red)) = (
+        solid("scope-gray.nut", "0x808080", "64x36"),
+        solid("scope-red.nut", "0xC03020", "64x36"),
+    ) else {
+        return;
+    };
+    let mut converter = Converter::new(gpu.clone()).unwrap();
+    let g = color_of(&mut converter, &gray);
+    let r = color_of(&mut converter, &red);
+    let mut compositor = Compositor::new(gpu).unwrap();
+    compositor.set_scopes(true).unwrap();
+    let alpha = |image: &nox_gpu::Image, x: u32, y: u32| {
+        image.data[y as usize * image.stride + x as usize * 4 + 3]
+    };
+    let level = |v: f64| (255 - (v * 255.0).round() as i64) as u32;
+
+    compositor.begin(128, 72).unwrap();
+    with_cpu_frame(&gray, |cpu| {
+        compositor.add_layer(cpu, Rect::fit(16.0 / 9.0, 128, 72), LayerStyle::default())
+    })
+    .unwrap()
+    .unwrap();
+    compositor.finish().unwrap();
+    let scopes = compositor.take_scopes().expect("scopes");
+    let row = level(g[1]);
+    for x in [0, 200, 511] {
+        assert!(
+            alpha(&scopes.waveform, x, row) > 200,
+            "waveform at {x},{row}"
+        );
+        assert_eq!(alpha(&scopes.waveform, x, row.saturating_sub(10)), 0);
+    }
+    for x in [10, 300, 700] {
+        assert!(alpha(&scopes.parade, x, row) > 200, "parade at {x},{row}");
+    }
+    // Neutral: the centre of the vectorscope.
+    let centre = (127..=128).flat_map(|x| (127..=128).map(move |y| (x, y)));
+    assert!(
+        centre
+            .clone()
+            .any(|(x, y)| alpha(&scopes.vectorscope, x, y) > 200)
+    );
+    assert_eq!(alpha(&scopes.vectorscope, 200, 40), 0);
+    // One histogram bin per channel at the gray level, full height.
+    let bin = (g[0] * 255.0).round() as u32;
+    assert!(
+        alpha(&scopes.histogram, bin, 0) > 0,
+        "histogram bar at {bin}"
+    );
+    assert_eq!(alpha(&scopes.histogram, (bin + 40) % 256, 64), 0);
+
+    compositor.begin(128, 72).unwrap();
+    with_cpu_frame(&red, |cpu| {
+        compositor.add_layer(cpu, Rect::fit(16.0 / 9.0, 128, 72), LayerStyle::default())
+    })
+    .unwrap()
+    .unwrap();
+    compositor.finish().unwrap();
+    let scopes = compositor.take_scopes().expect("scopes");
+    let y = 0.2126 * r[0] + 0.7152 * r[1] + 0.0722 * r[2];
+    let (cb, cr) = ((r[2] - y) / 1.8556, (r[0] - y) / 1.5748);
+    let vx = ((cb + 0.5) * 255.0).round() as u32;
+    let vy = 255 - ((cr + 0.5) * 255.0).round() as u32;
+    assert!(cr > 0.1 && cb < 0.0, "red is Cr+, Cb-: {cb} {cr}");
+    let near = (vx - 1..=vx + 1).flat_map(|x| (vy - 1..=vy + 1).map(move |y| (x, y)));
+    assert!(
+        near.clone()
+            .any(|(x, y)| alpha(&scopes.vectorscope, x, y) > 200),
+        "vectorscope near {vx},{vy}"
+    );
+    // Parade: red's R column high, its B column low.
+    assert!(alpha(&scopes.parade, 10, level(r[0])) > 200);
+    assert!(alpha(&scopes.parade, 2 * 256 + 10, level(r[2])) > 200);
+
+    // Disabled: no scopes.
+    compositor.set_scopes(false).unwrap();
+    compositor.begin(32, 18).unwrap();
+    compositor.finish().unwrap();
+    assert!(compositor.take_scopes().is_none());
+}
+
+/// Graded layers match the CPU reference (`nox_color::Grade`): the grade
+/// runs in ACEScct inside the blend pass.
+#[test]
+fn grades_match_the_cpu_reference() {
+    use nox_color::{Grade, Wheel};
+    let Some((_, gpu)) = gpu() else { return };
+    let Some(frame) = solid("grade-teal.nut", "0x406080", "64x36") else {
+        return;
+    };
+    let mut converter = Converter::new(gpu.clone()).unwrap();
+    let signal = color_of(&mut converter, &frame);
+    let mut compositor = Compositor::new(gpu).unwrap();
+    let grades = [
+        Grade {
+            lift: Wheel {
+                rgb: [0.02, 0.0, -0.01],
+                master: 0.01,
+            },
+            ..Grade::NEUTRAL
+        },
+        Grade {
+            gamma: Wheel {
+                rgb: [1.0, 1.1, 0.9],
+                master: 1.2,
+            },
+            ..Grade::NEUTRAL
+        },
+        Grade {
+            gain: Wheel {
+                rgb: [1.2, 1.0, 0.8],
+                master: 1.1,
+            },
+            offset: Wheel {
+                rgb: [0.0, 0.03, 0.0],
+                master: -0.02,
+            },
+            ..Grade::NEUTRAL
+        },
+    ];
+    for grade in grades {
+        compositor.begin(64, 36).unwrap();
+        let style = LayerStyle {
+            grade,
+            ..LayerStyle::default()
+        };
+        with_cpu_frame(&frame, |cpu| {
+            compositor.add_layer(cpu, Rect::fit(16.0 / 9.0, 64, 36), style)
+        })
+        .unwrap()
+        .unwrap();
+        let image = compositor.finish().unwrap();
+        let linear = InputTransform::default().apply(signal.map(|c| c as f32));
+        let expected = OutputTransform.apply(grade.apply(linear)).map(f64::from);
+        assert_close(pixel(&image, 32, 18), expected, &format!("{grade:?}"));
+        // The grade changed something.
+        assert!(
+            (0..3).any(|c| (f64::from(pixel(&image, 32, 18)[c]) - signal[c] * 255.0).abs() > 3.0),
+            "{grade:?} had no effect"
+        );
+    }
 }

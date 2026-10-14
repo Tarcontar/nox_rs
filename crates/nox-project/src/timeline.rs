@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::metadata::{Object, Value};
 use crate::time::{Rational, Time, TimeRange};
+use nox_color::{Grade, Wheel};
 
 /// Key of the default media reference of a clip.
 pub const DEFAULT_MEDIA_KEY: &str = "DEFAULT_MEDIA";
@@ -399,16 +400,71 @@ impl Item {
         self.set_nox_value("blend", value);
     }
 
-    /// Linear gain of an audio clip (`metadata.nox.gain`, default 1).
-    pub fn gain(&self) -> f64 {
-        self.nox_value("gain")
+    /// Volume of an audio clip as a linear factor (`metadata.nox.volume`,
+    /// default 1).
+    pub fn volume(&self) -> f64 {
+        self.nox_value("volume")
             .and_then(Value::as_f64)
             .map_or(1.0, |g| g.max(0.0))
     }
 
-    pub fn set_gain(&mut self, gain: f64) {
-        let gain = gain.max(0.0);
-        self.set_nox_value("gain", (gain != 1.0).then_some(Value::Float(gain)));
+    pub fn set_volume(&mut self, volume: f64) {
+        let volume = volume.max(0.0);
+        self.set_nox_value("volume", (volume != 1.0).then_some(Value::Float(volume)));
+    }
+
+    /// Primary grade of a video clip (`metadata.nox.grade`, default
+    /// neutral): `lift`, `gamma`, `gain` and `offset`, each `[r, g, b,
+    /// master]`.
+    pub fn grade(&self) -> Grade {
+        let Some(grade) = self.nox_value("grade").and_then(Value::as_object) else {
+            return Grade::NEUTRAL;
+        };
+        let wheel = |key: &str, neutral: Wheel| {
+            let values: Vec<f32> = grade
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_f64().map(|v| v as f32))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match values[..] {
+                [r, g, b, master] if [r, g, b, master].iter().all(|v| v.is_finite()) => Wheel {
+                    rgb: [r, g, b],
+                    master,
+                },
+                _ => neutral,
+            }
+        };
+        Grade {
+            lift: wheel("lift", Wheel::ZERO),
+            gamma: wheel("gamma", Wheel::ONE),
+            gain: wheel("gain", Wheel::ONE),
+            offset: wheel("offset", Wheel::ZERO),
+        }
+    }
+
+    pub fn set_grade(&mut self, grade: Grade) {
+        let value = (!grade.is_neutral()).then(|| {
+            let mut object = Object::new();
+            for (key, wheel) in [
+                ("lift", grade.lift),
+                ("gamma", grade.gamma),
+                ("gain", grade.gain),
+                ("offset", grade.offset),
+            ] {
+                let [r, g, b] = wheel.rgb;
+                let values = [r, g, b, wheel.master]
+                    .iter()
+                    .map(|&v| Value::Float(f64::from(v)))
+                    .collect();
+                object.insert(key, Value::Array(values));
+            }
+            Value::Object(object)
+        });
+        self.set_nox_value("grade", value);
     }
 
     /// Maps a time inside the item's trimmed range through its time effects
@@ -804,7 +860,7 @@ impl Track {
                 path,
                 place,
                 source_start: source_start - file_start,
-                gain: clip.item.gain(),
+                volume: clip.item.volume(),
                 fade_in,
                 fade_out,
             });
@@ -820,7 +876,7 @@ pub struct AudioSegment {
     pub place: TimeRange,
     /// From the start of the file.
     pub source_start: Time,
-    pub gain: f64,
+    pub volume: f64,
     /// Length of the fade at the start (a crossfade with the previous clip).
     pub fade_in: Time,
     /// Length of the fade at the end.
@@ -828,7 +884,7 @@ pub struct AudioSegment {
 }
 
 impl AudioSegment {
-    /// The gain at timeline time `time`: the clip gain with equal-power
+    /// The gain at timeline time `time`: the clip's volume with equal-power
     /// fades, zero outside the segment.
     pub fn gain_at(&self, time: f64) -> f64 {
         let start = self.place.start.as_seconds();
@@ -836,7 +892,7 @@ impl AudioSegment {
         if time < start || time >= end {
             return 0.0;
         }
-        let mut gain = self.gain;
+        let mut gain = self.volume;
         let fade_in = self.fade_in.as_seconds();
         if fade_in > 0.0 && time < start + fade_in {
             gain *= (std::f64::consts::FRAC_PI_2 * (time - start) / fade_in).sin();

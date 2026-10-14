@@ -307,10 +307,6 @@ msgstr ""
 msgid "Change Blend Mode"
 msgstr ""
 
-#: src/window.rs:650
-msgid "Change Gain"
-msgstr ""
-
 #: resources/ui/export-dialog.ui:6 resources/ui/export-dialog.ui:178
 msgid "Export"
 msgstr ""
@@ -552,10 +548,6 @@ msgstr ""
 msgid "Audio"
 msgstr ""
 
-#: resources/ui/inspector.ui:195
-msgid "Gain in decibels"
-msgstr ""
-
 #: resources/ui/window.ui:129
 msgid "Edit"
 msgstr ""
@@ -568,16 +560,8 @@ msgstr ""
 msgid "Scopes"
 msgstr ""
 
-#: resources/ui/window.ui:220
-msgid "Waveform, parade, vectorscope and histogram are not implemented yet."
-msgstr ""
-
 #: resources/ui/window.ui:246
 msgid "Color Wheels"
-msgstr ""
-
-#: resources/ui/window.ui:255
-msgid "Lift, gamma, gain and offset wheels are not implemented yet."
 msgstr ""
 
 #: src/inspector.rs:161
@@ -702,4 +686,80 @@ msgstr ""
 
 #: src/timeline.rs:320
 msgid "Left and Right step one frame, Up and Down jump to edit points, Shift+V selects the clip at the playhead, Shift+F10 opens its menu, Delete removes it."
+msgstr ""
+
+#: src/scopes.rs:25
+msgid "Waveform"
+msgstr ""
+
+#: src/scopes.rs:26
+msgid "RGB Parade"
+msgstr ""
+
+#: src/scopes.rs:27
+msgid "Vectorscope"
+msgstr ""
+
+#: src/scopes.rs:28
+msgid "Histogram"
+msgstr ""
+
+#: src/color_wheels.rs:50
+msgid "Lift"
+msgstr ""
+
+#: src/color_wheels.rs:51
+msgid "Gamma"
+msgstr ""
+
+#: src/color_wheels.rs:53
+msgid "Offset"
+msgstr ""
+
+#: src/color_wheels.rs:515
+msgid "Change {wheel}"
+msgstr ""
+
+#: src/color_wheels.rs:555
+msgid "Red {r}, green {g}, blue {b}, master {master}"
+msgstr ""
+
+#: resources/ui/color-wheels.ui:86
+msgid "Reset Lift"
+msgstr ""
+
+#: resources/ui/color-wheels.ui:135
+msgid "Reset Gamma"
+msgstr ""
+
+#: resources/ui/color-wheels.ui:184
+msgid "Reset Gain"
+msgstr ""
+
+#: resources/ui/color-wheels.ui:233
+msgid "Reset Offset"
+msgstr ""
+
+#: resources/ui/color-wheels.ui:99
+msgid "Drag to shift the color balance; double-click to reset"
+msgstr ""
+
+#: resources/ui/color-wheels.ui:106
+msgid "Master"
+msgstr ""
+
+#: resources/ui/color-wheels.ui:52
+msgid "Select a video clip to grade it."
+msgstr ""
+
+#: resources/ui/menus.ui:53
+msgid "Volume"
+msgstr ""
+
+#: resources/ui/inspector.ui:211
+msgid "Volume in decibels"
+msgstr ""
+
+#: src/inspector.rs:97
+msgid "Change Volume"
 msgstr ""

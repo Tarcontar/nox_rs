@@ -6,14 +6,23 @@ mod compositor;
 mod converter;
 mod device;
 mod export;
+mod scope_layout;
+mod scopes;
 
 pub use ash::vk;
-pub use compositor::{BlendMode, Compositor, MAX_LAYERS, Placement, Rect, YuvTarget};
+pub use compositor::{BlendMode, Compositor, LayerStyle, MAX_LAYERS, Placement, Rect, YuvTarget};
 pub use converter::{
     Converter, CpuFrame, ImageSync, Input, Layout, Plane, PlaneFormat, VkFrame, VkPlane,
 };
 pub use device::{ExternalDevice, GpuDevice, QueueLock};
 pub use export::{DmabufFormat, DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F};
+pub use scopes::ScopeImages;
+/// Sizes of the scope images.
+pub mod scope_sizes {
+    pub use crate::scope_layout::{
+        HISTOGRAM_BINS, HISTOGRAM_HEIGHT, LEVELS, PARADE_WIDTH, VECTOR_SIZE, WAVEFORM_WIDTH,
+    };
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

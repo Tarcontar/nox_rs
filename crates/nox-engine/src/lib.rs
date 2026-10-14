@@ -14,7 +14,9 @@ pub use export::{
     EXPORT_AUDIO_RATE, Export, ExportError, ExportEvent, ExportSettings, ExportSummary, export,
     full_range, marked_range,
 };
-pub use nox_gpu::{DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F, Image};
+pub use nox_gpu::{
+    DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F, Image, ScopeImages, scope_sizes,
+};
 pub use nox_media::{EncodeQuality, VideoCodec};
 
 /// Display-referred RGBA at the requested output size.
@@ -35,6 +37,8 @@ pub struct RenderedFrame {
     /// `false` for quick stand-ins shown while scrubbing (layers may show
     /// a nearby keyframe); the exact frame follows.
     pub exact: bool,
+    /// Measured if enabled (`Engine::set_scopes`).
+    pub scopes: Option<std::sync::Arc<ScopeImages>>,
 }
 
 impl RenderedFrame {
@@ -48,7 +52,7 @@ impl RenderedFrame {
     /// Approximate memory use.
     pub fn bytes(&self) -> usize {
         let (width, height) = self.size();
-        width as usize * height as usize * 4
+        width as usize * height as usize * 4 + self.scopes.as_ref().map_or(0, |s| s.bytes())
     }
 }
 

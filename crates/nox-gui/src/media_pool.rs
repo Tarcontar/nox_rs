@@ -122,6 +122,13 @@ impl MediaPool {
             .find(|media| media.path() == path)
     }
 
+    /// Calls `f` when items are added or removed.
+    pub fn connect_items_changed<F: Fn() + 'static>(&self, f: F) {
+        self.imp()
+            .store
+            .connect_items_changed(move |_, _, _, _| f());
+    }
+
     /// Calls `f` when an item is activated (double-clicked or Enter).
     pub fn connect_activate<F: Fn(MediaObject) + 'static>(&self, f: F) {
         let store = self.imp().store.clone();

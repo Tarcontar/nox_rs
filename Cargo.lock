@@ -939,6 +939,7 @@ name = "nox-engine"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "nox-color",
  "nox-gpu",
  "nox-media",
  "nox-project",
@@ -1000,6 +1001,7 @@ dependencies = [
 name = "nox-project"
 version = "0.1.0"
 dependencies = [
+ "nox-color",
  "serde",
  "thiserror 2.0.21",
 ]

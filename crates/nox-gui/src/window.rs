@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::clip_strip::ClipStrip;
+use crate::color_wheels::ColorWheels;
 use crate::i18n::{fill, gettext};
 use crate::inspector::Inspector;
 use crate::media_object::MediaObject;
 use crate::playback::Playback;
 use crate::project::Project;
+use crate::scopes::ScopesPanel;
 use crate::{media_pool::MediaPool, timeline::TimelineView, viewer::Viewer};
 
 mod imp {
@@ -41,6 +43,10 @@ mod imp {
         pub clip_strip: TemplateChild<ClipStrip>,
         #[template_child]
         pub color_paned: TemplateChild<gtk::Paned>,
+        #[template_child]
+        pub scopes: TemplateChild<ScopesPanel>,
+        #[template_child]
+        pub color_wheels: TemplateChild<ColorWheels>,
     }
 
     #[glib::object_subclass]
@@ -55,6 +61,8 @@ mod imp {
             TimelineView::ensure_type();
             Inspector::ensure_type();
             ClipStrip::ensure_type();
+            ScopesPanel::ensure_type();
+            ColorWheels::ensure_type();
             klass.bind_template();
         }
 
@@ -126,7 +134,8 @@ pub fn build(app: &gtk::Application, files: &[gio::File]) -> Window {
     ));
     window.imp().inspector.set_timeline(&timeline);
     window.imp().clip_strip.set_up(&timeline, &pool);
-    add_page_action(&window);
+    window.imp().color_wheels.set_timeline(&timeline);
+    add_page_action(&window, &ui.playback);
     add_transport_actions(window.upcast_ref(), &timeline, &project);
     add_project_actions(&ui);
     add_clip_actions(&ui);
@@ -434,7 +443,7 @@ fn dialog_path(result: Result<gio::File, glib::Error>) -> Option<PathBuf> {
 /// `win.page` ("edit" or "color"; Shift+4 and Shift+6 as in Resolve)
 /// switches pages. The one viewer moves to the visible page, so there is
 /// one engine and nothing renders twice.
-fn add_page_action(window: &Window) {
+fn add_page_action(window: &Window, playback: &Rc<Playback>) {
     let imp = window.imp();
     let page = gio::SimpleAction::new_stateful(
         "page",
@@ -452,6 +461,7 @@ fn add_page_action(window: &Window) {
             }
         }
     ));
+    let playback = Rc::downgrade(playback);
     imp.pages.connect_visible_child_name_notify(glib::clone!(
         #[weak]
         window,
@@ -466,6 +476,11 @@ fn add_page_action(window: &Window) {
             } else {
                 &imp.edit_viewer_slot
             };
+            // Scopes are measured only while they are visible.
+            if let Some(playback) = playback.upgrade() {
+                let panel = (name == "color").then(|| imp.scopes.get());
+                playback.set_scopes(panel);
+            }
             let viewer = imp.viewer.get();
             if viewer.parent().as_ref() != Some(slot.upcast_ref()) {
                 // The slots are boxes; the viewer is their only child.
@@ -479,13 +494,13 @@ fn add_page_action(window: &Window) {
     window.add_action(&page);
 
     // The Color page's splitter starts with room for the clip strip and the
-    // wheels below the viewer (at most half the page); a fixed position
+    // wheels (380 px) below the viewer (at most half the page); a fixed position
     // hid them on small screens. Once set, the user's position is kept.
     let paned = imp.color_paned.get();
     paned.connect_max_position_notify(|paned| {
         let max = paned.max_position();
         if max > 0 && !paned.is_position_set() {
-            paned.set_position((max - 260).max(max / 2));
+            paned.set_position((max - 380).max(max / 2));
         }
     });
 }
@@ -739,7 +754,7 @@ fn parse_size(text: &str) -> Option<(u32, u32)> {
 }
 
 /// Actions on the selected clip, for its context menu (and D-Bus):
-/// `clip-opacity(d)`, `clip-blend(s)`, `clip-gain(d)` and
+/// `clip-opacity(d)`, `clip-blend(s)`, `clip-volume(d)` and
 /// `add-dissolve`, which adds a one-second dissolve at the selected
 /// clip's edge nearest the playhead.
 fn add_clip_actions(ui: &Rc<Ui>) {
@@ -768,9 +783,9 @@ fn add_clip_actions(ui: &Rc<Ui>) {
             });
         }
     });
-    with_param("clip-gain", glib::VariantTy::DOUBLE, |ui, value| {
-        if let Some(gain) = value.get::<f64>() {
-            ui.edit_selected_clip(&gettext("Change Gain"), |item| item.set_gain(gain));
+    with_param("clip-volume", glib::VariantTy::DOUBLE, |ui, value| {
+        if let Some(volume) = value.get::<f64>() {
+            ui.edit_selected_clip(&gettext("Change Volume"), |item| item.set_volume(volume));
         }
     });
     // By stack and track index, for scripting; `(-1, -1)` clears.

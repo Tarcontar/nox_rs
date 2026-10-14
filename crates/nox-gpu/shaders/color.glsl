@@ -27,3 +27,17 @@ vec3 output_transform(vec3 working) {
     vec3 rgb = clamp(WORKING_TO_OUTPUT * working, 0.0, 1.0);
     return pow(rgb, vec3(1.0 / 2.4));
 }
+
+// ACEScct (S-2016-001), the encoding grades work in; mirrors
+// nox_color::grade.
+vec3 acescct_from_linear(vec3 lin) {
+    return mix((log2(max(lin, 1e-10)) + 9.72) / 17.52,
+               10.5402377 * lin + 0.0729055341,
+               lessThanEqual(lin, vec3(0.0078125)));
+}
+
+vec3 linear_from_acescct(vec3 cct) {
+    return mix(min(exp2(cct * 17.52 - 9.72), 65504.0),
+               (cct - 0.0729055341) / 10.5402377,
+               lessThanEqual(cct, vec3(0.155251141)));
+}

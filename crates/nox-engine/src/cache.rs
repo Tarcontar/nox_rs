@@ -121,6 +121,7 @@ mod tests {
         Arc::new(RenderedFrame {
             frame: n,
             exact: true,
+            scopes: None,
             image: FrameImage::Pixels(nox_gpu::Image {
                 width: 10,
                 height: 10,

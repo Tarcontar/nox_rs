@@ -331,34 +331,8 @@
                       </object>
                     </property>
                     <property name="end-child">
-                      <object class="GtkBox">
-                        <property name="orientation">vertical</property>
+                      <object class="NoxScopesPanel" id="scopes">
                         <property name="width-request">420</property>
-                        <style>
-                          <class name="scopes-panel"/>
-                        </style>
-                        <child>
-                          <object class="GtkLabel">
-                            <property name="label" translatable="yes">Scopes</property>
-                            <property name="xalign">0</property>
-                            <style>
-                              <class name="pane-title"/>
-                            </style>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkLabel">
-                            <property name="label" translatable="yes">Waveform, parade, vectorscope and histogram are not implemented yet.</property>
-                            <property name="wrap">true</property>
-                            <property name="justify">center</property>
-                            <property name="vexpand">true</property>
-                            <property name="margin-start">16</property>
-                            <property name="margin-end">16</property>
-                            <style>
-                              <class name="dim-label"/>
-                            </style>
-                          </object>
-                        </child>
                       </object>
                     </property>
                   </object>
@@ -379,22 +353,8 @@
                           <object class="GtkSeparator"/>
                         </child>
                         <child>
-                          <object class="GtkLabel">
-                            <property name="label" translatable="yes">Color Wheels</property>
-                            <property name="xalign">0</property>
-                            <style>
-                              <class name="pane-title"/>
-                            </style>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkLabel">
-                            <property name="label" translatable="yes">Lift, gamma, gain and offset wheels are not implemented yet.</property>
-                            <property name="wrap">true</property>
+                          <object class="NoxColorWheels" id="color_wheels">
                             <property name="vexpand">true</property>
-                            <style>
-                              <class name="dim-label"/>
-                            </style>
                           </object>
                         </child>
                       </object>

@@ -159,7 +159,7 @@ fn mixer_places_and_fades_audio() {
     let mut timeline = Timeline::new("t", FPS);
     let reference = MediaReference::from_path(&path, Some(TimeRange::new(f(0), f(25))));
     let mut audio = Composable::Clip(Clip::new("a", reference, TimeRange::new(f(0), f(10))));
-    audio.item_mut().unwrap().set_gain(0.5);
+    audio.item_mut().unwrap().set_volume(0.5);
     // Frames 5–15 on A1: 0.2 s to 0.6 s.
     timeline.place(1, audio, f(5)).unwrap();
 
@@ -405,4 +405,78 @@ fn stills_from_the_cache() {
             );
         }
     }
+}
+
+/// Frames carry scopes only while they are enabled; switching re-renders
+/// cached frames rather than handing out ones without them.
+#[test]
+fn scopes_come_with_frames_when_enabled() {
+    let Some(red) = solid("red-scopes.mkv", "0xC03020") else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    timeline.place(0, clip(&red, 0, 20), f(0)).unwrap();
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+
+    let plain = render(&engine, &events, 5);
+    if plain.scopes.is_some() {
+        panic!("scopes while disabled");
+    }
+    engine.set_scopes(true);
+    let measured = render(&engine, &events, 5);
+    let Some(scopes) = &measured.scopes else {
+        // Without a GPU there are no scopes.
+        return;
+    };
+    assert_eq!(
+        (scopes.waveform.width, scopes.waveform.height),
+        (
+            nox_engine::scope_sizes::WAVEFORM_WIDTH,
+            nox_engine::scope_sizes::LEVELS
+        )
+    );
+    assert!(scopes.waveform.data.chunks(4).any(|p| p[3] > 0), "a trace");
+    engine.set_scopes(false);
+    assert!(render(&engine, &events, 5).scopes.is_none());
+}
+
+/// A clip's grade (`metadata.nox.grade`) reaches the rendered picture.
+#[test]
+fn clip_grades_are_rendered() {
+    let Some(gray) = solid("gray-grade.mkv", "0x808080") else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    let grade = nox_project::Grade {
+        gain: nox_project::Wheel {
+            rgb: [1.1, 1.0, 1.0],
+            master: 1.0,
+        },
+        ..nox_project::Grade::NEUTRAL
+    };
+    let mut graded = clip(&gray, 0, 20);
+    graded.item_mut().unwrap().set_grade(grade);
+    timeline.place(0, clip(&gray, 0, 20), f(0)).unwrap();
+    timeline.place(0, graded, f(20)).unwrap();
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    let plain = pixel(&render(&engine, &events, 5), 80, 45);
+    let warm = pixel(&render(&engine, &events, 25), 80, 45);
+    // As the CPU reference grades it: in ACEScct on AP1 channels, so more
+    // AP1 red also lowers BT.709 green and blue.
+    let linear = nox_color::InputTransform::default().apply(plain.map(|c| f32::from(c) / 255.0));
+    let expected = nox_color::OutputTransform
+        .apply(grade.apply(linear))
+        .map(|c| (c * 255.0).round() as u8);
+    assert!(warm[0] > plain[0] + 10, "{plain:?} → {warm:?}");
+    assert!(close(warm, expected), "{warm:?} vs {expected:?}");
 }

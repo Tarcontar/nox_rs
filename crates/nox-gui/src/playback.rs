@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::project::Project;
+use crate::scopes::ScopesPanel;
 use crate::timeline::TimelineView;
 use crate::viewer::Viewer;
 
@@ -29,6 +30,8 @@ pub struct Playback {
     ticking: Cell<bool>,
     tick: RefCell<Option<gtk::TickCallbackId>>,
     stats: Cell<Stats>,
+    /// Shows the scopes of every frame shown, while set.
+    scopes: RefCell<Option<ScopesPanel>>,
 }
 
 impl Playback {
@@ -46,6 +49,7 @@ impl Playback {
             ticking: Cell::new(false),
             tick: RefCell::default(),
             stats: Cell::new(Stats::default()),
+            scopes: RefCell::default(),
         });
         playback.sync_timeline();
 
@@ -180,6 +184,22 @@ impl Playback {
             return;
         }
         self.shown.set(Some(rendered.frame));
+        if let Some(panel) = self.scopes.borrow().as_ref() {
+            panel.show(rendered.scopes.as_deref());
+        }
+    }
+
+    /// Measures scopes and shows them in `panel`, or stops (`None`).
+    pub fn set_scopes(&self, panel: Option<ScopesPanel>) {
+        if let Some(old) = self.scopes.replace(panel.clone()) {
+            old.show(None);
+        }
+        self.engine.set_scopes(panel.is_some());
+        if panel.is_some() {
+            // Cached frames have no scopes; render the shown one again.
+            self.shown.set(None);
+            self.show_playhead();
+        }
     }
 
     pub fn play(self: &Rc<Self>) {

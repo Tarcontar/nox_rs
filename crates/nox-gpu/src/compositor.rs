@@ -15,8 +15,9 @@ use crate::converter::{
     GpuImage, Readback, WORKING_FORMAT, color_range, image_barrier, queue_transfer, record_readback,
 };
 use crate::export::{DmabufFormat, ExportPool};
+use crate::scopes::{ScopeImages, Scopes};
 use crate::{Converter, DmabufFrame, Error, GpuDevice, Image, ImageSync, Input, Result, VkPlane};
-use nox_color::Matrix3x4;
+use nox_color::{Grade, Matrix3x4};
 
 const BLEND_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blend.comp.spv"));
 const OUTPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output.comp.spv"));
@@ -128,6 +129,37 @@ struct BlendParams {
     out_size: [i32; 2],
     opacity: f32,
     mode: i32,
+    /// The grade's coefficients (`nox_color::GradeCoefficients`); `w` of
+    /// `slope` is 1 if the layer is graded at all.
+    slope: [f32; 4],
+    add: [f32; 4],
+    power: [f32; 4],
+}
+
+/// How a layer is drawn: graded, then blended.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerStyle {
+    pub opacity: f32,
+    pub mode: BlendMode,
+    /// Applied before blending, in ACEScct (`nox_color::grade`).
+    pub grade: Grade,
+}
+
+impl Default for LayerStyle {
+    fn default() -> Self {
+        Self::blend(1.0, BlendMode::Normal)
+    }
+}
+
+impl LayerStyle {
+    /// Ungraded.
+    pub fn blend(opacity: f32, mode: BlendMode) -> Self {
+        Self {
+            opacity,
+            mode,
+            grade: Grade::NEUTRAL,
+        }
+    }
 }
 
 #[repr(C)]
@@ -136,17 +168,16 @@ struct OutputParams {
     size: [i32; 2],
 }
 
-struct Pipeline {
-    set_layout: vk::DescriptorSetLayout,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+pub(crate) struct Pipeline {
+    pub set_layout: vk::DescriptorSetLayout,
+    pub layout: vk::PipelineLayout,
+    pub pipeline: vk::Pipeline,
 }
 
 /// A converted layer waiting to be blended.
 struct Layer {
     rect: Rect,
-    opacity: f32,
-    mode: BlendMode,
+    style: LayerStyle,
     source: Source,
 }
 
@@ -245,6 +276,9 @@ pub struct Compositor {
     clock: u64,
     readback: Option<Readback>,
     export: Option<ExportPool>,
+    /// Measured for every picture while enabled (`set_scopes`).
+    scopes: Option<Scopes>,
+    scope_images: Option<ScopeImages>,
 }
 
 impl Compositor {
@@ -368,6 +402,8 @@ impl Compositor {
                 clock: 0,
                 readback: None,
                 export: None,
+                scopes: None,
+                scope_images: None,
             })
         }
     }
@@ -393,6 +429,23 @@ impl Compositor {
     /// Format of `finish_dmabuf` frames, once enabled.
     pub fn dmabuf_format(&self) -> Option<DmabufFormat> {
         self.export.as_ref().map(ExportPool::format)
+    }
+
+    /// Measures scopes (`ScopeImages`) of every picture finished from now
+    /// on as RGBA or DMA-BUF (not into encoder images), until disabled.
+    pub fn set_scopes(&mut self, enabled: bool) -> Result<()> {
+        match (enabled, self.scopes.take()) {
+            (true, Some(scopes)) => self.scopes = Some(scopes),
+            (true, None) => self.scopes = Some(Scopes::new(&self.converter)?),
+            (false, Some(scopes)) => scopes.destroy(&self.converter),
+            (false, None) => {}
+        }
+        Ok(())
+    }
+
+    /// The scopes of the last finished picture, if enabled.
+    pub fn take_scopes(&mut self) -> Option<ScopeImages> {
+        self.scope_images.take()
     }
 
     pub fn dmabuf_enabled(&self) -> bool {
@@ -426,14 +479,8 @@ impl Compositor {
     /// Queues the still cached under `key` at `rect`'s size, if there is
     /// one; returns whether it was (else convert it with
     /// `add_cached_layer`). Invisible layers count as queued.
-    pub fn try_cached_layer(
-        &mut self,
-        key: u64,
-        rect: Rect,
-        opacity: f32,
-        mode: BlendMode,
-    ) -> bool {
-        if !self.visible(rect, opacity) {
+    pub fn try_cached_layer(&mut self, key: u64, rect: Rect, style: LayerStyle) -> bool {
+        if !self.visible(rect, style.opacity) {
             return true;
         }
         let Some(index) = self
@@ -449,8 +496,10 @@ impl Compositor {
         self.cache[index].used = self.clock;
         self.layers.push(Layer {
             rect,
-            opacity: opacity.min(1.0),
-            mode,
+            style: LayerStyle {
+                opacity: style.opacity.min(1.0),
+                ..style
+            },
             source: Source::Cached(index),
         });
         true
@@ -463,13 +512,12 @@ impl Compositor {
         key: u64,
         input: impl Into<Input<'f, 'a>>,
         rect: Rect,
-        opacity: f32,
-        mode: BlendMode,
+        style: LayerStyle,
     ) -> Result<()> {
         if self.layers.len() >= MAX_LAYERS {
             return Err(Error::Unsupported(format!("more than {MAX_LAYERS} layers")));
         }
-        if !self.visible(rect, opacity) {
+        if !self.visible(rect, style.opacity) {
             return Ok(());
         }
         let image = self.converter.create_image(
@@ -516,8 +564,10 @@ impl Compositor {
         };
         self.layers.push(Layer {
             rect,
-            opacity: opacity.min(1.0),
-            mode,
+            style: LayerStyle {
+                opacity: style.opacity.min(1.0),
+                ..style
+            },
             source: Source::Cached(index),
         });
         Ok(())
@@ -538,13 +588,12 @@ impl Compositor {
         &mut self,
         input: impl Into<Input<'f, 'a>>,
         rect: Rect,
-        opacity: f32,
-        mode: BlendMode,
+        style: LayerStyle,
     ) -> Result<()> {
         if self.layers.len() >= MAX_LAYERS {
             return Err(Error::Unsupported(format!("more than {MAX_LAYERS} layers")));
         }
-        if !self.visible(rect, opacity) {
+        if !self.visible(rect, style.opacity) {
             return Ok(());
         }
         let index = self.slots_used;
@@ -577,8 +626,10 @@ impl Compositor {
         self.slots_used += 1;
         self.layers.push(Layer {
             rect,
-            opacity: opacity.min(1.0),
-            mode,
+            style: LayerStyle {
+                opacity: style.opacity.min(1.0),
+                ..style
+            },
             source: Source::Slot(index),
         });
         Ok(())
@@ -856,12 +907,21 @@ impl Compositor {
                     &[self.blend_sets[i]],
                     &[],
                 );
+                let k = layer.style.grade.coefficients();
+                let graded = if layer.style.grade.is_neutral() {
+                    0.0
+                } else {
+                    1.0
+                };
                 let params = BlendParams {
                     offset: [layer.rect.x, layer.rect.y],
                     size: [layer.rect.width as i32, layer.rect.height as i32],
                     out_size: [width as i32, height as i32],
-                    opacity: layer.opacity,
-                    mode: layer.mode as i32,
+                    opacity: layer.style.opacity,
+                    mode: layer.style.mode as i32,
+                    slope: [k.slope[0], k.slope[1], k.slope[2], graded],
+                    add: [k.add[0], k.add[1], k.add[2], 0.0],
+                    power: [k.power[0], k.power[1], k.power[2], 0.0],
                 };
                 push(device, cmd, self.blend.layout, &params);
                 device.cmd_dispatch(
@@ -997,6 +1057,13 @@ impl Compositor {
                 // the next user, who acquires the images itself.
                 Output::Yuv(..) => {}
             }
+            // The accumulator is still in GENERAL, its writes visible to
+            // compute shaders (the barrier after the last layer).
+            let measure = !matches!(output, Output::Yuv(..));
+            if let Some(scopes) = self.scopes.as_ref().filter(|_| measure) {
+                let view = self.accum.as_ref().expect("accum").0.view;
+                scopes.record(device, cmd, view, width, height);
+            }
             device.end_command_buffer(cmd)?;
             let (waits, signals): (Vec<_>, Vec<_>) = match &output {
                 Output::Yuv(target, ..) => target
@@ -1042,6 +1109,9 @@ impl Compositor {
             }
             device.wait_for_fences(&[self.fence], true, u64::MAX)?;
             device.reset_fences(&[self.fence])?;
+            if let Some(scopes) = self.scopes.as_ref().filter(|_| measure) {
+                self.scope_images = Some(scopes.read());
+            }
         }
         Ok(())
     }
@@ -1063,6 +1133,9 @@ impl Drop for Compositor {
             self.converter.destroy_buffer(readback.buffer);
         }
         self.export = None;
+        if let Some(scopes) = self.scopes.take() {
+            scopes.destroy(&self.converter);
+        }
         let gpu = self.gpu().clone();
         let device = &gpu.device;
         // SAFETY: no submission is pending (every call waits for completion).
@@ -1087,7 +1160,7 @@ impl Drop for Compositor {
 
 /// # Safety
 /// `device` must be valid.
-unsafe fn create_pipeline(
+pub(crate) unsafe fn create_pipeline(
     device: &ash::Device,
     spirv: &[u8],
     bindings: &[vk::DescriptorSetLayoutBinding<'_>],
@@ -1135,7 +1208,7 @@ unsafe fn create_pipeline(
 
 /// # Safety
 /// `cmd` must be recording with a pipeline using `layout` bound.
-unsafe fn push<T: Copy>(
+pub(crate) unsafe fn push<T: Copy>(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     layout: vk::PipelineLayout,

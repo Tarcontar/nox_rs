@@ -50,30 +50,30 @@
         </item>
       </submenu>
       <submenu>
-        <attribute name="label" translatable="yes">Gain</attribute>
+        <attribute name="label" translatable="yes">Volume</attribute>
         <item>
           <attribute name="label">+6 dB</attribute>
-          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="action">win.clip-volume</attribute>
           <attribute name="target" type="d">2.0</attribute>
         </item>
         <item>
           <attribute name="label">0 dB</attribute>
-          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="action">win.clip-volume</attribute>
           <attribute name="target" type="d">1.0</attribute>
         </item>
         <item>
           <attribute name="label">−6 dB</attribute>
-          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="action">win.clip-volume</attribute>
           <attribute name="target" type="d">0.5</attribute>
         </item>
         <item>
           <attribute name="label">−12 dB</attribute>
-          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="action">win.clip-volume</attribute>
           <attribute name="target" type="d">0.25</attribute>
         </item>
         <item>
           <attribute name="label" translatable="yes">Mute</attribute>
-          <attribute name="action">win.clip-gain</attribute>
+          <attribute name="action">win.clip-volume</attribute>
           <attribute name="target" type="d">0.0</attribute>
         </item>
       </submenu>

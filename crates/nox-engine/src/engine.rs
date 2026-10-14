@@ -119,6 +119,8 @@ struct State {
     playback: Option<Playback>,
     /// Counts playback starts, so the worker knows when one begins.
     playback_id: u64,
+    /// Measure scopes with every frame (`RenderedFrame::scopes`).
+    scopes: bool,
     shutdown: bool,
 }
 
@@ -189,6 +191,7 @@ impl Engine {
                 request: None,
                 playback: None,
                 playback_id: 0,
+                scopes: false,
                 shutdown: false,
             }),
             wake: Condvar::new(),
@@ -320,6 +323,18 @@ impl Engine {
         state.playback.as_ref().map(|p| p.seconds_at(at) * fps)
     }
 
+    /// Measures scopes with every frame rendered from now on
+    /// (`RenderedFrame::scopes`), e.g. while they are visible. Cached
+    /// frames without them are rendered again.
+    pub fn set_scopes(&self, enabled: bool) {
+        let mut state = self.shared.state();
+        if state.scopes != enabled {
+            state.scopes = enabled;
+            state.generation += 1;
+            self.shared.interrupt();
+        }
+    }
+
     /// Falls back to readback, e.g. after the consumer failed to import a
     /// DMA-BUF.
     pub fn disable_dmabuf(&self) {
@@ -374,7 +389,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
     // keyframe, which is slow and makes the lead grow again.
     let mut ahead: (u64, i64) = (0, i64::MIN);
     loop {
-        let (job, timeline, key, interrupts_then) = {
+        let (job, timeline, key, scopes, interrupts_then) = {
             let mut state = shared.state();
             loop {
                 if state.shutdown {
@@ -393,7 +408,13 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
                 if let Some(frame) = state.request.take()
                     && !cache.contains(key, frame)
                 {
-                    break (Job::Request(frame), timeline, key, interrupts());
+                    break (
+                        Job::Request(frame),
+                        timeline,
+                        key,
+                        state.scopes,
+                        interrupts(),
+                    );
                 }
                 if let Some(playback) = &state.playback {
                     let fps = timeline.frame_rate();
@@ -417,6 +438,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
                             Job::Ahead(frame, now - 2..now + ahead_frames),
                             timeline,
                             key,
+                            state.scopes,
                             interrupts(),
                         );
                     }
@@ -438,6 +460,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
         };
         let started = Instant::now();
         let (width, height) = (key.width, key.height);
+        renderer.set_scopes(scopes);
         let result = match job {
             // Scrubbing: if the frame is expensive to reach (far from a
             // keyframe), show a cheap stand-in at once, then work on the

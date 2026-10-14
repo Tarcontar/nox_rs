@@ -14,6 +14,8 @@ pub mod timeline;
 pub use document::Document;
 pub use edit::{Edge, EditError, ItemRef};
 pub use metadata::{Object, Value};
+/// Clip grades (`Item::grade`).
+pub use nox_color::{Grade, Wheel};
 pub use time::{
     Rational, Time, TimeRange, format_timecode, nominal_fps, parse_timecode, supports_drop_frame,
     timecode,

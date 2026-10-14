@@ -1,4 +1,5 @@
 mod clip_strip;
+mod color_wheels;
 mod export_dialog;
 mod i18n;
 mod inspector;
@@ -7,6 +8,7 @@ mod media_object;
 mod media_pool;
 mod playback;
 mod project;
+mod scopes;
 mod settings_dialog;
 #[cfg(test)]
 mod template_tests;

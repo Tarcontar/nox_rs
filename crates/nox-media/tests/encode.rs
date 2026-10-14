@@ -142,7 +142,7 @@ fn odd_sizes_are_rejected() {
 /// input images: what goes in comes out.
 #[test]
 fn vulkan_encode_without_copies() {
-    use nox_gpu::{BlendMode, Compositor, CpuFrame, Layout, Plane, PlaneFormat, Rect};
+    use nox_gpu::{Compositor, CpuFrame, LayerStyle, Layout, Plane, PlaneFormat, Rect};
     let Ok((hw, gpu)) = nox_media::HwDevice::vulkan() else {
         eprintln!("skipping: no Vulkan device");
         return;
@@ -189,12 +189,7 @@ fn vulkan_encode_without_copies() {
         };
         compositor.begin(320, 180).unwrap();
         compositor
-            .add_layer(
-                &cpu,
-                Rect::fit(16.0 / 9.0, 320, 180),
-                1.0,
-                BlendMode::Normal,
-            )
+            .add_layer(&cpu, Rect::fit(16.0 / 9.0, 320, 180), LayerStyle::default())
             .unwrap();
         writer
             .write_vulkan(|target| compositor.finish_to_yuv(target))

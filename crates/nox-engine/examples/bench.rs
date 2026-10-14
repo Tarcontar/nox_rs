@@ -5,7 +5,7 @@
 //! viewer-sized output (960×540, read back), and reports whether frames
 //! come out of the hardware decoder.
 
-use nox_gpu::{BlendMode, Compositor, Rect};
+use nox_gpu::{Compositor, LayerStyle, Rect};
 use nox_media::{HwDevice, VideoDecoder, ffmpeg};
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,7 @@ fn main() {
         let (w, h) = nox_media::display_size(&frame);
         let rect = Rect::fit(f64::from(w) / f64::from(h), 960, 540);
         nox_media::with_gpu_input(&frame, |input| {
-            compositor.add_layer(input, rect, 1.0, BlendMode::Normal)
+            compositor.add_layer(input, rect, LayerStyle::default())
         })
         .unwrap()
         .unwrap();

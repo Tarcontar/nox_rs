@@ -32,7 +32,7 @@ mod imp {
         #[template_child]
         pub blend_dropdown: TemplateChild<gtk::DropDown>,
         #[template_child]
-        pub gain_scale: TemplateChild<gtk::Scale>,
+        pub volume_scale: TemplateChild<gtk::Scale>,
         pub timeline: OnceCell<TimelineView>,
         /// Set while the widgets are updated from the model, so their
         /// change handlers don't write the values back as edits.
@@ -87,15 +87,15 @@ mod imp {
                     });
                 }
             ));
-            self.gain_scale
+            self.volume_scale
                 .adjustment()
                 .connect_value_changed(glib::clone!(
                     #[weak]
                     obj,
                     move |adjustment| {
-                        let gain = 10f64.powf(adjustment.value() / 20.0);
-                        obj.edit(&gettext("Change Gain"), Some("gain"), |item| {
-                            item.set_gain(gain)
+                        let volume = 10f64.powf(adjustment.value() / 20.0);
+                        obj.edit(&gettext("Change Volume"), Some("volume"), |item| {
+                            item.set_volume(volume)
                         });
                     }
                 ));
@@ -188,9 +188,9 @@ impl Inspector {
                 let mode = clip.item.blend_mode();
                 let index = BlendMode::ALL.iter().position(|&m| m == mode).unwrap_or(0);
                 imp.blend_dropdown.set_selected(index as u32);
-                imp.gain_scale
+                imp.volume_scale
                     .adjustment()
-                    .set_value(20.0 * clip.item.gain().max(1e-6).log10());
+                    .set_value(20.0 * clip.item.volume().max(1e-6).log10());
             }
             Composable::Transition(transition) => {
                 imp.name_label.set_text(&gettext("Dissolve"));

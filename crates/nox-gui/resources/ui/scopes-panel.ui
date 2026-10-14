@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- The Color page's scopes, two by two (scopes.rs). -->
+  <template class="NoxScopesPanel" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <style><class name="scopes-panel"/></style>
+    <child>
+      <object class="GtkLabel">
+        <property name="label" translatable="yes">Scopes</property>
+        <property name="xalign">0</property>
+        <style><class name="pane-title"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkGrid">
+        <property name="row-spacing">4</property>
+        <property name="column-spacing">4</property>
+        <property name="row-homogeneous">true</property>
+        <property name="column-homogeneous">true</property>
+        <property name="vexpand">true</property>
+        <property name="margin-start">4</property>
+        <property name="margin-end">4</property>
+        <property name="margin-bottom">4</property>
+        <child>
+          <object class="NoxScopeView" id="waveform">
+            <property name="kind">waveform</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <layout>
+              <property name="column">0</property>
+              <property name="row">0</property>
+            </layout>
+          </object>
+        </child>
+        <child>
+          <object class="NoxScopeView" id="vectorscope">
+            <property name="kind">vectorscope</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <layout>
+              <property name="column">1</property>
+              <property name="row">0</property>
+            </layout>
+          </object>
+        </child>
+        <child>
+          <object class="NoxScopeView" id="parade">
+            <property name="kind">parade</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <layout>
+              <property name="column">0</property>
+              <property name="row">1</property>
+            </layout>
+          </object>
+        </child>
+        <child>
+          <object class="NoxScopeView" id="histogram">
+            <property name="kind">histogram</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <layout>
+              <property name="column">1</property>
+              <property name="row">1</property>
+            </layout>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

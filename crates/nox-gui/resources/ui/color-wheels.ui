@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- Master sliders, −1…1 (color_wheels.rs maps them per wheel). -->
+  <object class="GtkAdjustment" id="lift_master">
+    <property name="lower">-1</property>
+    <property name="upper">1</property>
+    <property name="step-increment">0.01</property>
+    <property name="page-increment">0.1</property>
+    <signal name="value-changed" handler="on_lift_master" swapped="true" object="NoxColorWheels"/>
+  </object>
+  <object class="GtkAdjustment" id="gamma_master">
+    <property name="lower">-1</property>
+    <property name="upper">1</property>
+    <property name="step-increment">0.01</property>
+    <property name="page-increment">0.1</property>
+    <signal name="value-changed" handler="on_gamma_master" swapped="true" object="NoxColorWheels"/>
+  </object>
+  <object class="GtkAdjustment" id="gain_master">
+    <property name="lower">-1</property>
+    <property name="upper">1</property>
+    <property name="step-increment">0.01</property>
+    <property name="page-increment">0.1</property>
+    <signal name="value-changed" handler="on_gain_master" swapped="true" object="NoxColorWheels"/>
+  </object>
+  <object class="GtkAdjustment" id="offset_master">
+    <property name="lower">-1</property>
+    <property name="upper">1</property>
+    <property name="step-increment">0.01</property>
+    <property name="page-increment">0.1</property>
+    <signal name="value-changed" handler="on_offset_master" swapped="true" object="NoxColorWheels"/>
+  </object>
+
+  <!-- The Color page's primary wheels (color_wheels.rs). -->
+  <template class="NoxColorWheels" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <child>
+      <object class="GtkLabel">
+        <property name="label" translatable="yes">Color Wheels</property>
+        <property name="xalign">0</property>
+        <style><class name="pane-title"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkStack" id="stack">
+        <property name="vexpand">true</property>
+        <property name="vhomogeneous">false</property>
+        <child>
+          <object class="GtkStackPage">
+            <property name="name">empty</property>
+            <property name="child">
+              <object class="GtkLabel">
+                <property name="label" translatable="yes">Select a video clip to grade it.</property>
+                <property name="margin-top">24</property>
+                <property name="margin-bottom">24</property>
+                <style><class name="dim-label"/></style>
+              </object>
+            </property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkStackPage">
+            <property name="name">wheels</property>
+            <property name="child">
+          <object class="GtkBox">
+            <property name="spacing">16</property>
+            <property name="homogeneous">true</property>
+            <property name="margin-start">12</property>
+            <property name="margin-end">12</property>
+            <property name="margin-bottom">8</property>
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="spacing">4</property>
+                <property name="hexpand">true</property>
+                <child>
+                  <object class="GtkCenterBox">
+                    <property name="start-widget">
+                      <object class="GtkLabel" id="lift_title">
+                        <property name="label" translatable="yes">Lift</property>
+                        <style><class name="heading"/></style>
+                      </object>
+                    </property>
+                    <property name="end-widget">
+                      <object class="GtkButton">
+                        <property name="icon-name">edit-undo-symbolic</property>
+                        <property name="tooltip-text" translatable="yes">Reset Lift</property>
+                        <signal name="clicked" handler="on_reset_lift" swapped="true"/>
+                        <style><class name="flat"/></style>
+                        <accessibility>
+                          <property name="label" translatable="yes">Reset Lift</property>
+                        </accessibility>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="NoxColorWheel" id="lift">
+                    <property name="vexpand">true</property>
+                    <property name="tooltip-text" translatable="yes">Drag to shift the color balance; double-click to reset</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScale">
+                    <property name="adjustment">lift_master</property>
+                    <property name="draw-value">false</property>
+                    <property name="tooltip-text" translatable="yes">Master</property>
+                    <accessibility>
+                      <relation name="labelled-by">lift_title</relation>
+                    </accessibility>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lift_values">
+                    <style><class name="media-summary"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="spacing">4</property>
+                <property name="hexpand">true</property>
+                <child>
+                  <object class="GtkCenterBox">
+                    <property name="start-widget">
+                      <object class="GtkLabel" id="gamma_title">
+                        <property name="label" translatable="yes">Gamma</property>
+                        <style><class name="heading"/></style>
+                      </object>
+                    </property>
+                    <property name="end-widget">
+                      <object class="GtkButton">
+                        <property name="icon-name">edit-undo-symbolic</property>
+                        <property name="tooltip-text" translatable="yes">Reset Gamma</property>
+                        <signal name="clicked" handler="on_reset_gamma" swapped="true"/>
+                        <style><class name="flat"/></style>
+                        <accessibility>
+                          <property name="label" translatable="yes">Reset Gamma</property>
+                        </accessibility>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="NoxColorWheel" id="gamma">
+                    <property name="vexpand">true</property>
+                    <property name="tooltip-text" translatable="yes">Drag to shift the color balance; double-click to reset</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScale">
+                    <property name="adjustment">gamma_master</property>
+                    <property name="draw-value">false</property>
+                    <property name="tooltip-text" translatable="yes">Master</property>
+                    <accessibility>
+                      <relation name="labelled-by">gamma_title</relation>
+                    </accessibility>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="gamma_values">
+                    <style><class name="media-summary"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="spacing">4</property>
+                <property name="hexpand">true</property>
+                <child>
+                  <object class="GtkCenterBox">
+                    <property name="start-widget">
+                      <object class="GtkLabel" id="gain_title">
+                        <property name="label" translatable="yes">Gain</property>
+                        <style><class name="heading"/></style>
+                      </object>
+                    </property>
+                    <property name="end-widget">
+                      <object class="GtkButton">
+                        <property name="icon-name">edit-undo-symbolic</property>
+                        <property name="tooltip-text" translatable="yes">Reset Gain</property>
+                        <signal name="clicked" handler="on_reset_gain" swapped="true"/>
+                        <style><class name="flat"/></style>
+                        <accessibility>
+                          <property name="label" translatable="yes">Reset Gain</property>
+                        </accessibility>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="NoxColorWheel" id="gain">
+                    <property name="vexpand">true</property>
+                    <property name="tooltip-text" translatable="yes">Drag to shift the color balance; double-click to reset</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScale">
+                    <property name="adjustment">gain_master</property>
+                    <property name="draw-value">false</property>
+                    <property name="tooltip-text" translatable="yes">Master</property>
+                    <accessibility>
+                      <relation name="labelled-by">gain_title</relation>
+                    </accessibility>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="gain_values">
+                    <style><class name="media-summary"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="spacing">4</property>
+                <property name="hexpand">true</property>
+                <child>
+                  <object class="GtkCenterBox">
+                    <property name="start-widget">
+                      <object class="GtkLabel" id="offset_title">
+                        <property name="label" translatable="yes">Offset</property>
+                        <style><class name="heading"/></style>
+                      </object>
+                    </property>
+                    <property name="end-widget">
+                      <object class="GtkButton">
+                        <property name="icon-name">edit-undo-symbolic</property>
+                        <property name="tooltip-text" translatable="yes">Reset Offset</property>
+                        <signal name="clicked" handler="on_reset_offset" swapped="true"/>
+                        <style><class name="flat"/></style>
+                        <accessibility>
+                          <property name="label" translatable="yes">Reset Offset</property>
+                        </accessibility>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="NoxColorWheel" id="offset">
+                    <property name="vexpand">true</property>
+                    <property name="tooltip-text" translatable="yes">Drag to shift the color balance; double-click to reset</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScale">
+                    <property name="adjustment">offset_master</property>
+                    <property name="draw-value">false</property>
+                    <property name="tooltip-text" translatable="yes">Master</property>
+                    <accessibility>
+                      <relation name="labelled-by">offset_title</relation>
+                    </accessibility>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="offset_values">
+                    <style><class name="media-summary"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+            </property>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

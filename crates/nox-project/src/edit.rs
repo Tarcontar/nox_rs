@@ -1280,20 +1280,55 @@ mod tests {
     fn clip_properties_live_in_nox_metadata() {
         let mut c = clip("a", 0, 10);
         let item = c.item_mut().unwrap();
-        assert_eq!((item.opacity(), item.gain()), (1.0, 1.0));
+        assert_eq!((item.opacity(), item.volume()), (1.0, 1.0));
         item.set_opacity(0.5);
         item.set_blend_mode(crate::timeline::BlendMode::Screen);
-        item.set_gain(0.25);
+        item.set_volume(0.25);
         item.set_link(Some(3));
         assert_eq!(item.opacity(), 0.5);
         assert_eq!(item.blend_mode(), crate::timeline::BlendMode::Screen);
-        assert_eq!(item.gain(), 0.25);
+        assert_eq!(item.volume(), 0.25);
         item.set_opacity(1.0);
         item.set_blend_mode(crate::timeline::BlendMode::Normal);
-        item.set_gain(1.0);
+        item.set_volume(1.0);
         assert_eq!(item.nox_value("opacity"), None);
         assert_eq!(item.link(), Some(3));
         item.set_link(None);
+        assert!(item.metadata.is_empty());
+    }
+
+    #[test]
+    fn grades_live_in_nox_metadata() {
+        use crate::{Grade, Value, Wheel};
+        let mut c = clip("a", 0, 10);
+        let item = c.item_mut().unwrap();
+        assert_eq!(item.grade(), Grade::NEUTRAL);
+        let grade = Grade {
+            lift: Wheel {
+                rgb: [0.01, 0.0, -0.01],
+                master: 0.02,
+            },
+            gain: Wheel {
+                rgb: [1.0, 1.1, 1.0],
+                master: 0.9,
+            },
+            ..Grade::NEUTRAL
+        };
+        item.set_grade(grade);
+        assert_eq!(item.grade(), grade);
+        // Damaged values fall back to neutral per wheel.
+        let mut damaged = item.clone();
+        let mut nox = damaged
+            .nox_value("grade")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        nox.insert("gain", Value::from("bright"));
+        damaged.set_nox_value("grade", Some(Value::Object(nox)));
+        assert_eq!(damaged.grade().gain, Wheel::ONE);
+        assert_eq!(damaged.grade().lift, grade.lift);
+        item.set_grade(Grade::NEUTRAL);
         assert!(item.metadata.is_empty());
     }
 

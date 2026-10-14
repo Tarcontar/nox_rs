@@ -7,8 +7,8 @@
     <property name="step-increment">1</property>
     <property name="page-increment">10</property>
   </object>
-  <!-- Gain in dB. -->
-  <object class="GtkAdjustment" id="gain_adjustment">
+  <!-- Volume in dB. -->
+  <object class="GtkAdjustment" id="volume_adjustment">
     <property name="lower">-30</property>
     <property name="upper">12</property>
     <property name="step-increment">0.1</property>
@@ -190,8 +190,8 @@
                             <property name="row-spacing">2</property>
                             <property name="column-spacing">8</property>
                             <child>
-                              <object class="GtkLabel" id="gain_label">
-                                <property name="label" translatable="yes">Gain</property>
+                              <object class="GtkLabel" id="volume_label">
+                                <property name="label" translatable="yes">Volume</property>
                                 <property name="xalign">0</property>
                                 <property name="hexpand">true</property>
                                 <layout>
@@ -201,14 +201,14 @@
                               </object>
                             </child>
                             <child>
-                              <object class="GtkScale" id="gain_scale">
+                              <object class="GtkScale" id="volume_scale">
                                 <accessibility>
-                                  <relation name="labelled-by">gain_label</relation>
+                                  <relation name="labelled-by">volume_label</relation>
                                 </accessibility>
-                                <property name="adjustment">gain_adjustment</property>
+                                <property name="adjustment">volume_adjustment</property>
                                 <property name="hexpand">true</property>
                                 <property name="draw-value">false</property>
-                                <property name="tooltip-text" translatable="yes">Gain in decibels</property>
+                                <property name="tooltip-text" translatable="yes">Volume in decibels</property>
                                 <layout>
                                   <property name="column">0</property>
                                   <property name="row">1</property>
@@ -218,9 +218,9 @@
                             </child>
                             <child>
                               <object class="GtkSpinButton">
-                                <property name="adjustment">gain_adjustment</property>
+                                <property name="adjustment">volume_adjustment</property>
                                 <accessibility>
-                                  <relation name="labelled-by">gain_label</relation>
+                                  <relation name="labelled-by">volume_label</relation>
                                 </accessibility>
                                 <property name="digits">1</property>
                                 <property name="width-chars">5</property>

@@ -5,11 +5,13 @@
 use gtk::{glib, prelude::*};
 
 use crate::clip_strip::ClipStrip;
+use crate::color_wheels::ColorWheels;
 use crate::export_dialog::ExportDialog;
 use crate::inspector::Inspector;
 use crate::media_cell::MediaCell;
 use crate::media_pool::MediaPool;
 use crate::project::Project;
+use crate::scopes::ScopesPanel;
 use crate::settings_dialog::ProjectSettings;
 use crate::timeline::TimelineView;
 use crate::viewer::Viewer;
@@ -67,6 +69,8 @@ fn templates_build() {
     glib::Object::new::<MediaCell>();
     glib::Object::new::<Viewer>();
     glib::Object::new::<TimelineView>();
+    glib::Object::new::<ScopesPanel>().show(None);
+    glib::Object::new::<ColorWheels>().set_timeline(&timeline);
     let inspector = glib::Object::new::<Inspector>();
     inspector.set_timeline(&timeline);
     glib::Object::new::<ClipStrip>().set_up(&timeline, &window.imp_children().0);

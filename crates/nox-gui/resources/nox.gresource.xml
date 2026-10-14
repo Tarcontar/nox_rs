@@ -12,6 +12,8 @@
     <file compressed="true" preprocess="xml-stripblanks">ui/menus.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/rename-track.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/inspector.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/scopes-panel.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/color-wheels.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/clip-strip.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/clip-strip-item.ui</file>
   </gresource>

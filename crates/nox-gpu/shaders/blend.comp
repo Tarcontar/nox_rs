@@ -1,7 +1,10 @@
-// Blends one layer (converted into the linear working space by
-// ycbcr_to_working) onto the accumulated picture, in linear light. Runs
-// over the layer's rectangle only.
+// Grades one layer (converted into the linear working space by
+// ycbcr_to_working) and blends it onto the accumulated picture, in linear
+// light. Runs over the layer's rectangle only.
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "color.glsl"
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -14,6 +17,11 @@ layout(push_constant) uniform Params {
     ivec2 out_size;   // output size
     float opacity;
     int mode;
+    // Grade (nox_color::GradeCoefficients) on ACEScct values:
+    // max(v * slope + add, 0) ^ power. slope.w is 1 if graded.
+    vec4 slope;
+    vec4 add;
+    vec4 power;
 } p;
 
 const int NORMAL = 0;
@@ -30,6 +38,11 @@ void main() {
     }
     vec3 dst = imageLoad(accum, pos).rgb;
     vec4 src = texelFetch(layer, local, 0);
+    if (p.slope.w != 0.0) {
+        vec3 v = acescct_from_linear(src.rgb);
+        v = pow(max(v * p.slope.rgb + p.add.rgb, 0.0), p.power.rgb);
+        src.rgb = linear_from_acescct(v);
+    }
     float a = clamp(p.opacity * src.a, 0.0, 1.0);
     vec3 blended;
     if (p.mode == ADD) {

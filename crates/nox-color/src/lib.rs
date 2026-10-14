@@ -4,6 +4,7 @@
 //! format. Pure Rust; `nox-gpu` turns the transforms into shader code.
 
 pub mod cicp;
+pub mod grade;
 pub mod hdr;
 pub mod primaries;
 pub mod transfer;
@@ -11,6 +12,7 @@ pub mod working;
 pub mod ycbcr;
 
 pub use cicp::Cicp;
+pub use grade::{Grade, GradeCoefficients, Wheel};
 pub use hdr::ToneMapping;
 pub use primaries::Primaries;
 pub use transfer::Transfer;
