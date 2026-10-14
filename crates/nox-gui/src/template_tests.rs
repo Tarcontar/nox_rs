@@ -57,7 +57,8 @@ fn templates_build() {
         ("space", "action(win.play-pause)"),
         ("Left", "action(win.previous-frame)"),
         ("i", "action(win.set-in)"),
-        ("<Shift>4", "action(win.page)"),
+        ("Up", "action(win.previous-edit)"),
+        ("<Shift>v", "action(win.select-clip-at-playhead)"),
     ] {
         assert!(
             bound.iter().any(|(t, a)| t == trigger && a == action),

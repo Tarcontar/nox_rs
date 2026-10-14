@@ -6,18 +6,63 @@
 //! compositor writes straight into the encoder's input images; otherwise
 //! frames are read back. Audio is mixed frame by frame alongside.
 
-use nox_media::{EncodeQuality, MediaWriter, OutputSettings, VideoCodec};
+use nox_media::{
+    EncodeQuality, EncoderProbe, MediaWriter, OutputEncoding, OutputSettings, VideoCodec,
+};
 use nox_project::{Time, Timeline};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::FrameImage;
 use crate::audio::Mixer;
 use crate::render::{Quality, Renderer};
+
+/// The encoders an export can use for `codec` and `encoding` on this
+/// system, best first (see `nox_media::probe_encoders`). The first call
+/// probes every combination, which takes a moment (better on a thread of
+/// its own); later calls return at once.
+pub fn available_encoders(codec: VideoCodec, encoding: OutputEncoding) -> Vec<EncoderProbe> {
+    type Probes = Vec<(VideoCodec, bool, Vec<EncoderProbe>)>;
+    static PROBES: OnceLock<Probes> = OnceLock::new();
+    let probes = PROBES.get_or_init(|| {
+        // A device of its own, as exports have, dropped after probing.
+        let (device, gpu) = match nox_media::HwDevice::vulkan() {
+            Ok((device, gpu)) => (Some(device), Some(gpu)),
+            Err(_) => (None, None),
+        };
+        let mut probes = Vec::new();
+        for codec in VideoCodec::ALL {
+            // PQ and HLG need the same: 10-bit BT.2020.
+            for encoding in [OutputEncoding::Sdr, OutputEncoding::Pq] {
+                let found = nox_media::probe_encoders(codec, encoding, device.clone(), gpu.clone());
+                probes.push((codec, encoding.is_hdr(), found));
+            }
+        }
+        tracing::info!(
+            "export encoders: {}",
+            probes
+                .iter()
+                .map(|(codec, hdr, found)| format!(
+                    "{}{}: {}",
+                    codec.name(),
+                    if *hdr { " HDR" } else { "" },
+                    found.iter().map(|e| e.name).collect::<Vec<_>>().join(", ")
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        probes
+    });
+    probes
+        .iter()
+        .find(|(c, hdr, _)| *c == codec && *hdr == encoding.is_hdr())
+        .map(|(_, _, found)| found.clone())
+        .unwrap_or_default()
+}
 
 /// Audio sample rate of exports.
 pub const EXPORT_AUDIO_RATE: u32 = 48_000;
@@ -29,9 +74,16 @@ pub struct ExportSettings {
     pub quality: EncodeQuality,
     /// Use hardware encoders (Vulkan Video, NVENC) when available.
     pub hardware: bool,
+    /// Use this encoder (from `available_encoders`) rather than the first
+    /// that works.
+    pub encoder: Option<String>,
     /// Sequence frames to export; `None` for all.
     pub range: Option<Range<i64>>,
     pub audio: bool,
+    /// SDR, or HDR10 (PQ) or HLG in BT.2020 (HEVC and ProRes only).
+    pub encoding: nox_media::OutputEncoding,
+    /// Peak of the mastering display written for HDR10, in nits.
+    pub peak_nits: f32,
 }
 
 /// How an export went.
@@ -99,6 +151,18 @@ pub fn marked_range(timeline: &Timeline) -> Option<Range<i64>> {
     (start < end).then_some(start..end)
 }
 
+/// Whether the timeline has any audio to hear in `range` (sequence
+/// frames): without it an export gets no audio track rather than a silent
+/// one.
+pub fn has_audio(timeline: &Timeline, range: &Range<i64>) -> bool {
+    let fps = timeline.frame_rate();
+    let span = nox_project::TimeRange::new(
+        Time::from_frames(range.start, fps),
+        Time::from_frames(range.end - range.start, fps),
+    );
+    !timeline.audio_segments(span).is_empty()
+}
+
 /// Renders and writes the timeline; `progress(done, total)` is called after
 /// every frame and cancels the export by returning false.
 pub fn export(
@@ -116,7 +180,9 @@ pub fn export(
     }
     let fps = timeline.frame_rate();
     let (width, height) = (timeline.settings.width, timeline.settings.height);
+    let with_audio = settings.audio && has_audio(timeline, &range);
     let mut renderer = Renderer::new(&[], Arc::new(AtomicBool::new(false)));
+    renderer.set_output_encoding(settings.encoding)?;
     let device = if settings.hardware {
         renderer.hw_device()
     } else {
@@ -130,11 +196,15 @@ pub fn export(
         codec: settings.codec,
         quality: settings.quality,
         hardware: settings.hardware,
+        encoder: settings.encoder.clone(),
+        gpu: device.as_ref().and_then(|_| renderer.gpu_device()),
         device,
-        audio_rate: settings.audio.then_some(EXPORT_AUDIO_RATE),
+        audio_rate: with_audio.then_some(EXPORT_AUDIO_RATE),
+        encoding: settings.encoding,
+        peak_nits: settings.peak_nits,
     };
     let mut writer = MediaWriter::create(&output)?;
-    let zero_copy = writer.takes_vulkan_frames();
+    let zero_copy = writer.takes_gpu_frames();
     let encoder = writer.video_encoder();
     let mut mixer = Mixer::new(EXPORT_AUDIO_RATE);
     let mut audio = Vec::new();
@@ -147,9 +217,9 @@ pub fn export(
     };
     for (done, frame) in range.clone().enumerate() {
         if zero_copy {
-            writer.write_vulkan(|target| {
+            writer.write_gpu(|target, measure| {
                 renderer
-                    .render_to_yuv(timeline, frame, target)
+                    .render_to_gpu(timeline, frame, target, measure)
                     .map_err(|err| nox_gpu::Error::Unsupported(err.to_string()))
             })?;
         } else {
@@ -160,7 +230,7 @@ pub fn export(
                 FrameImage::Dmabuf(_) => unreachable!("DMA-BUF is disabled for exports"),
             }
         }
-        if settings.audio {
+        if with_audio {
             let (start, end) = (sample_of(frame), sample_of(frame + 1));
             audio.resize((end - start) as usize * nox_media::CHANNELS, 0.0);
             mixer.mix(timeline, start, &mut audio);

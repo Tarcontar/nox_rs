@@ -14,7 +14,9 @@
 
 use crate::metadata::Object;
 use crate::time::{Time, TimeRange};
-use crate::timeline::{Composable, Gap, Timeline, Track, TrackKind, Transition};
+use crate::timeline::{
+    Composable, Gap, Marker, Timeline, Track, TrackKind, Transition, TransitionKind,
+};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EditError {
@@ -36,6 +38,14 @@ pub enum EditError {
     NoHandles,
     #[error("track {0} is locked")]
     Locked(usize),
+    #[error("there is no marker {0}")]
+    NoMarker(usize),
+    #[error("track {0} is sync-locked and has clips in the way")]
+    SyncLocked(usize),
+    #[error("speeds must be above 0")]
+    InvalidSpeed,
+    #[error("only video clips can be frozen")]
+    NotFreezable,
 }
 
 /// An item on a top-level track: its stack index and its index in the track.
@@ -351,6 +361,150 @@ impl Track {
     }
 
     /// Merges adjacent gaps and drops empty and trailing gaps.
+    /// How far clip `index`'s media can slip (its source start move) as
+    /// `(earliest, latest)` offsets; `None` where the media has no known
+    /// end.
+    pub fn slip_limits(&self, index: usize) -> Result<(Option<Time>, Option<Time>), EditError> {
+        let clip = self
+            .children
+            .get(index)
+            .and_then(Composable::as_clip)
+            .ok_or(EditError::NotTrimmable)?;
+        let source = clip.trimmed_range().ok_or(EditError::NotTrimmable)?;
+        Ok(match clip.available_range() {
+            Some(available) => (
+                Some(available.start - source.start),
+                Some(available.end() - source.end()),
+            ),
+            None => (None, None),
+        })
+    }
+
+    /// Shows another part of clip `index`'s media: its source range moves
+    /// by `delta`; place and length stay.
+    pub fn slip(&mut self, index: usize, delta: Time) -> Result<(), EditError> {
+        let (min, max) = self.slip_limits(index)?;
+        if min.is_some_and(|m| delta < m) || max.is_some_and(|m| delta > m) {
+            return Err(EditError::OutOfRange);
+        }
+        let clip = self.children[index].as_clip_mut().expect("clip");
+        let mut source = clip.trimmed_range().expect("range");
+        source.start += delta;
+        clip.item.source_range = Some(source);
+        Ok(())
+    }
+
+    /// The neighbor of `index` in direction `step`, skipping transitions.
+    fn neighbor(&self, index: usize, step: isize) -> Option<usize> {
+        let mut i = index as isize + step;
+        while let Some(child) = usize::try_from(i).ok().and_then(|i| self.children.get(i)) {
+            if !matches!(child, Composable::Transition(_)) {
+                return Some(i as usize);
+            }
+            i += step;
+        }
+        None
+    }
+
+    /// How far clip `index` can slide, as `(earliest, latest)` offsets:
+    /// the clip (or gap) before it must keep a frame and have media to
+    /// grow into, and so must the one after it. `None`: no limit.
+    pub fn slide_limits(
+        &self,
+        index: usize,
+        frame: Time,
+    ) -> Result<(Time, Option<Time>), EditError> {
+        self.children
+            .get(index)
+            .and_then(Composable::as_clip)
+            .ok_or(EditError::NotTrimmable)?;
+        let range = self.range_of_child(index);
+        let zero = Time::zero(frame.timebase);
+        // Moving left: what is before shrinks, what is after grows.
+        let mut min = match self.neighbor(index, -1) {
+            Some(i) if self.children[i].is_gap() => zero - self.range_of_child(i).duration,
+            Some(i) => frame - self.range_of_child(i).duration,
+            None => zero - range.start,
+        };
+        let mut max = None;
+        match self.neighbor(index, 1) {
+            Some(i) if self.children[i].is_gap() => max = Some(self.range_of_child(i).duration),
+            Some(i) => {
+                max = Some(self.range_of_child(i).duration - frame);
+                let after = self.children[i].as_clip();
+                if let Some((source, available)) =
+                    after.and_then(|c| Some((c.trimmed_range()?, c.available_range()?)))
+                {
+                    min = min.max(available.start - source.start);
+                }
+            }
+            None => {}
+        }
+        if let Some(before) = self.neighbor(index, -1)
+            && let Some(clip) = self.children[before].as_clip()
+            && let (Some(source), Some(available)) = (clip.trimmed_range(), clip.available_range())
+        {
+            let tail = available.end() - source.end();
+            max = Some(max.map_or(tail, |m: Time| m.min(tail)));
+        }
+        Ok((min, max))
+    }
+
+    /// Moves clip `index` by `delta` between its neighbors: the one before
+    /// ends that much later, the one after starts that much later (gaps
+    /// grow or shrink instead). Transitions at its edges are dropped.
+    pub fn slide(&mut self, index: usize, delta: Time, frame: Time) -> Result<(), EditError> {
+        let (min, max) = self.slide_limits(index, frame)?;
+        if delta < min || max.is_some_and(|m| delta > m) {
+            return Err(EditError::OutOfRange);
+        }
+        if delta.is_zero() {
+            return Ok(());
+        }
+        let before = self.neighbor(index, -1);
+        let after = self.neighbor(index, 1);
+        // A clip's source range moves by `start` and grows by `duration`;
+        // a gap only changes length.
+        let resize = |child: &mut Composable, start: Time, duration: Time| {
+            let (range, shift) = match &*child {
+                Composable::Clip(c) => (c.trimmed_range(), true),
+                other => (other.item().and_then(|i| i.source_range), false),
+            };
+            if let (Some(mut range), Some(item)) = (range, child.item_mut()) {
+                if shift {
+                    range.start += start;
+                }
+                range.duration += duration;
+                item.source_range = Some(range);
+            }
+        };
+        if let Some(after) = after {
+            resize(
+                &mut self.children[after],
+                delta,
+                Time::zero(delta.timebase) - delta,
+            );
+        }
+        match before {
+            Some(before) => resize(
+                &mut self.children[before],
+                Time::zero(delta.timebase),
+                delta,
+            ),
+            // At the start of the track: a gap opens before the clip.
+            None => self.children.insert(0, Composable::Gap(Gap::new(delta))),
+        }
+        // Transitions touching the clip no longer fit.
+        let index = if before.is_none() { index + 1 } else { index };
+        for i in [index + 1, index.wrapping_sub(1)] {
+            if matches!(self.children.get(i), Some(Composable::Transition(_))) {
+                self.children.remove(i);
+            }
+        }
+        self.normalize();
+        Ok(())
+    }
+
     pub fn normalize(&mut self) {
         let mut children: Vec<Composable> = Vec::with_capacity(self.children.len());
         for child in self.children.drain(..) {
@@ -418,7 +572,74 @@ fn split(child: &Composable, offset: Time) -> (Composable, Composable) {
     (head, tail)
 }
 
+/// OTIO's marker colors, in the order Nox offers them.
+pub const MARKER_COLORS: [&str; 11] = [
+    "BLUE", "CYAN", "GREEN", "YELLOW", "ORANGE", "RED", "PINK", "MAGENTA", "PURPLE", "WHITE",
+    "BLACK",
+];
+
 impl Timeline {
+    /// Markers on the whole timeline (OTIO: the top-level stack's), in
+    /// timeline time and in time order.
+    pub fn markers(&self) -> &[Marker] {
+        &self.tracks.item.markers
+    }
+
+    /// Adds a marker at `at` and returns its index.
+    pub fn add_marker(&mut self, at: Time, color: &str) -> usize {
+        let marker = Marker {
+            name: String::new(),
+            metadata: Object::new(),
+            color: color.to_owned(),
+            marked_range: TimeRange::new(at, Time::zero(at.timebase)),
+            comment: String::new(),
+            extra: Object::new(),
+        };
+        let markers = &mut self.tracks.item.markers;
+        let index = markers.partition_point(|m| m.marked_range.start <= at);
+        markers.insert(index, marker);
+        index
+    }
+
+    /// Changes marker `index`'s name, color and comment.
+    pub fn set_marker(
+        &mut self,
+        index: usize,
+        name: &str,
+        color: &str,
+        comment: &str,
+    ) -> Result<(), EditError> {
+        let marker = self
+            .tracks
+            .item
+            .markers
+            .get_mut(index)
+            .ok_or(EditError::NoMarker(index))?;
+        marker.name = name.to_owned();
+        marker.color = color.to_owned();
+        marker.comment = comment.to_owned();
+        Ok(())
+    }
+
+    /// Moves marker `index` to `at` and returns its new index.
+    pub fn move_marker(&mut self, index: usize, at: Time) -> Result<usize, EditError> {
+        let mut marker = self.remove_marker(index)?;
+        marker.marked_range.start = at.max(Time::zero(at.timebase));
+        let at = marker.marked_range.start;
+        let markers = &mut self.tracks.item.markers;
+        let index = markers.partition_point(|m| m.marked_range.start <= at);
+        markers.insert(index, marker);
+        Ok(index)
+    }
+
+    pub fn remove_marker(&mut self, index: usize) -> Result<Marker, EditError> {
+        let markers = &mut self.tracks.item.markers;
+        if index >= markers.len() {
+            return Err(EditError::NoMarker(index));
+        }
+        Ok(markers.remove(index))
+    }
+
     fn track_checked(&self, track: usize) -> Result<&Track, EditError> {
         self.track(track).ok_or(EditError::NoTrack(track))
     }
@@ -543,6 +764,213 @@ impl Timeline {
     }
 
     /// Removes `item` and the clips linked to it, leaving gaps.
+    /// `items` and the clips linked to them, without duplicates, with
+    /// their ranges.
+    fn with_linked(&self, items: &[ItemRef]) -> Result<Vec<(ItemRef, TimeRange)>, EditError> {
+        let mut all: Vec<(ItemRef, TimeRange)> = Vec::new();
+        for &item in items {
+            for r in self.linked(item) {
+                if !all.iter().any(|(other, _)| *other == r) {
+                    all.push((r, self.item_range(r)?));
+                }
+            }
+        }
+        Ok(all)
+    }
+
+    /// Keeps sync-locked tracks in step with a ripple edit on `edited`
+    /// tracks: `added` time at `at` becomes a gap there; `removed` time is
+    /// taken out, which needs the track to be empty there (otherwise the
+    /// edit is refused). Tracks that end before `at` are left alone.
+    fn sync_shift(
+        &mut self,
+        at: Time,
+        added: Time,
+        removed: Time,
+        edited: &[usize],
+    ) -> Result<(), EditError> {
+        let followers: Vec<usize> = self
+            .tracks()
+            .filter(|(i, t)| !edited.contains(i) && t.item.sync_locked())
+            .map(|(i, _)| i)
+            .collect();
+        for t in followers {
+            if self.track_checked(t)?.duration() <= at {
+                continue;
+            }
+            if added.is_positive() {
+                self.track_checked_mut(t)?
+                    .insert(Composable::Gap(Gap::new(added)), at)?;
+            }
+            if removed.is_positive() {
+                let range = TimeRange::new(at, removed);
+                let track = self.track_checked(t)?;
+                let blocked = track.child_ranges().any(|(r, child)| {
+                    !child.is_gap()
+                        && !matches!(child, Composable::Transition(_))
+                        && r.start < range.end()
+                        && r.end() > range.start
+                });
+                if blocked {
+                    return Err(EditError::SyncLocked(t));
+                }
+                self.track_checked_mut(t)?.ripple_delete(range);
+            }
+        }
+        Ok(())
+    }
+
+    /// Inserts `clips` (track, clip) at `at`, pushing what follows on their
+    /// tracks (and on sync-locked tracks) later by the longest clip.
+    pub fn insert_clips(
+        &mut self,
+        clips: Vec<(usize, Composable)>,
+        at: Time,
+    ) -> Result<(), EditError> {
+        let longest = clips
+            .iter()
+            .map(|(_, c)| c.duration())
+            .max()
+            .unwrap_or(Time::zero(at.timebase));
+        let edited: Vec<usize> = clips.iter().map(|(t, _)| *t).collect();
+        for (track, clip) in clips {
+            let length = clip.duration();
+            let track_ref = self.track_checked_mut(track)?;
+            track_ref.insert(clip, at)?;
+            // Shorter clips (e.g. audio a frame shorter) still push by the
+            // longest, so linked clips stay aligned.
+            if length < longest {
+                track_ref.insert(Composable::Gap(Gap::new(longest - length)), at + length)?;
+            }
+        }
+        self.sync_shift(at, longest, Time::zero(at.timebase), &edited)
+    }
+
+    /// Moves `items` (and the clips linked to them) by `offset` as one
+    /// edit. Those on `primary`'s track move to `to_track` (of the same
+    /// kind); the others stay on their tracks. Returns where `items` are
+    /// now, in the same order.
+    pub fn move_items(
+        &mut self,
+        items: &[ItemRef],
+        primary: ItemRef,
+        to_track: usize,
+        offset: Time,
+    ) -> Result<Vec<ItemRef>, EditError> {
+        let target_kind = self.track_checked(to_track)?.kind.clone();
+        let source_kind = self.track_checked(primary.track)?.kind.clone();
+        if target_kind != source_kind {
+            return Err(EditError::WrongTrackKind(
+                source_kind.as_str().to_owned(),
+                target_kind.as_str().to_owned(),
+            ));
+        }
+        let selected: Vec<ItemRef> = items.to_vec();
+        let mut moving = Vec::new();
+        for (r, range) in self.with_linked(items)? {
+            if (range.start + offset).is_negative() {
+                return Err(EditError::BeforeStart);
+            }
+            let track = if r.track == primary.track && selected.contains(&r) {
+                to_track
+            } else {
+                r.track
+            };
+            moving.push((r, track, range, self.item(r)?.clone()));
+        }
+        // Transitions don't move; they are dropped by the lifts below.
+        moving.retain(|(_, _, _, child)| !matches!(child, Composable::Transition(_)));
+        for (r, _, range, _) in &moving {
+            self.track_checked_mut(r.track)?.lift(*range)?;
+        }
+        let mut placed = Vec::new();
+        for (r, track, range, child) in moving {
+            self.place(track, child, range.start + offset)?;
+            placed.push((r, track, range.start + offset));
+        }
+        // Later placements on the same track may have shifted indices.
+        Ok(items
+            .iter()
+            .map(|item| {
+                placed
+                    .iter()
+                    .find(|(r, ..)| r == item)
+                    .and_then(|&(_, track, start)| self.item_at(track, start))
+                    .unwrap_or(*item)
+            })
+            .collect())
+    }
+
+    /// Removes `items` (and the clips linked to them) as one edit, leaving
+    /// gaps.
+    pub fn remove_items(&mut self, items: &[ItemRef]) -> Result<(), EditError> {
+        self.remove_all(items, false)
+    }
+
+    /// Removes `items` (and the clips linked to them) as one edit, closing
+    /// the gaps on their tracks.
+    pub fn ripple_remove_items(&mut self, items: &[ItemRef]) -> Result<(), EditError> {
+        self.remove_all(items, true)
+    }
+
+    fn remove_all(&mut self, items: &[ItemRef], ripple: bool) -> Result<(), EditError> {
+        if ripple && self.tracks().any(|(_, t)| t.item.sync_locked()) {
+            return self.ripple_remove_synced(items);
+        }
+        let mut all = self.with_linked(items)?;
+        // Transitions go first, by index from the back (removing one shifts
+        // the indices after it); clips are lifted by range, from the back so
+        // ripples don't move ranges still to come.
+        all.sort_by_key(|(r, range)| std::cmp::Reverse((range.start, r.index)));
+        let (transitions, clips): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|(r, _)| matches!(self.item(*r), Ok(Composable::Transition(_))));
+        let mut transitions: Vec<ItemRef> = transitions.into_iter().map(|(r, _)| r).collect();
+        transitions.sort_by_key(|r| std::cmp::Reverse((r.track, r.index)));
+        for r in transitions {
+            self.track_checked_mut(r.track)?.remove(r.index);
+        }
+        for (r, range) in clips {
+            let track = self.track_checked_mut(r.track)?;
+            if ripple {
+                track.ripple_delete(range);
+            } else {
+                track.lift(range)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Ripple delete with sync-locked tracks: one linked group at a time,
+    /// from the back, each also taking its time out of sync-locked tracks.
+    fn ripple_remove_synced(&mut self, items: &[ItemRef]) -> Result<(), EditError> {
+        let mut groups: Vec<Vec<(ItemRef, TimeRange)>> = Vec::new();
+        for &item in items {
+            if groups.iter().flatten().any(|(r, _)| *r == item) {
+                continue;
+            }
+            groups.push(self.with_linked(&[item])?);
+        }
+        let start = |g: &Vec<(ItemRef, TimeRange)>| g.iter().map(|(_, r)| r.start).min();
+        groups.sort_by_key(|g| std::cmp::Reverse(start(g)));
+        for group in groups {
+            let (Some(at), Some(end)) = (start(&group), group.iter().map(|(_, r)| r.end()).max())
+            else {
+                continue;
+            };
+            let edited: Vec<usize> = group.iter().map(|(r, _)| r.track).collect();
+            for (r, range) in &group {
+                if matches!(self.item(*r)?, Composable::Transition(_)) {
+                    self.track_checked_mut(r.track)?.remove(r.index);
+                } else {
+                    self.track_checked_mut(r.track)?.ripple_delete(*range);
+                }
+            }
+            self.sync_shift(at, Time::zero(at.timebase), end - at, &edited)?;
+        }
+        Ok(())
+    }
+
     pub fn remove_item(&mut self, item: ItemRef) -> Result<(), EditError> {
         let ranges = self
             .linked(item)
@@ -590,6 +1018,9 @@ impl Timeline {
     /// Removes `item` and the clips linked to it, closing the gaps on
     /// their tracks: later items on those tracks move back.
     pub fn ripple_remove_item(&mut self, item: ItemRef) -> Result<(), EditError> {
+        if self.tracks().any(|(_, t)| t.item.sync_locked()) {
+            return self.ripple_remove_synced(&[item]);
+        }
         let mut ranges = self
             .linked(item)
             .into_iter()
@@ -653,14 +1084,28 @@ impl Timeline {
     /// Linked clips with the same edge are trimmed the same way, so they
     /// stay in sync; if one of them can't be, nothing is trimmed.
     pub fn ripple_trim(&mut self, item: ItemRef, edge: Edge, to: Time) -> Result<(), EditError> {
+        let range = self.item_range(item)?;
         let followers = self.edge_followers(item, edge)?;
+        // Where the following content moves from, and by how much
+        // (positive: later). A ripple-trimmed start stays in place.
+        let (at, shift) = match edge {
+            Edge::End => (range.end().min(to), to - range.end()),
+            Edge::Start => (range.start, range.start - to),
+        };
+        let mut edited = vec![item.track];
+        edited.extend(followers.iter().map(|r| r.track));
         self.track_checked_mut(item.track)?
             .ripple_trim(item.index, edge, to)?;
         for r in followers {
             self.track_checked_mut(r.track)?
                 .ripple_trim(r.index, edge, to)?;
         }
-        Ok(())
+        let zero = Time::zero(at.timebase);
+        if shift.is_positive() {
+            self.sync_shift(at, shift, zero, &edited)
+        } else {
+            self.sync_shift(at, zero, zero - shift, &edited)
+        }
     }
 
     /// Whether `edge` of clip `item` is a cut: another clip follows (or
@@ -739,6 +1184,74 @@ impl Timeline {
 
     /// Rolls the cut at `edge` of clip `item` to `to` (see
     /// [`Track::roll`]), on the tracks of linked clips too.
+    /// How far `item` (and the clips linked to it) can slip.
+    pub fn slip_limits(&self, item: ItemRef) -> Result<(Option<Time>, Option<Time>), EditError> {
+        let mut limits: (Option<Time>, Option<Time>) = (None, None);
+        for r in self.linked(item) {
+            let (min, max) = self.track_checked(r.track)?.slip_limits(r.index)?;
+            limits.0 = match (limits.0, min) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+            limits.1 = match (limits.1, max) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        Ok(limits)
+    }
+
+    /// Slips `item` and the clips linked to it by `delta` (see
+    /// `Track::slip`).
+    pub fn slip(&mut self, item: ItemRef, delta: Time) -> Result<(), EditError> {
+        let (min, max) = self.slip_limits(item)?;
+        if min.is_some_and(|m| delta < m) || max.is_some_and(|m| delta > m) {
+            return Err(EditError::OutOfRange);
+        }
+        for r in self.linked(item) {
+            self.track_checked_mut(r.track)?.slip(r.index, delta)?;
+        }
+        Ok(())
+    }
+
+    /// How far `item` and the clips linked to it can slide together.
+    pub fn slide_limits(&self, item: ItemRef) -> Result<(Time, Option<Time>), EditError> {
+        let frame = Time::from_frames(1, self.frame_rate());
+        let mut limits: Option<(Time, Option<Time>)> = None;
+        for r in self.linked(item) {
+            let (min, max) = self.track_checked(r.track)?.slide_limits(r.index, frame)?;
+            limits = Some(match limits {
+                Some((a, b)) => (
+                    a.max(min),
+                    match (b, max) {
+                        (Some(x), Some(y)) => Some(x.min(y)),
+                        (x, y) => x.or(y),
+                    },
+                ),
+                None => (min, max),
+            });
+        }
+        limits.ok_or(EditError::NotTrimmable)
+    }
+
+    /// Slides `item` and the clips linked to it by `delta` (see
+    /// `Track::slide`). Returns where `item` is now.
+    pub fn slide(&mut self, item: ItemRef, delta: Time) -> Result<ItemRef, EditError> {
+        let frame = Time::from_frames(1, self.frame_rate());
+        let (min, max) = self.slide_limits(item)?;
+        if delta < min || max.is_some_and(|m| delta > m) {
+            return Err(EditError::OutOfRange);
+        }
+        let start = self.item_range(item)?.start + delta;
+        // Each linked clip is on its own track, so sliding one doesn't
+        // move the others' indices.
+        for r in self.linked(item) {
+            self.track_checked_mut(r.track)?
+                .slide(r.index, delta, frame)?;
+        }
+        Ok(self.item_at(item.track, start).unwrap_or(item))
+    }
+
     pub fn roll(&mut self, item: ItemRef, edge: Edge, to: Time) -> Result<(), EditError> {
         for (track, index) in self.linked_cuts(item, edge)? {
             self.track_checked_mut(track)?.roll(index, to)?;
@@ -784,15 +1297,127 @@ impl Timeline {
         split.len()
     }
 
-    /// Adds a dissolve at the cut on `edge` of clip `item` (replacing one
-    /// that is there), about `duration` long and centered on the cut. Each
-    /// side is limited by the media the clips have beyond the cut; if one
-    /// side has less, the other takes the rest. Returns the transition.
+    /// Changes the speed of clip `item` and its linked clips (1 is normal,
+    /// 2 twice as fast), keeping what they show: their length becomes the
+    /// media they show divided by the speed. With `ripple`, what follows
+    /// moves (Resolve's "Ripple Sequence"), along with sync-locked tracks;
+    /// otherwise a shorter clip leaves a gap and a longer one overwrites
+    /// what follows. Returns the clip at its new place.
+    pub fn set_speed(
+        &mut self,
+        item: ItemRef,
+        speed: f64,
+        ripple: bool,
+    ) -> Result<ItemRef, EditError> {
+        if !(speed > 0.0 && speed.is_finite()) {
+            return Err(EditError::InvalidSpeed);
+        }
+        let fps = self.frame_rate();
+        let at = self.item_range(item)?.start;
+        let mut clips = Vec::new();
+        for (r, range) in self.with_linked(&[item])? {
+            let Composable::Clip(clip) = self.item(r)? else {
+                continue;
+            };
+            let mut clip = clip.clone();
+            // Frozen clips show one frame however long; they keep it.
+            let old = if clip.item.is_frozen() {
+                1.0
+            } else {
+                clip.item.speed()
+            };
+            let shown = range.duration.as_seconds() * old;
+            let frames = (shown * fps.as_f64() / speed).round().max(1.0) as i64;
+            let duration = Time::from_frames(frames, fps);
+            let source = clip.trimmed_range().ok_or(EditError::NotTrimmable)?;
+            clip.item.source_range = Some(TimeRange::new(source.start, duration));
+            clip.item.set_time_effects(speed, clip.item.is_frozen());
+            clips.push((r.track, range.start, Composable::Clip(clip)));
+        }
+        if ripple {
+            self.ripple_remove_items(&[item])?;
+            let clips = clips.into_iter().map(|(t, _, c)| (t, c)).collect();
+            self.insert_clips(clips, at)?;
+        } else {
+            self.remove_items(&[item])?;
+            for (track, start, clip) in clips {
+                self.place(track, clip, start)?;
+            }
+        }
+        self.item_at(item.track, at).ok_or(EditError::NoItem {
+            track: item.track,
+            index: item.index,
+        })
+    }
+
+    /// Makes video clip `item` hold the frame at media time `frame` for its
+    /// whole length (a freeze frame), or (`None`) play again from there.
+    pub fn set_freeze_frame(
+        &mut self,
+        item: ItemRef,
+        frame: Option<Time>,
+    ) -> Result<(), EditError> {
+        if self.track_checked(item.track)?.kind != TrackKind::Video {
+            return Err(EditError::NotFreezable);
+        }
+        let track = self.track_checked_mut(item.track)?;
+        let clip = track
+            .children
+            .get_mut(item.index)
+            .and_then(Composable::as_clip_mut)
+            .ok_or(EditError::NotFreezable)?;
+        let speed = if clip.item.is_frozen() {
+            1.0
+        } else {
+            clip.item.speed()
+        };
+        if let (Some(frame), Some(range)) = (frame, clip.item.source_range) {
+            clip.item.source_range = Some(TimeRange::new(frame, range.duration));
+        }
+        clip.item.set_time_effects(speed, frame.is_some());
+        Ok(())
+    }
+
+    /// Adds a dissolve at the cut on `edge` of clip `item`; see
+    /// `add_transition`.
     pub fn add_dissolve(
         &mut self,
         item: ItemRef,
         edge: Edge,
         duration: Time,
+    ) -> Result<ItemRef, EditError> {
+        self.add_transition(item, edge, duration, TransitionKind::Dissolve)
+    }
+
+    /// Changes the length of transition `item`, keeping its kind; see
+    /// `add_transition` for the limits. Returns the transition.
+    pub fn set_transition_length(
+        &mut self,
+        item: ItemRef,
+        duration: Time,
+    ) -> Result<ItemRef, EditError> {
+        let Composable::Transition(transition) = self.item(item)? else {
+            return Err(EditError::NoCut);
+        };
+        let kind = transition.kind();
+        let before = ItemRef {
+            track: item.track,
+            index: item.index.checked_sub(1).ok_or(EditError::NoCut)?,
+        };
+        self.add_transition(before, Edge::End, duration, kind)
+    }
+
+    /// Adds a transition of `kind` at the cut on `edge` of clip `item`
+    /// (replacing one that is there), about `duration` long and centered on
+    /// the cut. Each side is limited by the media the clips have beyond the
+    /// cut; if one side has less, the other takes the rest. Returns the
+    /// transition.
+    pub fn add_transition(
+        &mut self,
+        item: ItemRef,
+        edge: Edge,
+        duration: Time,
+        kind: TransitionKind,
     ) -> Result<ItemRef, EditError> {
         let track = self.track_checked(item.track)?;
         self.item(item)?;
@@ -840,14 +1465,7 @@ impl Timeline {
         if (in_offset + out_offset).is_zero() {
             return Err(EditError::NoHandles);
         }
-        let transition = Composable::Transition(Transition {
-            name: "Cross Dissolve".into(),
-            metadata: Object::new(),
-            transition_type: "SMPTE_Dissolve".into(),
-            in_offset,
-            out_offset,
-            extra: Object::new(),
-        });
+        let transition = Composable::Transition(Transition::new(kind, in_offset, out_offset));
         let track = self.track_checked_mut(item.track)?;
         let index = match existing {
             Some(index) => {
@@ -1175,6 +1793,126 @@ mod tests {
     }
 
     #[test]
+    fn speed_changes_keep_the_content_and_ripple_or_overwrite() {
+        let mut timeline = timeline_with_linked_clip();
+        // A linked a[0]@5+10 on V1 and A1; b follows on both.
+        for track in [0, 1] {
+            timeline.place(track, clip("b", 0, 10), f(15)).unwrap();
+        }
+        let a = timeline.item_at(0, f(5)).unwrap();
+        // Twice as fast with ripple: half as long, b follows on both tracks.
+        let fast = timeline.set_speed(a, 2.0, true).unwrap();
+        for track in [0, 1] {
+            assert_eq!(
+                layout(timeline.track(track).unwrap()),
+                "_@0+5 a[0]@5+5 b[0]@10+10"
+            );
+        }
+        assert_eq!(timeline.item(fast).unwrap().item().unwrap().speed(), 2.0);
+        // Frame 2 into the clip shows media frame 4.
+        assert_eq!(timeline.video_at(f(7)).unwrap().source_time, f(4));
+        // The audio plays twice as fast too.
+        let audio = timeline.audio_segments(TimeRange::new(f(5), f(5)));
+        assert_eq!(audio[0].speed, 2.0);
+        // Back to half speed without ripple: 20 frames, over b.
+        let slow = timeline.set_speed(fast, 0.5, false).unwrap();
+        assert_eq!(layout(timeline.track(0).unwrap()), "_@0+5 a[0]@5+20");
+        assert_eq!(timeline.item(slow).unwrap().item().unwrap().speed(), 0.5);
+        assert_eq!(timeline.video_at(f(9)).unwrap().source_time, f(2));
+        // Normal speed again: no time effect left.
+        let normal = timeline.set_speed(slow, 1.0, true).unwrap();
+        assert!(
+            timeline
+                .item(normal)
+                .unwrap()
+                .item()
+                .unwrap()
+                .effects
+                .is_empty()
+        );
+        assert_eq!(
+            timeline.set_speed(normal, 0.0, true),
+            Err(EditError::InvalidSpeed)
+        );
+    }
+
+    #[test]
+    fn freeze_frames_hold_a_frame() {
+        let mut timeline = timeline_with_linked_clip();
+        let a = timeline.item_at(0, f(5)).unwrap();
+        timeline.set_freeze_frame(a, Some(f(6))).unwrap();
+        for at in [5, 9, 14] {
+            assert_eq!(timeline.video_at(f(at)).unwrap().source_time, f(6));
+        }
+        assert!(timeline.item(a).unwrap().item().unwrap().is_frozen());
+        // Audio clips aren't frozen.
+        let audio = timeline.item_at(1, f(5)).unwrap();
+        assert_eq!(
+            timeline.set_freeze_frame(audio, Some(f(6))),
+            Err(EditError::NotFreezable)
+        );
+        // Playing again: from the frozen frame on.
+        timeline.set_freeze_frame(a, None).unwrap();
+        assert_eq!(timeline.video_at(f(7)).unwrap().source_time, f(8));
+    }
+
+    #[test]
+    fn transition_kinds_mix_and_change_length() {
+        use crate::{DipColor, Side, TransitionKind};
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        timeline.place(0, clip("a", 10, 20), f(0)).unwrap();
+        timeline.place(0, clip("b", 10, 20), f(20)).unwrap();
+        let a = ItemRef { track: 0, index: 0 };
+        let wipe = timeline
+            .add_transition(a, Edge::End, f(8), TransitionKind::Wipe(Side::Left))
+            .unwrap();
+        let transition = |t: &Timeline| match t.item(wipe).unwrap() {
+            Composable::Transition(t) => t.clone(),
+            _ => panic!("not a transition"),
+        };
+        let wiped = transition(&timeline);
+        assert_eq!(wiped.kind(), TransitionKind::Wipe(Side::Left));
+        assert_eq!(wiped.transition_type, "Custom_Transition");
+        // A quarter through: the incoming clip shows its left quarter.
+        let mix = wiped.mix(0.25);
+        assert_eq!(
+            (mix.outgoing, mix.incoming, mix.wipe),
+            (1.0, 1.0, [0.0, 0.0, 0.75, 0.0])
+        );
+        let layers = timeline.video_layers(f(18));
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[1].wipe, [0.0, 0.0, 0.75, 0.0]);
+        // A dip to white: the color covers the outgoing picture, then the
+        // incoming one covers the color.
+        let mut dip = wiped.clone();
+        dip.set_kind(TransitionKind::Dip(DipColor::White));
+        let first = dip.mix(0.25);
+        assert_eq!((first.outgoing, first.incoming), (1.0, 0.0));
+        assert_eq!(
+            first.dip_out.map(|d| (d.opacity, d.before)),
+            Some((0.5, false))
+        );
+        let second = dip.mix(0.75);
+        assert_eq!((second.outgoing, second.incoming), (0.0, 0.5));
+        assert_eq!(
+            second.dip_in.map(|d| (d.opacity, d.before)),
+            Some((1.0, true))
+        );
+        assert_eq!(dip.kind(), TransitionKind::Dip(DipColor::White));
+        // Back to a dissolve: OTIO's type, no Nox metadata.
+        dip.set_kind(TransitionKind::Dissolve);
+        assert_eq!(
+            (dip.transition_type.as_str(), dip.metadata.is_empty()),
+            ("SMPTE_Dissolve", true)
+        );
+        // Longer, keeping the kind.
+        let longer = timeline.set_transition_length(wipe, f(12)).unwrap();
+        let t = transition(&timeline);
+        assert_eq!((longer, t.in_offset + t.out_offset), (wipe, f(12)));
+        assert_eq!(t.kind(), TransitionKind::Wipe(Side::Left));
+    }
+
+    #[test]
     fn dissolves_are_centered_and_limited_by_handles() {
         let mut timeline = Timeline::new("t", Rational::new(24, 1));
         // a uses 10..20 of 100 (10 frames of tail), b uses 3..13 (3 of head).
@@ -1298,6 +2036,119 @@ mod tests {
     }
 
     #[test]
+    fn several_items_move_and_are_removed_together() {
+        // `a` at 0 and `b` at 10 on V1 and A1, linked per clip.
+        let mut timeline = timeline_with_two_linked_clips();
+        let (a, b) = (
+            timeline.item_at(0, f(0)).unwrap(),
+            timeline.item_at(0, f(10)).unwrap(),
+        );
+        let moved = timeline.move_items(&[a, b], a, 0, f(5)).unwrap();
+        assert_eq!(timeline.item_range(moved[0]).unwrap().start, f(5));
+        assert_eq!(timeline.item_range(moved[1]).unwrap().start, f(15));
+        // The linked audio moved along.
+        assert!(timeline.item_at(1, f(5)).is_some());
+        assert!(timeline.item_at(1, f(15)).is_some());
+        assert_eq!(
+            timeline.move_items(&moved, moved[0], 0, Time::zero(f(1).timebase) - f(6)),
+            Err(EditError::BeforeStart)
+        );
+
+        // Moved to another video track together.
+        let v2 = timeline.add_track(TrackKind::Video);
+        let up = timeline.move_items(&moved, moved[0], v2, f(0)).unwrap();
+        assert!(up.iter().all(|r| r.track == v2), "{up:?}");
+
+        let mut removed = timeline.clone();
+        removed.remove_items(&up).unwrap();
+        assert!(removed.item_at(v2, f(5)).is_none() && removed.item_at(1, f(15)).is_none());
+
+        let mut rippled = timeline_with_two_linked_clips();
+        let (a, b) = (
+            rippled.item_at(0, f(0)).unwrap(),
+            rippled.item_at(0, f(10)).unwrap(),
+        );
+        rippled.ripple_remove_items(&[a, b]).unwrap();
+        assert!(rippled.track(0).unwrap().children.is_empty());
+        assert!(rippled.track(1).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn slip_shows_other_media_in_place() {
+        // `a` at 0 and `b` at 10, each frames 10..20 of 100, linked to audio.
+        let mut timeline = timeline_with_two_linked_clips();
+        let b = timeline.item_at(0, f(10)).unwrap();
+        assert_eq!(
+            timeline.slip_limits(b).unwrap(),
+            (Some(f(-10)), Some(f(80)))
+        );
+        timeline.slip(b, f(5)).unwrap();
+        for track in [0, 1] {
+            let item = timeline.item_at(track, f(10)).unwrap();
+            let clip = timeline.item(item).unwrap().as_clip().unwrap();
+            assert_eq!(clip.trimmed_range().unwrap().start, f(15), "track {track}");
+            assert_eq!(
+                timeline.item_range(item).unwrap(),
+                TimeRange::new(f(10), f(10))
+            );
+        }
+        assert_eq!(timeline.slip(b, f(81)), Err(EditError::OutOfRange));
+    }
+
+    #[test]
+    fn slide_moves_a_clip_between_its_neighbors() {
+        let mut timeline = timeline_with_two_linked_clips();
+        let b = timeline.item_at(0, f(10)).unwrap();
+        // Left: `a` keeps a frame. Right: nothing follows, so no limit.
+        let (min, max) = timeline.slide_limits(b).unwrap();
+        assert_eq!((min, max), (f(-9), Some(f(80))));
+        let b = timeline.slide(b, f(3)).unwrap();
+        assert_eq!(
+            timeline.item_range(b).unwrap(),
+            TimeRange::new(f(13), f(10))
+        );
+        // `a` grew into its media; the audio slid along.
+        let a = timeline.item_at(0, f(0)).unwrap();
+        assert_eq!(timeline.item_range(a).unwrap().duration, f(13));
+        assert_eq!(
+            timeline
+                .item_range(timeline.item_at(1, f(13)).unwrap())
+                .unwrap()
+                .start,
+            f(13)
+        );
+        // Sliding `a` left from the start of the track is not possible.
+        assert_eq!(timeline.slide(a, f(-1)), Err(EditError::OutOfRange));
+        // Sliding `a` right opens a gap before it and shortens `b`'s head.
+        let a = timeline.slide(a, f(2)).unwrap();
+        assert_eq!(timeline.item_range(a).unwrap().start, f(2));
+        let b = timeline.item_at(0, f(15)).unwrap();
+        assert_eq!(timeline.item_range(b).unwrap(), TimeRange::new(f(15), f(8)));
+    }
+
+    #[test]
+    fn timeline_markers_stay_sorted() {
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        assert_eq!(timeline.add_marker(f(10), "BLUE"), 0);
+        assert_eq!(timeline.add_marker(f(2), "RED"), 0);
+        assert_eq!(timeline.add_marker(f(20), "GREEN"), 2);
+        let starts: Vec<Time> = timeline
+            .markers()
+            .iter()
+            .map(|m| m.marked_range.start)
+            .collect();
+        assert_eq!(starts, [f(2), f(10), f(20)]);
+        timeline.set_marker(1, "Cue", "YELLOW", "music in").unwrap();
+        assert_eq!(timeline.markers()[1].name, "Cue");
+        assert_eq!(timeline.move_marker(0, f(15)).unwrap(), 1);
+        assert_eq!(timeline.markers()[0].name, "Cue");
+        assert_eq!(timeline.move_marker(1, f(15)).unwrap(), 1);
+        assert_eq!(timeline.remove_marker(1).unwrap().color, "RED");
+        assert_eq!(timeline.remove_marker(5), Err(EditError::NoMarker(5)));
+        assert_eq!(timeline.markers().len(), 2);
+    }
+
+    #[test]
     fn grades_live_in_nox_metadata() {
         use crate::{Grade, Value, Wheel};
         let mut c = clip("a", 0, 10);
@@ -1355,6 +2206,60 @@ mod tests {
 
     fn layouts(timeline: &Timeline) -> [String; 2] {
         [0, 1].map(|t| layout(timeline.track(t).unwrap()))
+    }
+
+    /// The linked clips of `timeline_with_two_linked_clips` (V1, A1), plus
+    /// a sync-locked V2 with `c` at 30.
+    fn timeline_with_sync_track() -> (Timeline, usize) {
+        let mut timeline = timeline_with_two_linked_clips();
+        let v2 = timeline.add_track(TrackKind::Video);
+        timeline.place(v2, clip("c", 0, 5), f(30)).unwrap();
+        timeline.track_mut(v2).unwrap().item.set_sync_locked(true);
+        (timeline, v2)
+    }
+
+    #[test]
+    fn inserting_pushes_the_track_and_sync_locked_tracks() {
+        let (mut timeline, v2) = timeline_with_sync_track();
+        timeline
+            .insert_clips(vec![(0, clip("n", 0, 4))], f(5))
+            .unwrap();
+        assert_eq!(
+            layout(timeline.track(0).unwrap()),
+            "a[10]@0+5 n[0]@5+4 a[15]@9+5 b[10]@14+10"
+        );
+        // A1 is not sync-locked: unchanged. V2 is: pushed by 4.
+        let a1 = timeline
+            .tracks()
+            .find(|(_, t)| t.kind == TrackKind::Audio)
+            .map(|(i, _)| i)
+            .unwrap();
+        assert_eq!(
+            layout(timeline.track(a1).unwrap()),
+            "a[10]@0+10 b[10]@10+10"
+        );
+        assert_eq!(layout(timeline.track(v2).unwrap()), "_@0+34 c[0]@34+5");
+    }
+
+    #[test]
+    fn ripple_edits_follow_on_sync_locked_tracks() {
+        let (mut timeline, v2) = timeline_with_sync_track();
+        let b = timeline.item_at(0, f(10)).unwrap();
+        let mut deleted = timeline.clone();
+        deleted.ripple_remove_items(&[b]).unwrap();
+        assert_eq!(layout(deleted.track(v2).unwrap()), "_@0+20 c[0]@20+5");
+
+        // A clip in the way on the sync-locked track refuses the edit.
+        let mut blocked = timeline.clone();
+        blocked.place(v2, clip("d", 0, 2), f(12)).unwrap();
+        assert_eq!(
+            blocked.ripple_remove_items(&[b]),
+            Err(EditError::SyncLocked(v2))
+        );
+
+        // Ripple-trimming b's end 4 frames shorter pulls c in by 4.
+        timeline.ripple_trim(b, Edge::End, f(16)).unwrap();
+        assert_eq!(layout(timeline.track(v2).unwrap()), "_@0+26 c[0]@26+5");
     }
 
     #[test]

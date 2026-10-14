@@ -1,7 +1,9 @@
 //! Renders sequence frames: decodes every layer, composites them on the
 //! GPU and hands out the result as DMA-BUF or in system memory.
 
-use nox_gpu::{BlendMode, Compositor, Image, LayerStyle, Placement, Rect, YuvTarget};
+use nox_gpu::{
+    BlendMode, Compositor, FrameLight, GpuTarget, Image, LayerStyle, Placement, Rect, Transform,
+};
 use nox_media::{HwDevice, VideoDecoder};
 use nox_project::{Time, Timeline};
 use std::path::{Path, PathBuf};
@@ -183,13 +185,18 @@ impl Renderer {
             .video_layers(time)
             .into_iter()
             .filter_map(|layer| {
-                let path = layer.clip.media_reference()?.path()?;
+                let path = timeline.media_path(layer.clip.media_reference()?)?;
                 Some((
                     path,
                     layer.file_time(),
                     layer.opacity,
                     layer.blend_mode(),
-                    layer.clip.item.grade(),
+                    layer.clip.item.grade_at(layer.source_time.as_seconds()),
+                    with_wipe(
+                        layer.clip.item.transform_at(layer.source_time.as_seconds()),
+                        layer.wipe,
+                    ),
+                    layer.dip,
                 ))
             })
             .collect()
@@ -256,35 +263,58 @@ impl Renderer {
     }
 
     /// The shared Vulkan device, if rendering on the GPU.
+    /// How pictures are encoded: SDR (the default) or HDR (PQ, HLG), for
+    /// exports. HDR needs the GPU; frames from `render` are then RGBA16.
+    pub fn set_output_encoding(
+        &mut self,
+        encoding: nox_media::OutputEncoding,
+    ) -> nox_media::Result<()> {
+        match &mut self.gpu {
+            Some((_, compositor)) => {
+                compositor.set_output_encoding(encoding);
+                Ok(())
+            }
+            None if encoding.is_hdr() => Err(nox_media::Error::Encode(
+                "HDR export needs a Vulkan GPU".into(),
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn hw_device(&self) -> Option<HwDevice> {
         self.gpu.as_ref().map(|(hw, _)| hw.clone())
     }
 
-    /// Renders sequence frame `frame` exactly into `target` (e.g. a Vulkan
-    /// Video encoder's input image), without copies. GPU only.
-    pub fn render_to_yuv(
+    /// Renders sequence frame `frame` exactly into `target`, a hardware
+    /// encoder's input frame, without copies. GPU only. With `measure`,
+    /// returns the frame's light if the target can measure it.
+    pub fn render_to_gpu(
         &mut self,
         timeline: &Timeline,
         frame: i64,
-        target: &mut YuvTarget,
-    ) -> nox_media::Result<()> {
+        target: GpuTarget<'_>,
+        measure: bool,
+    ) -> nox_media::Result<Option<FrameLight>> {
         if self.gpu.is_none() {
             return Err(nox_gpu::Error::Unsupported("no Vulkan device".into()).into());
         }
+        let (width, height) = match &target {
+            GpuTarget::Images(target) => (target.width, target.height),
+            GpuTarget::Buffer(target) => (target.layout.width, target.layout.height),
+        };
         let layers = Self::layers(timeline, frame);
         let framing = Framing::of(timeline);
         self.decoders.begin_frame();
-        self.compose(
-            &layers,
-            &framing,
-            target.width,
-            target.height,
-            Quality::Exact,
-            &|| false,
-        )?;
+        self.compose(&layers, &framing, width, height, Quality::Exact, &|| false)?;
         let (_, compositor) = self.gpu.as_mut().expect("gpu");
-        compositor.finish_to_yuv(target)?;
-        Ok(())
+        Ok(compositor.finish_to_gpu(target, measure)?)
+    }
+
+    /// The GPU frames are rendered on, if any.
+    pub fn gpu_device(&self) -> Option<Arc<nox_gpu::GpuDevice>> {
+        self.gpu
+            .as_ref()
+            .map(|(_, compositor)| compositor.gpu().clone())
     }
 
     /// Decodes and places every layer on the GPU (output pending).
@@ -299,44 +329,56 @@ impl Renderer {
     ) -> nox_media::Result<()> {
         let (hw, compositor) = self.gpu.as_mut().expect("gpu");
         compositor.begin(width, height)?;
-        for (path, time, opacity, mode, grade) in layers {
-            if self.failed.contains(path) {
-                continue;
+        for (path, time, opacity, mode, grade, transform, dip) in layers {
+            // A dip's color goes below the picture or above it.
+            if let Some(dip) = dip.filter(|d| d.before) {
+                add_color(compositor, &dip, width, height)?;
             }
-            let decoded = self
-                .decoders
-                .get(path, *time, Some(hw))
-                .and_then(|(decoder, index)| {
-                    let still = decoder.is_still();
-                    decode(decoder, index, quality, stop).map(|frame| (frame, still))
-                });
-            let (decoded, still) = match decoded {
-                Ok(decoded) => decoded,
-                Err(nox_media::Error::Interrupted) => return Err(nox_media::Error::Interrupted),
-                Err(err) => {
-                    tracing::warn!("{}: {err}", path.display());
-                    self.failed.insert(path.clone());
-                    continue;
+            'picture: {
+                if self.failed.contains(path) {
+                    break 'picture;
                 }
-            };
-            let rect = framing.place(nox_media::display_size(&decoded), (width, height));
-            let style = LayerStyle {
-                opacity: *opacity as f32,
-                mode: blend_mode(*mode),
-                grade: *grade,
-            };
-            if still {
-                // Stills are converted once and kept on the GPU.
-                let key = still_key(path);
-                if !compositor.try_cached_layer(key, rect, style) {
+                let decoded =
+                    self.decoders
+                        .get(path, *time, Some(hw))
+                        .and_then(|(decoder, index)| {
+                            let still = decoder.is_still();
+                            decode(decoder, index, quality, stop).map(|frame| (frame, still))
+                        });
+                let (decoded, still) = match decoded {
+                    Ok(decoded) => decoded,
+                    Err(nox_media::Error::Interrupted) => {
+                        return Err(nox_media::Error::Interrupted);
+                    }
+                    Err(err) => {
+                        tracing::warn!("{}: {err}", path.display());
+                        self.failed.insert(path.clone());
+                        break 'picture;
+                    }
+                };
+                let rect = framing.place(nox_media::display_size(&decoded), (width, height));
+                let style = LayerStyle {
+                    opacity: *opacity as f32,
+                    mode: blend_mode(*mode),
+                    grade: *grade,
+                    transform: gpu_transform(transform),
+                };
+                if still {
+                    // Stills are converted once and kept on the GPU.
+                    let key = still_key(path);
+                    if !compositor.try_cached_layer(key, rect, style) {
+                        nox_media::with_gpu_input(&decoded, |input| {
+                            compositor.add_cached_layer(key, input, rect, style)
+                        })??;
+                    }
+                } else {
                     nox_media::with_gpu_input(&decoded, |input| {
-                        compositor.add_cached_layer(key, input, rect, style)
+                        compositor.add_layer(input, rect, style)
                     })??;
                 }
-            } else {
-                nox_media::with_gpu_input(&decoded, |input| {
-                    compositor.add_layer(input, rect, style)
-                })??;
+            }
+            if let Some(dip) = dip.filter(|d| !d.before) {
+                add_color(compositor, &dip, width, height)?;
             }
         }
         Ok(())
@@ -453,14 +495,59 @@ fn still_key(path: &Path) -> u64 {
     hasher.finish()
 }
 
-/// A video layer: file, time in it, opacity, blend mode, grade.
+/// A video layer: file, time in it, opacity, blend mode, grade, transform,
+/// and the color of a dip drawn with it.
 type Layer = (
     PathBuf,
     Time,
     f64,
     nox_project::BlendMode,
     nox_project::Grade,
+    nox_project::Transform,
+    Option<nox_project::Dip>,
 );
+
+/// Queues a solid color over the whole picture (a dip).
+fn add_color(
+    compositor: &mut Compositor,
+    dip: &nox_project::Dip,
+    width: u32,
+    height: u32,
+) -> nox_media::Result<()> {
+    let rgb = dip.color.rgb().map(|c| (c * 255.0).round() as u8);
+    let key = still_key(Path::new(&format!("nox:color:{rgb:?}")));
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    let style = LayerStyle::blend(dip.opacity as f32, BlendMode::Normal);
+    if !compositor.try_cached_layer(key, rect, style) {
+        let frame = nox_media::solid_frame(rgb);
+        nox_media::with_gpu_input(&frame, |input| {
+            compositor.add_cached_layer(key, input, rect, style)
+        })??;
+    }
+    Ok(())
+}
+
+/// A wipe crops what the clip's own crop leaves.
+fn with_wipe(mut transform: nox_project::Transform, wipe: [f64; 4]) -> nox_project::Transform {
+    for (crop, wipe) in transform.crop.iter_mut().zip(wipe) {
+        *crop = crop.max(wipe);
+    }
+    transform
+}
+
+fn gpu_transform(t: &nox_project::Transform) -> Transform {
+    Transform {
+        offset: [t.x as f32, t.y as f32],
+        scale: t.zoom as f32,
+        rotation: t.rotation as f32,
+        crop: t.crop.map(|c| c as f32),
+    }
+}
 
 fn decode(
     decoder: &mut VideoDecoder,

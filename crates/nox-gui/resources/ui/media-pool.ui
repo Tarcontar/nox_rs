@@ -15,6 +15,20 @@
             <style><class name="pane-title"/></style>
           </object>
         </child>
+        <!-- Shown only while media is offline (the action is disabled
+             otherwise), as Premiere's Link Media. -->
+        <child>
+          <object class="GtkButton" id="relink">
+            <property name="icon-name">system-search-symbolic</property>
+            <property name="action-name">win.relink-offline</property>
+            <property name="visible" bind-source="relink" bind-property="sensitive" bind-flags="sync-create"/>
+            <property name="tooltip-text" translatable="yes">Relink Offline Media…</property>
+            <accessibility>
+              <property name="label" translatable="yes">Relink Offline Media…</property>
+            </accessibility>
+            <style><class name="flat"/></style>
+          </object>
+        </child>
         <child>
           <object class="GtkButton">
             <property name="icon-name">list-add-symbolic</property>
@@ -50,7 +64,7 @@
                 <property name="child">
                   <object class="GtkGridView" id="grid">
                     <property name="max-columns">12</property>
-                    <property name="enable-rubberband">true</property>
+                    <property name="enable-rubberband">false</property>
                     <property name="factory">
                       <object class="GtkBuilderListItemFactory">
                         <property name="resource">/io/github/nox/Nox/ui/media-pool-item.ui</property>

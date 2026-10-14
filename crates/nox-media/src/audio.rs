@@ -65,6 +65,12 @@ impl AudioDecoder {
         self.rate
     }
 
+    /// The length of the file in seconds, if the container knows it.
+    pub fn duration_seconds(&self) -> Option<f64> {
+        let duration = self.input.duration();
+        (duration > 0).then(|| duration as f64 / f64::from(ffi::AV_TIME_BASE))
+    }
+
     /// Fills `out` (interleaved stereo) with the samples from sample `start`
     /// on (counted from the start of the stream at the output rate). Seeks
     /// if needed; past the end and before the start there is silence.

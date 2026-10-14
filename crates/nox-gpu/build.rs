@@ -3,7 +3,7 @@
 //! `VARIANTS`. Shaders can `#include "color_constants.glsl"`, which is
 //! generated from nox-color so the GPU uses the same matrices as the CPU.
 
-use nox_color::{OutputTransform, Primaries, Transfer, WORKING_PRIMARIES};
+use nox_color::{OutputEncoding, OutputTransform, Primaries, Transfer, WORKING_PRIMARIES};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,6 +20,9 @@ const VARIANTS: &[(&str, &str, &[&str])] = &[
     ("ycbcr_to_rgb.comp", "ycbcr_to_working", &["WORKING"]),
     // Writes the output as RGBA16F, for AB4H DMA-BUF.
     ("output.comp", "output_f16", &["HALF_FLOAT"]),
+    // 16-bit outputs, for HDR exports: RGBA16 readback and P010 planes.
+    ("output.comp", "output_deep", &["DEEP"]),
+    ("output_yuv.comp", "output_yuv_deep", &["DEEP"]),
 ];
 
 fn main() {
@@ -120,6 +123,16 @@ fn color_constants() -> String {
         mat3(WORKING_PRIMARIES.conversion_to(OutputTransform::PRIMARIES))
     )
     .unwrap();
+    writeln!(
+        out,
+        "\n// The working space to BT.2020, for HDR outputs.\nconst mat3 WORKING_TO_BT2020 = {};",
+        mat3(WORKING_PRIMARIES.conversion_to(Primaries::Bt2020))
+    )
+    .unwrap();
+    for e in [OutputEncoding::Sdr, OutputEncoding::Pq, OutputEncoding::Hlg] {
+        let name = format!("{e:?}").to_uppercase();
+        writeln!(out, "const int ENCODING_{name} = {};", e as i32).unwrap();
+    }
     out
 }
 

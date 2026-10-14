@@ -44,8 +44,12 @@ fn round_trip(
         codec,
         quality: EncodeQuality::High,
         hardware,
+        encoder: None,
         device: None,
+        gpu: None,
         audio_rate: Some(RATE),
+        encoding: nox_media::OutputEncoding::Sdr,
+        peak_nits: 1000.0,
     };
     let mut writer = match MediaWriter::create(&settings) {
         Ok(writer) => writer,
@@ -132,8 +136,12 @@ fn odd_sizes_are_rejected() {
         codec: VideoCodec::H264,
         quality: EncodeQuality::Medium,
         hardware: false,
+        encoder: None,
         device: None,
+        gpu: None,
         audio_rate: None,
+        encoding: nox_media::OutputEncoding::Sdr,
+        peak_nits: 1000.0,
     };
     assert!(MediaWriter::create(&settings).is_err());
 }
@@ -142,12 +150,23 @@ fn odd_sizes_are_rejected() {
 /// input images: what goes in comes out.
 #[test]
 fn vulkan_encode_without_copies() {
+    gpu_encode("h264_vulkan", "vulkan.mp4");
+}
+
+#[test]
+fn nvenc_encode_from_gpu_memory() {
+    gpu_encode("h264_nvenc", "nvenc.mp4");
+}
+
+/// Encodes test frames with `encoder`, which takes them on the GPU, and
+/// checks what comes out.
+fn gpu_encode(encoder: &str, name: &str) {
     use nox_gpu::{Compositor, CpuFrame, LayerStyle, Layout, Plane, PlaneFormat, Rect};
     let Ok((hw, gpu)) = nox_media::HwDevice::vulkan() else {
         eprintln!("skipping: no Vulkan device");
         return;
     };
-    let path = out("vulkan.mp4");
+    let path = out(name);
     let settings = OutputSettings {
         path: path.clone(),
         width: 320,
@@ -156,18 +175,25 @@ fn vulkan_encode_without_copies() {
         codec: VideoCodec::H264,
         quality: EncodeQuality::High,
         hardware: true,
+        encoder: Some(encoder.into()),
         device: Some(hw),
+        gpu: Some(gpu.clone()),
         audio_rate: None,
+        encoding: nox_media::OutputEncoding::Sdr,
+        peak_nits: 1000.0,
     };
-    let mut writer = MediaWriter::create(&settings).unwrap();
-    if !writer.takes_vulkan_frames() {
-        eprintln!(
-            "skipping: no Vulkan Video encoder ({})",
-            writer.video_encoder()
-        );
-        return;
-    }
-    assert_eq!(writer.video_encoder(), "h264_vulkan");
+    let mut writer = match MediaWriter::create(&settings) {
+        Ok(writer) if writer.takes_gpu_frames() => writer,
+        Ok(_) => {
+            eprintln!("skipping: {encoder} takes frames from memory");
+            return;
+        }
+        Err(err) => {
+            eprintln!("skipping: {err}");
+            return;
+        }
+    };
+    assert_eq!(writer.video_encoder(), encoder);
     let mut compositor = Compositor::new(gpu).unwrap();
     for index in 0..30 {
         let image = frame(index, 320, 180);
@@ -192,7 +218,7 @@ fn vulkan_encode_without_copies() {
             .add_layer(&cpu, Rect::fit(16.0 / 9.0, 320, 180), LayerStyle::default())
             .unwrap();
         writer
-            .write_vulkan(|target| compositor.finish_to_yuv(target))
+            .write_gpu(|target, measure| compositor.finish_to_gpu(target, measure))
             .unwrap();
     }
     writer.finish().unwrap();

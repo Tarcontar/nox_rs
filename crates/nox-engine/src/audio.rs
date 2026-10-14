@@ -25,6 +25,8 @@ pub struct Mixer {
     decoders: HashMap<(PathBuf, usize), (AudioDecoder, u64)>,
     failed: HashSet<PathBuf>,
     scratch: Vec<f32>,
+    /// Source samples for clips at another speed.
+    varispeed: Vec<f32>,
     blocks: u64,
 }
 
@@ -35,6 +37,7 @@ impl Mixer {
             decoders: HashMap::new(),
             failed: HashSet::new(),
             scratch: Vec::new(),
+            varispeed: Vec::new(),
             blocks: 0,
         }
     }
@@ -49,7 +52,8 @@ impl Mixer {
         let range = TimeRange::new(Time::new(start, timebase), Time::new(frames, timebase));
         let mut slots: HashMap<PathBuf, usize> = HashMap::new();
         for segment in timeline.audio_segments(range) {
-            if self.failed.contains(&segment.path) {
+            // Freeze frames are silent.
+            if self.failed.contains(&segment.path) || segment.speed == 0.0 {
                 continue;
             }
             // Two segments of one file (e.g. in a crossfade) need two decoders.
@@ -75,11 +79,44 @@ impl Mixer {
             let (decoder, used) = self.decoders.get_mut(&key).expect("decoder");
             *used = self.blocks;
             let place = segment.place.start.rescale(timebase).ticks;
-            let source = segment.source_start.rescale(timebase).ticks + (start - place);
-            self.scratch.resize(out.len(), 0.0);
-            if let Err(err) = decoder.read(source, &mut self.scratch) {
-                tracing::warn!("{}: {err}", segment.path.display());
-                continue;
+            let source_start = segment.source_start.rescale(timebase).ticks;
+            let frames = out.len() / CHANNELS;
+            let speed = segment.speed;
+            if speed == 1.0 {
+                let source = source_start + (start - place);
+                self.scratch.resize(out.len(), 0.0);
+                if let Err(err) = decoder.read(source, &mut self.scratch) {
+                    tracing::warn!("{}: {err}", segment.path.display());
+                    continue;
+                }
+            } else {
+                // Varispeed: read the stretch of source this block covers
+                // and resample it linearly (the pitch changes with speed).
+                let first = source_start as f64 + (start - place) as f64 * speed;
+                let base = first.floor();
+                let span = (frames as f64 * speed).ceil() as usize + 2;
+                self.varispeed.resize(span * CHANNELS, 0.0);
+                if let Err(err) = decoder.read(base as i64, &mut self.varispeed) {
+                    tracing::warn!("{}: {err}", segment.path.display());
+                    continue;
+                }
+                self.scratch.resize(out.len(), 0.0);
+                for (i, frame) in self
+                    .scratch
+                    .as_chunks_mut::<CHANNELS>()
+                    .0
+                    .iter_mut()
+                    .enumerate()
+                {
+                    let pos = first - base + i as f64 * speed;
+                    let index = (pos.floor() as usize).min(span - 2);
+                    let f = (pos - index as f64) as f32;
+                    for (c, sample) in frame.iter_mut().enumerate() {
+                        let a = self.varispeed[index * CHANNELS + c];
+                        let b = self.varispeed[(index + 1) * CHANNELS + c];
+                        *sample = a + (b - a) * f;
+                    }
+                }
             }
             for (i, (dst, src)) in out
                 .chunks_exact_mut(CHANNELS)

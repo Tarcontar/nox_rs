@@ -7,20 +7,25 @@ mod decode;
 mod encode;
 mod frames;
 mod hw;
+mod hwenc;
 mod probe;
 mod thumbnail;
 mod vulkan_frame;
+pub mod waveform;
 
 pub use audio::{AudioDecoder, CHANNELS};
 pub use decode::VideoDecoder;
 pub use encode::{
-    MediaWriter, OutputSettings, Quality as EncodeQuality, VideoCodec, container_for,
+    EncoderProbe, MediaWriter, OutputSettings, Quality as EncodeQuality, VideoCodec, container_for,
+    probe_encoders,
 };
 pub use ffmpeg;
 pub use frames::{
-    color_tags, display_size, input_transform, rgba_cpu, to_software, tone_mapping, with_cpu_frame,
+    color_tags, display_size, input_transform, rgba_cpu, solid_frame, to_software, tone_mapping,
+    with_cpu_frame,
 };
 pub use hw::HwDevice;
+pub use nox_color::OutputEncoding;
 pub use nox_gpu::Image;
 pub use probe::{AudioInfo, MediaInfo, VideoInfo, probe};
 pub use thumbnail::thumbnail;
@@ -47,6 +52,11 @@ pub enum Error {
     Gpu(#[from] nox_gpu::Error),
     #[error("Vulkan: {0}")]
     Vulkan(&'static str),
+    #[error("{}: {source}", path.display())]
+    Io {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

@@ -14,6 +14,7 @@ crates/nox-gui/resources/ui/window.ui
 crates/nox-gui/src/clip_strip.rs
 crates/nox-gui/src/color_wheels.rs
 crates/nox-gui/src/export_dialog.rs
+crates/nox-gui/src/framing.rs
 crates/nox-gui/src/i18n.rs
 crates/nox-gui/src/inspector.rs
 crates/nox-gui/src/media_object.rs
@@ -22,5 +23,7 @@ crates/nox-gui/src/project.rs
 crates/nox-gui/src/scopes.rs
 crates/nox-gui/src/settings_dialog.rs
 crates/nox-gui/src/timeline.rs
+crates/nox-gui/src/track_header.rs
+crates/nox-gui/src/transform_overlay.rs
 crates/nox-gui/src/viewer.rs
 crates/nox-gui/src/window.rs

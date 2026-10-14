@@ -6,23 +6,33 @@
 //! in linear light into a 32-bit float accumulator (`blend.comp`) over a
 //! black background. The output transform (`output.comp`) then writes BT.709
 //! R'G'B': 8 bit to read back, 8 bit or half float to export as DMA-BUF, or
-//! as Y'CbCr into an encoder's image (`output_yuv.comp`).
+//! as Y'CbCr into an encoder's image (`output_yuv.comp`) or into a buffer
+//! shared with another API (`output_linear.comp`, see `interop`).
 
 use ash::vk;
 use std::sync::Arc;
 
 use crate::converter::{
-    GpuImage, Readback, WORKING_FORMAT, color_range, image_barrier, queue_transfer, record_readback,
+    GpuBuffer, GpuImage, Readback, WORKING_FORMAT, color_range, image_barrier, queue_transfer,
+    record_readback,
 };
 use crate::export::{DmabufFormat, ExportPool};
+use crate::interop::{BufferTarget, FrameLight, GpuTarget, LinearFormat};
 use crate::scopes::{ScopeImages, Scopes};
-use crate::{Converter, DmabufFrame, Error, GpuDevice, Image, ImageSync, Input, Result, VkPlane};
-use nox_color::{Grade, Matrix3x4};
+use crate::{
+    Converter, DmabufFrame, Error, GpuDevice, Image, ImageSync, Input, PlaneFormat, Result, VkPlane,
+};
+use nox_color::{Grade, Matrix3x4, OutputEncoding};
 
 const BLEND_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blend.comp.spv"));
 const OUTPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output.comp.spv"));
 const OUTPUT_F16_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output_f16.comp.spv"));
 const OUTPUT_YUV_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output_yuv.comp.spv"));
+const OUTPUT_DEEP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/output_deep.comp.spv"));
+const OUTPUT_YUV_DEEP_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/output_yuv_deep.comp.spv"));
+const OUTPUT_LINEAR_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/output_linear.comp.spv"));
 const WORKGROUP_SIZE: u32 = 16;
 /// Layers per picture.
 pub const MAX_LAYERS: usize = 16;
@@ -130,19 +140,114 @@ struct BlendParams {
     opacity: f32,
     mode: i32,
     /// The grade's coefficients (`nox_color::GradeCoefficients`); `w` of
-    /// `slope` is 1 if the layer is graded at all.
+    /// `slope` is 1 if the layer is graded at all, `w` of `add` 1 if it is
+    /// transformed.
     slope: [f32; 4],
     add: [f32; 4],
     power: [f32; 4],
+    /// Transformed layers: the inverse of the scale and rotation (rows),
+    /// the transformed center and the placed half size (pixels), and the
+    /// uncropped part (u0, v0, u1, v1). 128 bytes in all, the least every
+    /// device offers for push constants.
+    inverse: [f32; 4],
+    geometry: [f32; 4],
+    crop: [f32; 4],
 }
 
-/// How a layer is drawn: graded, then blended.
+/// How a layer is drawn: graded, transformed, then blended.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerStyle {
     pub opacity: f32,
     pub mode: BlendMode,
     /// Applied before blending, in ACEScct (`nox_color::grade`).
     pub grade: Grade,
+    /// Moves, scales, rotates and crops the placed layer.
+    pub transform: Transform,
+}
+
+/// A layer's transform, applied to its placed rectangle around the
+/// rectangle's center: crop, then scale, rotate and move. Independent of
+/// the output size, so a preview matches the export.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transform {
+    /// Movement as a fraction of the output's width and height (right and
+    /// down are positive).
+    pub offset: [f32; 2],
+    pub scale: f32,
+    /// Degrees, clockwise.
+    pub rotation: f32,
+    /// What is cut off each edge (left, top, right, bottom), as a fraction
+    /// of the layer; the rest stays where it was.
+    pub crop: [f32; 4],
+}
+
+impl Transform {
+    pub const IDENTITY: Self = Self {
+        offset: [0.0; 2],
+        scale: 1.0,
+        rotation: 0.0,
+        crop: [0.0; 4],
+    };
+
+    pub fn is_identity(&self) -> bool {
+        *self == Self::IDENTITY
+    }
+
+    /// Output point of the layer point `(u, v)` (0–1 across `rect`) in an
+    /// output of `out` size.
+    fn apply(&self, rect: Rect, out: (u32, u32), (u, v): (f32, f32)) -> (f32, f32) {
+        let (w, h) = (rect.width as f32, rect.height as f32);
+        let center = (
+            rect.x as f32 + w / 2.0 + self.offset[0] * out.0 as f32,
+            rect.y as f32 + h / 2.0 + self.offset[1] * out.1 as f32,
+        );
+        let (qx, qy) = ((u - 0.5) * w * self.scale, (v - 0.5) * h * self.scale);
+        let (sin, cos) = self.rotation.to_radians().sin_cos();
+        (
+            center.0 + cos * qx - sin * qy,
+            center.1 + sin * qx + cos * qy,
+        )
+    }
+
+    /// The output pixels the cropped layer covers: x, y, width, height,
+    /// clipped to the output (`None` if nothing is left).
+    fn bounds(&self, rect: Rect, out: (u32, u32)) -> Option<Rect> {
+        let [left, top, right, bottom] = self.crop;
+        let corners = [
+            (left, top),
+            (1.0 - right, top),
+            (left, 1.0 - bottom),
+            (1.0 - right, 1.0 - bottom),
+        ]
+        .map(|corner| self.apply(rect, out, corner));
+        let min = |f: fn(&(f32, f32)) -> f32| corners.iter().map(f).fold(f32::INFINITY, f32::min);
+        let max =
+            |f: fn(&(f32, f32)) -> f32| corners.iter().map(f).fold(f32::NEG_INFINITY, f32::max);
+        let x0 = (min(|c| c.0).floor() as i32).max(0);
+        let y0 = (min(|c| c.1).floor() as i32).max(0);
+        let x1 = (max(|c| c.0).ceil() as i32).min(out.0 as i32);
+        let y1 = (max(|c| c.1).ceil() as i32).min(out.1 as i32);
+        (x1 > x0 && y1 > y0 && left + right < 1.0 && top + bottom < 1.0).then(|| Rect {
+            x: x0,
+            y: y0,
+            width: (x1 - x0) as u32,
+            height: (y1 - y0) as u32,
+        })
+    }
+
+    /// The size to convert a layer of `rect` at: larger when scaled up, so
+    /// the picture stays sharp (up to 4× and 8192 pixels).
+    fn image_size(&self, rect: Rect) -> (u32, u32) {
+        let factor = self.scale.clamp(1.0, 4.0);
+        let size = |n: u32| ((n as f32 * factor).round() as u32).clamp(1, 8192);
+        (size(rect.width), size(rect.height))
+    }
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
 }
 
 impl Default for LayerStyle {
@@ -158,6 +263,7 @@ impl LayerStyle {
             opacity,
             mode,
             grade: Grade::NEUTRAL,
+            transform: Transform::IDENTITY,
         }
     }
 }
@@ -166,6 +272,8 @@ impl LayerStyle {
 #[derive(Clone, Copy)]
 struct OutputParams {
     size: [i32; 2],
+    /// `nox_color::OutputEncoding`.
+    encoding: i32,
 }
 
 pub(crate) struct Pipeline {
@@ -217,6 +325,21 @@ struct LayerImage {
 struct YuvParams {
     rows: Matrix3x4,
     size: [i32; 2],
+    encoding: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinearParams {
+    rows: Matrix3x4,
+    size: [i32; 2],
+    encoding: i32,
+    deep: i32,
+    /// In 32-bit words.
+    luma_offset: u32,
+    chroma_offset: u32,
+    pitch: u32,
+    measure: i32,
 }
 
 /// An NV12 image of another user (e.g. a video encoder's input frame) to
@@ -240,12 +363,16 @@ enum Output<'a> {
     Export(vk::Image, vk::ImageView),
     /// Luma and chroma plane views of the target.
     Yuv(&'a mut YuvTarget, vk::ImageView, vk::ImageView),
+    /// Measures the light when the flag is set.
+    Buffer(&'a BufferTarget<'a>, bool),
 }
 
 /// The views the output shader writes.
 enum OutputViews {
     Rgba(vk::ImageView),
     Yuv(vk::ImageView, vk::ImageView),
+    /// The frame buffer and the light measurements.
+    Buffer(vk::Buffer, vk::Buffer),
 }
 
 pub struct Compositor {
@@ -257,10 +384,21 @@ pub struct Compositor {
     /// layouts).
     output_f16: Pipeline,
     output_yuv: Pipeline,
+    /// RGBA16 readback and P010 planes, for HDR exports.
+    output_deep: Pipeline,
+    output_yuv_deep: Pipeline,
+    /// Into a shared buffer, NV12 or P010.
+    output_linear: Pipeline,
+    /// How pictures leave the working space.
+    encoding: OutputEncoding,
     descriptor_pool: vk::DescriptorPool,
     blend_sets: Vec<vk::DescriptorSet>,
     output_set: vk::DescriptorSet,
     output_yuv_set: vk::DescriptorSet,
+    output_linear_set: vk::DescriptorSet,
+    /// Per-workgroup light measurements of `output_linear` (host-visible),
+    /// and how many it holds.
+    light: Option<(GpuBuffer, u64)>,
     sampler: vk::Sampler,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
@@ -324,10 +462,39 @@ impl Compositor {
                 &[storage(0), storage(1), storage(2)],
                 size_of::<YuvParams>(),
             )?;
+            let output_deep = create_pipeline(
+                device,
+                OUTPUT_DEEP_SHADER,
+                &[storage(0), storage(1)],
+                size_of::<OutputParams>(),
+            )?;
+            let output_yuv_deep = create_pipeline(
+                device,
+                OUTPUT_YUV_DEEP_SHADER,
+                &[storage(0), storage(1), storage(2)],
+                size_of::<YuvParams>(),
+            )?;
+            let buffer = |binding| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            };
+            let output_linear = create_pipeline(
+                device,
+                OUTPUT_LINEAR_SHADER,
+                &[storage(0), buffer(1), buffer(2)],
+                size_of::<LinearParams>(),
+            )?;
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_IMAGE,
-                    descriptor_count: MAX_LAYERS as u32 + 5,
+                    descriptor_count: MAX_LAYERS as u32 + 6,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    descriptor_count: 2,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -336,7 +503,7 @@ impl Compositor {
             ];
             let descriptor_pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(MAX_LAYERS as u32 + 2)
+                    .max_sets(MAX_LAYERS as u32 + 3)
                     .pool_sizes(&pool_sizes),
                 None,
             )?;
@@ -355,6 +522,11 @@ impl Compositor {
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(descriptor_pool)
                     .set_layouts(std::slice::from_ref(&output_yuv.set_layout)),
+            )?[0];
+            let output_linear_set = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(descriptor_pool)
+                    .set_layouts(std::slice::from_ref(&output_linear.set_layout)),
             )?[0];
             // Layers are blended 1:1, texel by texel.
             let sampler = device.create_sampler(
@@ -384,10 +556,16 @@ impl Compositor {
                 output,
                 output_f16,
                 output_yuv,
+                output_deep,
+                output_yuv_deep,
+                output_linear,
+                encoding: OutputEncoding::Sdr,
                 descriptor_pool,
                 blend_sets,
                 output_set,
                 output_yuv_set,
+                output_linear_set,
+                light: None,
                 sampler,
                 command_pool,
                 command_buffer,
@@ -465,28 +643,29 @@ impl Compositor {
         Ok(())
     }
 
-    /// Whether `rect` shows anything of a layer at `opacity`.
-    fn visible(&self, rect: Rect, opacity: f32) -> bool {
+    /// Whether a layer at `rect` with `style` shows anything.
+    fn visible(&self, rect: Rect, style: &LayerStyle) -> bool {
         rect.width > 0
             && rect.height > 0
-            && rect.x < self.width as i32
-            && rect.y < self.height as i32
-            && rect.x + rect.width as i32 > 0
-            && rect.y + rect.height as i32 > 0
-            && opacity > 0.0
+            && style.opacity > 0.0
+            && style
+                .transform
+                .bounds(rect, (self.width, self.height))
+                .is_some()
     }
 
     /// Queues the still cached under `key` at `rect`'s size, if there is
     /// one; returns whether it was (else convert it with
     /// `add_cached_layer`). Invisible layers count as queued.
     pub fn try_cached_layer(&mut self, key: u64, rect: Rect, style: LayerStyle) -> bool {
-        if !self.visible(rect, style.opacity) {
+        if !self.visible(rect, &style) {
             return true;
         }
+        let size = style.transform.image_size(rect);
         let Some(index) = self
             .cache
             .iter()
-            .position(|c| c.key == key && (c.width, c.height) == (rect.width, rect.height))
+            .position(|c| c.key == key && (c.width, c.height) == size)
         else {
             return false;
         };
@@ -517,27 +696,25 @@ impl Compositor {
         if self.layers.len() >= MAX_LAYERS {
             return Err(Error::Unsupported(format!("more than {MAX_LAYERS} layers")));
         }
-        if !self.visible(rect, style.opacity) {
+        if !self.visible(rect, &style) {
             return Ok(());
         }
+        let (width, height) = style.transform.image_size(rect);
         let image = self.converter.create_image(
             WORKING_FORMAT,
-            rect.width,
-            rect.height,
+            width,
+            height,
             vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
         )?;
-        if let Err(err) = self
-            .converter
-            .convert_into(input, &image, rect.width, rect.height)
-        {
+        if let Err(err) = self.converter.convert_into(input, &image, width, height) {
             self.converter.destroy_image(image);
             return Err(err);
         }
         let entry = CachedLayer {
             key,
             image,
-            width: rect.width,
-            height: rect.height,
+            width,
+            height,
             layout: vk::ImageLayout::GENERAL,
             used: self.clock,
         };
@@ -593,25 +770,26 @@ impl Compositor {
         if self.layers.len() >= MAX_LAYERS {
             return Err(Error::Unsupported(format!("more than {MAX_LAYERS} layers")));
         }
-        if !self.visible(rect, style.opacity) {
+        if !self.visible(rect, &style) {
             return Ok(());
         }
         let index = self.slots_used;
+        let (width, height) = style.transform.image_size(rect);
         if self
             .images
             .get(index)
-            .is_none_or(|i| (i.width, i.height) != (rect.width, rect.height))
+            .is_none_or(|i| (i.width, i.height) != (width, height))
         {
             let image = self.converter.create_image(
                 WORKING_FORMAT,
-                rect.width,
-                rect.height,
+                width,
+                height,
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
             )?;
             let layer_image = LayerImage {
                 image,
-                width: rect.width,
-                height: rect.height,
+                width,
+                height,
             };
             if index < self.images.len() {
                 let old = std::mem::replace(&mut self.images[index], layer_image);
@@ -621,8 +799,7 @@ impl Compositor {
             }
         }
         let target = &self.images[index].image;
-        self.converter
-            .convert_into(input, target, rect.width, rect.height)?;
+        self.converter.convert_into(input, target, width, height)?;
         self.slots_used += 1;
         self.layers.push(Layer {
             rect,
@@ -635,19 +812,34 @@ impl Compositor {
         Ok(())
     }
 
-    /// Blends the layers and reads the picture back.
+    /// How pictures leave the working space: SDR BT.709 (the default) or
+    /// BT.2020 PQ or HLG for HDR exports. With HDR, HDR sources keep their
+    /// light, and `finish` reads back RGBA16.
+    pub fn set_output_encoding(&mut self, encoding: OutputEncoding) {
+        self.encoding = encoding;
+        self.converter.set_keep_hdr(encoding.is_hdr());
+    }
+
+    pub fn output_encoding(&self) -> OutputEncoding {
+        self.encoding
+    }
+
+    /// Blends the layers and reads the picture back: RGBA8, or RGBA16 for
+    /// an HDR encoding.
     pub fn finish(&mut self) -> Result<Image> {
         let (width, height) = (self.width, self.height);
+        let bytes = if self.encoding.is_hdr() { 8 } else { 4 };
         if self
             .readback
             .as_ref()
-            .is_none_or(|r| (r.width, r.height) != (width, height))
+            .is_none_or(|r| (r.width, r.height, r.bytes_per_pixel) != (width, height, bytes))
         {
             if let Some(old) = self.readback.take() {
                 self.converter.destroy_image(old.image);
                 self.converter.destroy_buffer(old.buffer);
             }
-            self.readback = Some(self.converter.create_readback(width, height)?);
+            let deep = self.encoding.is_hdr();
+            self.readback = Some(self.converter.create_readback(width, height, deep)?);
         }
         let readback = self.readback.take().expect("readback");
         let result = self.composite(Output::Readback(&readback));
@@ -676,8 +868,8 @@ impl Compositor {
         if (target.width, target.height) != (self.width, self.height) {
             return Err(Error::InvalidFrame("target size differs from the picture"));
         }
-        let luma = self.plane_view(&target.luma, vk::Format::R8_UNORM)?;
-        let chroma = match self.plane_view(&target.chroma, vk::Format::R8G8_UNORM) {
+        let luma = self.plane_view(&target.luma, target.luma.format.vk())?;
+        let chroma = match self.plane_view(&target.chroma, target.chroma.format.vk()) {
             Ok(view) => view,
             Err(err) => {
                 // SAFETY: just created, unused.
@@ -692,6 +884,98 @@ impl Compositor {
             self.gpu().device.destroy_image_view(chroma, None);
         }
         result
+    }
+
+    /// Blends the layers and writes the picture as 4:2:0 Y'CbCr into
+    /// `target`, a buffer shared with another API (see `interop`): no
+    /// copies. The buffer is acquired from and released to the external
+    /// queue family; the writes are complete when this returns. With
+    /// `measure`, also returns the light of the frame (for HDR10 metadata).
+    pub fn finish_to_buffer(
+        &mut self,
+        target: &BufferTarget<'_>,
+        measure: bool,
+    ) -> Result<Option<FrameLight>> {
+        let layout = &target.layout;
+        if (layout.width, layout.height) != (self.width, self.height) {
+            return Err(Error::InvalidFrame("target size differs from the picture"));
+        }
+        if !layout.pitch.is_multiple_of(4)
+            || !layout.luma_offset.is_multiple_of(4)
+            || !layout.chroma_offset.is_multiple_of(4)
+            || layout.pitch < layout.width * layout.format.bytes_per_sample()
+            || layout.chroma_offset
+                < layout.luma_offset + u64::from(layout.pitch) * u64::from(layout.height)
+            || layout.size() > target.buffer.size()
+        {
+            return Err(Error::InvalidFrame("target layout doesn't fit its buffer"));
+        }
+        let groups = self.linear_groups(layout.format);
+        if self.light.as_ref().is_none_or(|(_, count)| *count < groups) {
+            if let Some((old, _)) = self.light.take() {
+                self.converter.destroy_buffer(old);
+            }
+            let buffer = self.converter.create_buffer(
+                groups * 8,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuToCpu,
+            )?;
+            self.light = Some((buffer, groups));
+        }
+        self.composite(Output::Buffer(target, measure))?;
+        if !measure {
+            return Ok(None);
+        }
+        let (buffer, _) = self.light.as_ref().expect("light buffer");
+        let partials = buffer
+            .allocation
+            .as_ref()
+            .and_then(|a| a.mapped_slice())
+            .expect("mapped light buffer");
+        let (mut peak, mut sum) = (0f32, 0f64);
+        for partial in partials[..groups as usize * 8].as_chunks::<8>().0 {
+            let value =
+                |i: usize| f32::from_le_bytes(partial[i..i + 4].try_into().expect("4 bytes"));
+            peak = peak.max(value(0));
+            sum += f64::from(value(4));
+        }
+        let pixels = f64::from(self.width) * f64::from(self.height);
+        Ok(Some(FrameLight {
+            peak,
+            average: (sum / pixels.max(1.0)) as f32,
+        }))
+    }
+
+    /// Workgroups of `output_linear` across the picture, in X and Y.
+    fn linear_dispatch(&self, format: LinearFormat) -> (u32, u32) {
+        let columns = match format {
+            LinearFormat::Nv12 => 4,
+            LinearFormat::P010 => 2,
+        };
+        (
+            self.width.div_ceil(columns * WORKGROUP_SIZE),
+            self.height.div_ceil(2 * WORKGROUP_SIZE),
+        )
+    }
+
+    fn linear_groups(&self, format: LinearFormat) -> u64 {
+        let (x, y) = self.linear_dispatch(format);
+        u64::from(x) * u64::from(y)
+    }
+
+    /// Blends the layers into a hardware encoder's frame, whichever kind
+    /// it is (`finish_to_yuv`, `finish_to_buffer`). With `measure`, also
+    /// returns the light of the frame, where the output can measure it
+    /// (buffers).
+    pub fn finish_to_gpu(
+        &mut self,
+        target: GpuTarget<'_>,
+        measure: bool,
+    ) -> Result<Option<FrameLight>> {
+        match target {
+            GpuTarget::Images(target) => self.finish_to_yuv(target).map(|()| None),
+            GpuTarget::Buffer(target) => self.finish_to_buffer(&target, measure),
+        }
     }
 
     /// A storage view of one plane of another user's image.
@@ -749,6 +1033,7 @@ impl Compositor {
         let (first, second) = match *output {
             OutputViews::Rgba(view) => (view, None),
             OutputViews::Yuv(luma, chroma) => (luma, Some(chroma)),
+            OutputViews::Buffer(..) => (vk::ImageView::null(), None),
         };
         let first_info = storage(first);
         let second_info = second.map(storage);
@@ -756,6 +1041,17 @@ impl Compositor {
             self.output_yuv_set
         } else {
             self.output_set
+        };
+        let buffer_infos = match *output {
+            OutputViews::Buffer(frame, light) => Some([
+                vk::DescriptorBufferInfo::default()
+                    .buffer(frame)
+                    .range(vk::WHOLE_SIZE),
+                vk::DescriptorBufferInfo::default()
+                    .buffer(light)
+                    .range(vk::WHOLE_SIZE),
+            ]),
+            _ => None,
         };
         let layer_infos: Vec<_> = self
             .layers
@@ -785,7 +1081,29 @@ impl Compositor {
                     .image_info(std::slice::from_ref(layer_info)),
             );
         }
-        let outputs = [Some(&accum_info), Some(&first_info), second_info.as_ref()];
+        if let Some(infos) = &buffer_infos {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.output_linear_set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(std::slice::from_ref(&accum_info)),
+            );
+            for (i, info) in infos.iter().enumerate() {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.output_linear_set)
+                        .dst_binding(1 + i as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(std::slice::from_ref(info)),
+                );
+            }
+        }
+        let outputs = if buffer_infos.is_some() {
+            [None, None, None]
+        } else {
+            [Some(&accum_info), Some(&first_info), second_info.as_ref()]
+        };
         for (binding, info) in outputs.into_iter().enumerate() {
             if let Some(info) = info {
                 writes.push(
@@ -808,6 +1126,13 @@ impl Compositor {
             Output::Readback(r) => (r.image.image, OutputViews::Rgba(r.image.view)),
             Output::Export(image, view) => (*image, OutputViews::Rgba(*view)),
             Output::Yuv(_, luma, chroma) => (vk::Image::null(), OutputViews::Yuv(*luma, *chroma)),
+            Output::Buffer(target, _) => (
+                vk::Image::null(),
+                OutputViews::Buffer(
+                    target.buffer.buffer,
+                    self.light.as_ref().expect("light buffer").0.buffer,
+                ),
+            ),
         };
         self.write_descriptors(&views);
         let gpu = self.gpu().clone();
@@ -913,21 +1238,55 @@ impl Compositor {
                 } else {
                     1.0
                 };
+                let t = layer.style.transform;
+                let transformed = !t.is_identity();
+                // Untransformed layers are blended texel by texel over their
+                // rectangle; transformed ones over the pixels they cover.
+                let region = if transformed {
+                    match t.bounds(layer.rect, (width, height)) {
+                        Some(region) => region,
+                        None => continue,
+                    }
+                } else {
+                    layer.rect
+                };
+                let (sin, cos) = t.rotation.to_radians().sin_cos();
+                let inverse_scale = 1.0 / t.scale.max(1e-6);
+                let (w, h) = (layer.rect.width as f32, layer.rect.height as f32);
                 let params = BlendParams {
-                    offset: [layer.rect.x, layer.rect.y],
-                    size: [layer.rect.width as i32, layer.rect.height as i32],
+                    offset: [region.x, region.y],
+                    size: [region.width as i32, region.height as i32],
                     out_size: [width as i32, height as i32],
                     opacity: layer.style.opacity,
                     mode: layer.style.mode as i32,
                     slope: [k.slope[0], k.slope[1], k.slope[2], graded],
-                    add: [k.add[0], k.add[1], k.add[2], 0.0],
+                    add: [
+                        k.add[0],
+                        k.add[1],
+                        k.add[2],
+                        f32::from(u8::from(transformed)),
+                    ],
                     power: [k.power[0], k.power[1], k.power[2], 0.0],
+                    // R(-θ) / scale, as rows.
+                    inverse: [
+                        cos * inverse_scale,
+                        sin * inverse_scale,
+                        -sin * inverse_scale,
+                        cos * inverse_scale,
+                    ],
+                    geometry: [
+                        layer.rect.x as f32 + w / 2.0 + t.offset[0] * width as f32,
+                        layer.rect.y as f32 + h / 2.0 + t.offset[1] * height as f32,
+                        w / 2.0,
+                        h / 2.0,
+                    ],
+                    crop: [t.crop[0], t.crop[1], 1.0 - t.crop[2], 1.0 - t.crop[3]],
                 };
                 push(device, cmd, self.blend.layout, &params);
                 device.cmd_dispatch(
                     cmd,
-                    layer.rect.width.div_ceil(WORKGROUP_SIZE),
-                    layer.rect.height.div_ceil(WORKGROUP_SIZE),
+                    region.width.div_ceil(WORKGROUP_SIZE),
+                    region.height.div_ceil(WORKGROUP_SIZE),
                     1,
                 );
                 device.cmd_pipeline_barrier2(
@@ -941,10 +1300,6 @@ impl Compositor {
                 // Acquire the target from its last user. Its contents are
                 // overwritten, so the old layout's data doesn't matter.
                 let own = gpu.queue_family;
-                // COLOR also for one multi-planar image: per-plane aspects
-                // are only valid in barriers on disjoint images
-                // (VUID-VkImageMemoryBarrier2-image-09242), and FFmpeg's
-                // aren't.
                 let acquire: Vec<_> = target
                     .images
                     .iter()
@@ -965,15 +1320,17 @@ impl Compositor {
                     cmd,
                     &vk::DependencyInfo::default().image_memory_barriers(&acquire),
                 );
-                device.cmd_bind_pipeline(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.output_yuv.pipeline,
-                );
+                // 16-bit planes (P010) for 10-bit HDR.
+                let pipeline = if target.luma.format == PlaneFormat::R16 {
+                    &self.output_yuv_deep
+                } else {
+                    &self.output_yuv
+                };
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline);
                 device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::COMPUTE,
-                    self.output_yuv.layout,
+                    pipeline.layout,
                     0,
                     &[self.output_yuv_set],
                     &[],
@@ -981,10 +1338,11 @@ impl Compositor {
                 push(
                     device,
                     cmd,
-                    self.output_yuv.layout,
+                    pipeline.layout,
                     &YuvParams {
                         rows: target.matrix,
                         size: [width as i32, height as i32],
+                        encoding: self.encoding as i32,
                     },
                 );
                 // One invocation per 2×2 block.
@@ -994,6 +1352,50 @@ impl Compositor {
                     height.div_ceil(2 * WORKGROUP_SIZE),
                     1,
                 );
+            } else if let Output::Buffer(target, measure) = &output {
+                // Acquire the buffer from the other API (which has finished
+                // reading the previous frame; see `interop`). It's
+                // overwritten, so its contents don't matter.
+                let acquire = vk::BufferMemoryBarrier2::default()
+                    .buffer(target.buffer.buffer)
+                    .size(vk::WHOLE_SIZE)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+                    .dst_queue_family_index(gpu.queue_family)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE);
+                device.cmd_pipeline_barrier2(
+                    cmd,
+                    &vk::DependencyInfo::default()
+                        .buffer_memory_barriers(std::slice::from_ref(&acquire)),
+                );
+                let pipeline = &self.output_linear;
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline);
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    pipeline.layout,
+                    0,
+                    &[self.output_linear_set],
+                    &[],
+                );
+                let layout = &target.layout;
+                push(
+                    device,
+                    cmd,
+                    pipeline.layout,
+                    &LinearParams {
+                        rows: target.matrix,
+                        size: [width as i32, height as i32],
+                        encoding: self.encoding as i32,
+                        deep: i32::from(layout.format == LinearFormat::P010),
+                        luma_offset: (layout.luma_offset / 4) as u32,
+                        chroma_offset: (layout.chroma_offset / 4) as u32,
+                        pitch: layout.pitch / 4,
+                        measure: i32::from(*measure),
+                    },
+                );
+                let (x, y) = self.linear_dispatch(layout.format);
+                device.cmd_dispatch(cmd, x, y, 1);
             } else {
                 let to_output = image_barrier(
                     out_image,
@@ -1009,10 +1411,19 @@ impl Compositor {
                 );
                 let half_float = matches!(output, Output::Export(..))
                     && self.dmabuf_format() == Some(DmabufFormat::Rgba16f);
+                let deep = matches!(output, Output::Readback(r) if r.bytes_per_pixel == 8);
                 let pipeline = if half_float {
                     &self.output_f16
+                } else if deep {
+                    &self.output_deep
                 } else {
                     &self.output
+                };
+                // The viewer (DMA-BUF) always shows SDR.
+                let encoding = if deep {
+                    self.encoding
+                } else {
+                    OutputEncoding::Sdr
                 };
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline);
                 device.cmd_bind_descriptor_sets(
@@ -1029,6 +1440,7 @@ impl Compositor {
                     pipeline.layout,
                     &OutputParams {
                         size: [width as i32, height as i32],
+                        encoding: encoding as i32,
                     },
                 );
                 device.cmd_dispatch(
@@ -1056,10 +1468,35 @@ impl Compositor {
                 // The semaphore signal below makes the writes available to
                 // the next user, who acquires the images itself.
                 Output::Yuv(..) => {}
+                Output::Buffer(target, measure) => {
+                    let release = vk::BufferMemoryBarrier2::default()
+                        .buffer(target.buffer.buffer)
+                        .size(vk::WHOLE_SIZE)
+                        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                        .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                        .src_queue_family_index(gpu.queue_family)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL);
+                    let mut barriers = vec![release];
+                    if *measure {
+                        barriers.push(
+                            vk::BufferMemoryBarrier2::default()
+                                .buffer(self.light.as_ref().expect("light buffer").0.buffer)
+                                .size(vk::WHOLE_SIZE)
+                                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                                .dst_access_mask(vk::AccessFlags2::HOST_READ),
+                        );
+                    }
+                    device.cmd_pipeline_barrier2(
+                        cmd,
+                        &vk::DependencyInfo::default().buffer_memory_barriers(&barriers),
+                    );
+                }
             }
             // The accumulator is still in GENERAL, its writes visible to
             // compute shaders (the barrier after the last layer).
-            let measure = !matches!(output, Output::Yuv(..));
+            let measure = matches!(output, Output::Readback(_) | Output::Export(..));
             if let Some(scopes) = self.scopes.as_ref().filter(|_| measure) {
                 let view = self.accum.as_ref().expect("accum").0.view;
                 scopes.record(device, cmd, view, width, height);
@@ -1133,6 +1570,9 @@ impl Drop for Compositor {
             self.converter.destroy_buffer(readback.buffer);
         }
         self.export = None;
+        if let Some((light, _)) = self.light.take() {
+            self.converter.destroy_buffer(light);
+        }
         if let Some(scopes) = self.scopes.take() {
             scopes.destroy(&self.converter);
         }
@@ -1149,6 +1589,9 @@ impl Drop for Compositor {
                 &self.output,
                 &self.output_f16,
                 &self.output_yuv,
+                &self.output_deep,
+                &self.output_yuv_deep,
+                &self.output_linear,
             ] {
                 device.destroy_pipeline(pipeline.pipeline, None);
                 device.destroy_pipeline_layout(pipeline.layout, None);

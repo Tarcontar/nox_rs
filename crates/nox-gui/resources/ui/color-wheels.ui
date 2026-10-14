@@ -34,10 +34,54 @@
   <template class="NoxColorWheels" parent="GtkBox">
     <property name="orientation">vertical</property>
     <child>
-      <object class="GtkLabel">
-        <property name="label" translatable="yes">Color Wheels</property>
-        <property name="xalign">0</property>
-        <style><class name="pane-title"/></style>
+      <!-- The title, with the grade's keyframes: previous, a keyframe at
+           the playhead, next. -->
+      <object class="GtkBox">
+        <property name="margin-end">8</property>
+        <child>
+          <object class="GtkLabel">
+            <property name="label" translatable="yes">Color Wheels</property>
+            <property name="xalign">0</property>
+            <property name="hexpand">true</property>
+            <style><class name="pane-title"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton">
+            <property name="icon-name">go-previous-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Previous Keyframe</property>
+            <accessibility>
+              <property name="label" translatable="yes">Previous Keyframe</property>
+            </accessibility>
+            <signal name="clicked" handler="on_previous_keyframe" swapped="true"/>
+            <style><class name="flat"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="grade_key">
+            <property name="icon-name">nox-keyframe-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Grade keyframe at the playhead</property>
+            <accessibility>
+              <property name="label" translatable="yes">Grade keyframe at the playhead</property>
+            </accessibility>
+            <signal name="toggled" handler="on_grade_key_toggled" swapped="true"/>
+            <style>
+              <class name="keyframe"/>
+              <class name="flat"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton">
+            <property name="icon-name">go-next-symbolic</property>
+            <property name="tooltip-text" translatable="yes">Next Keyframe</property>
+            <accessibility>
+              <property name="label" translatable="yes">Next Keyframe</property>
+            </accessibility>
+            <signal name="clicked" handler="on_next_keyframe" swapped="true"/>
+            <style><class name="flat"/></style>
+          </object>
+        </child>
       </object>
     </child>
     <child>

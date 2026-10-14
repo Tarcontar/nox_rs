@@ -32,6 +32,9 @@ pub struct Timeline {
     /// Fields from other tools or OTIO versions that Nox doesn't know,
     /// passed through.
     pub extra: Object,
+    /// The folder relative media paths are resolved against: the one the
+    /// `.otio` file was opened from. Not saved.
+    pub media_dir: Option<PathBuf>,
 }
 
 /// Nox's own sequence settings, stored under `metadata.nox` in `.otio`.
@@ -110,6 +113,24 @@ pub enum ScalingMode {
 }
 
 impl ScalingMode {
+    /// Where a picture of `source` size goes in a sequence of `sequence`
+    /// size before its transform: x, y, width, height in sequence pixels.
+    /// The same placement as the compositor's (`nox_gpu::Rect::place`).
+    pub fn place(self, source: (u32, u32), sequence: (u32, u32)) -> [f64; 4] {
+        let (sw, sh) = (f64::from(source.0.max(1)), f64::from(source.1.max(1)));
+        let (w, h) = (f64::from(sequence.0.max(1)), f64::from(sequence.1.max(1)));
+        let aspect = sw / sh;
+        let centered = |pw: f64, ph: f64| [(w - pw) / 2.0, (h - ph) / 2.0, pw, ph];
+        match self {
+            Self::Fit if aspect >= w / h => centered(w, w / aspect),
+            Self::Fit => centered(h * aspect, h),
+            Self::Fill if aspect >= w / h => centered(h * aspect, h),
+            Self::Fill => centered(w, w / aspect),
+            Self::CenterCrop => centered(sw, sh),
+            Self::Stretch => [0.0, 0.0, w, h],
+        }
+    }
+
     pub const ALL: [ScalingMode; 4] = [Self::Fit, Self::Fill, Self::CenterCrop, Self::Stretch];
 
     pub fn as_str(self) -> &'static str {
@@ -150,7 +171,55 @@ impl Timeline {
             tracks,
             settings: Settings::default(),
             extra: Object::new(),
+            media_dir: None,
         }
+    }
+
+    /// The local file of `reference`, with a relative path resolved
+    /// against `media_dir`, as OTIO tools do with paths relative to the
+    /// `.otio` file.
+    pub fn media_path(&self, reference: &MediaReference) -> Option<PathBuf> {
+        let path = reference.path()?;
+        Some(match &self.media_dir {
+            Some(dir) if path.is_relative() => dir.join(path),
+            _ => path,
+        })
+    }
+
+    /// Turns relative media paths into absolute `file://` URLs, for saving
+    /// the timeline away from `media_dir`.
+    pub fn make_media_paths_absolute(&mut self) {
+        let Some(dir) = self.media_dir.clone() else {
+            return;
+        };
+        self.for_each_reference_mut(|reference| {
+            if let Some(path) = reference.path().filter(|p| p.is_relative())
+                && let ReferenceKind::External { target_url } = &mut reference.kind
+            {
+                *target_url = file_url(&dir.join(path));
+            }
+        });
+    }
+
+    /// Calls `f` with every media reference of every clip (active or not),
+    /// also inside nested stacks.
+    pub fn for_each_reference_mut(&mut self, mut f: impl FnMut(&mut MediaReference)) {
+        fn visit(composable: &mut Composable, f: &mut dyn FnMut(&mut MediaReference)) {
+            match composable {
+                Composable::Clip(clip) => {
+                    for (_, reference) in &mut clip.media_references {
+                        f(reference);
+                    }
+                }
+                Composable::Track(track) => track.children.iter_mut().for_each(|c| visit(c, f)),
+                Composable::Stack(stack) => stack.children.iter_mut().for_each(|c| visit(c, f)),
+                _ => {}
+            }
+        }
+        self.tracks
+            .children
+            .iter_mut()
+            .for_each(|c| visit(c, &mut f));
     }
 
     /// The sequence frame rate: the rate of `global_start_time` if set,
@@ -255,6 +324,11 @@ pub struct ResolvedClip<'a> {
     pub source_time: Time,
     /// The clip's opacity, times the progress of a dissolve it fades in by.
     pub opacity: f64,
+    /// Cut off by a wipe it comes in with (left, top, right, bottom, as
+    /// fractions of the picture).
+    pub wipe: [f64; 4],
+    /// A color drawn with it, in a dip.
+    pub dip: Option<Dip>,
 }
 
 impl ResolvedClip<'_> {
@@ -270,6 +344,79 @@ impl ResolvedClip<'_> {
             Some(range) => self.source_time - range.start,
             None => self.source_time,
         }
+    }
+}
+
+/// Where a video clip's picture goes, applied after it is fitted to the
+/// sequence (Resolve's Transform and Cropping): crop, zoom and rotate
+/// around the picture's center, then move.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transform {
+    /// Movement as a fraction of the sequence's width (right is positive).
+    pub x: f64,
+    /// Movement as a fraction of the sequence's height (down is positive).
+    pub y: f64,
+    /// 1 is the fitted size.
+    pub zoom: f64,
+    /// Degrees, clockwise.
+    pub rotation: f64,
+    /// Cut off the left, top, right and bottom, as fractions of the
+    /// picture; what remains stays in place.
+    pub crop: [f64; 4],
+}
+
+impl Transform {
+    /// The corners (top left, top right, bottom right, bottom left) of the
+    /// cropped picture in sequence pixels, for a picture placed at `placed`
+    /// (x, y, width, height) in a sequence of `sequence` size; as the
+    /// compositor draws it.
+    pub fn corners(&self, placed: [f64; 4], sequence: (u32, u32)) -> [(f64, f64); 4] {
+        let [left, top, right, bottom] = self.crop;
+        [
+            (left, top),
+            (1.0 - right, top),
+            (1.0 - right, 1.0 - bottom),
+            (left, 1.0 - bottom),
+        ]
+        .map(|uv| self.apply(placed, sequence, uv))
+    }
+
+    /// Where the picture's center goes, in sequence pixels.
+    pub fn center(&self, placed: [f64; 4], sequence: (u32, u32)) -> (f64, f64) {
+        self.apply(placed, sequence, (0.5, 0.5))
+    }
+
+    /// The sequence point of the picture point `(u, v)` (0–1 across it).
+    pub fn apply(&self, placed: [f64; 4], sequence: (u32, u32), (u, v): (f64, f64)) -> (f64, f64) {
+        let [x, y, w, h] = placed;
+        let center = (
+            x + w / 2.0 + self.x * f64::from(sequence.0),
+            y + h / 2.0 + self.y * f64::from(sequence.1),
+        );
+        let (qx, qy) = ((u - 0.5) * w * self.zoom, (v - 0.5) * h * self.zoom);
+        let (sin, cos) = self.rotation.to_radians().sin_cos();
+        (
+            center.0 + cos * qx - sin * qy,
+            center.1 + sin * qx + cos * qy,
+        )
+    }
+
+    pub const IDENTITY: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        zoom: 1.0,
+        rotation: 0.0,
+        crop: [0.0; 4],
+    };
+
+    pub fn is_identity(&self) -> bool {
+        *self == Self::IDENTITY
+    }
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
     }
 }
 
@@ -375,6 +522,30 @@ impl Item {
         self.set_nox_value("locked", locked.then_some(Value::Bool(true)));
     }
 
+    /// Whether a track follows ripple edits on other tracks
+    /// (`metadata.nox.sync_lock`, default off), so it stays in sync.
+    pub fn sync_locked(&self) -> bool {
+        self.nox_value("sync_lock")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    pub fn set_sync_locked(&mut self, on: bool) {
+        self.set_nox_value("sync_lock", on.then_some(Value::Bool(true)));
+    }
+
+    /// Whether an audio track is soloed (`metadata.nox.solo`): while any
+    /// track is, only soloed tracks are heard.
+    pub fn solo(&self) -> bool {
+        self.nox_value("solo")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    pub fn set_solo(&mut self, on: bool) {
+        self.set_nox_value("solo", on.then_some(Value::Bool(true)));
+    }
+
     /// Opacity of a video clip, 0–1 (`metadata.nox.opacity`, default 1).
     pub fn opacity(&self) -> f64 {
         self.nox_value("opacity")
@@ -385,6 +556,52 @@ impl Item {
     pub fn set_opacity(&mut self, opacity: f64) {
         let opacity = opacity.clamp(0.0, 1.0);
         self.set_nox_value("opacity", (opacity < 1.0).then_some(Value::Float(opacity)));
+    }
+
+    /// Length of the fade-in in seconds (`metadata.nox.fade_in`, default
+    /// 0): video fades from transparent, audio from silence. Stored in
+    /// seconds, so it keeps its length if the frame rate changes.
+    pub fn fade_in(&self) -> f64 {
+        self.fade("fade_in")
+    }
+
+    /// Length of the fade-out in seconds (`metadata.nox.fade_out`).
+    pub fn fade_out(&self) -> f64 {
+        self.fade("fade_out")
+    }
+
+    pub fn set_fade_in(&mut self, seconds: f64) {
+        self.set_fade("fade_in", seconds);
+    }
+
+    pub fn set_fade_out(&mut self, seconds: f64) {
+        self.set_fade("fade_out", seconds);
+    }
+
+    fn fade(&self, key: &str) -> f64 {
+        self.nox_value(key)
+            .and_then(Value::as_f64)
+            .map_or(0.0, |s| s.max(0.0))
+    }
+
+    fn set_fade(&mut self, key: &str, seconds: f64) {
+        self.set_nox_value(key, (seconds > 0.0).then_some(Value::Float(seconds)));
+    }
+
+    /// How far the fades let the item through at `local` seconds into an
+    /// item `duration` seconds long: 0 at its very start or end, rising
+    /// linearly to 1 over the fade.
+    pub fn fade_gain(&self, local: f64, duration: f64) -> f64 {
+        let local = local.clamp(0.0, duration);
+        let (fade_in, fade_out) = (self.fade_in(), self.fade_out());
+        let mut gain: f64 = 1.0;
+        if fade_in > 0.0 {
+            gain = gain.min(local / fade_in);
+        }
+        if fade_out > 0.0 {
+            gain = gain.min((duration - local) / fade_out);
+        }
+        gain.clamp(0.0, 1.0)
     }
 
     /// Blend mode of a video clip (`metadata.nox.blend`, default normal).
@@ -417,54 +634,101 @@ impl Item {
     /// neutral): `lift`, `gamma`, `gain` and `offset`, each `[r, g, b,
     /// master]`.
     pub fn grade(&self) -> Grade {
-        let Some(grade) = self.nox_value("grade").and_then(Value::as_object) else {
-            return Grade::NEUTRAL;
-        };
-        let wheel = |key: &str, neutral: Wheel| {
-            let values: Vec<f32> = grade
-                .get(key)
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_f64().map(|v| v as f32))
-                        .collect()
-                })
-                .unwrap_or_default();
-            match values[..] {
-                [r, g, b, master] if [r, g, b, master].iter().all(|v| v.is_finite()) => Wheel {
-                    rgb: [r, g, b],
-                    master,
-                },
-                _ => neutral,
-            }
-        };
-        Grade {
-            lift: wheel("lift", Wheel::ZERO),
-            gamma: wheel("gamma", Wheel::ONE),
-            gain: wheel("gain", Wheel::ONE),
-            offset: wheel("offset", Wheel::ZERO),
-        }
+        self.nox_value("grade")
+            .map_or(Grade::NEUTRAL, grade_from_value)
     }
 
     pub fn set_grade(&mut self, grade: Grade) {
-        let value = (!grade.is_neutral()).then(|| {
-            let mut object = Object::new();
-            for (key, wheel) in [
-                ("lift", grade.lift),
-                ("gamma", grade.gamma),
-                ("gain", grade.gain),
-                ("offset", grade.offset),
-            ] {
-                let [r, g, b] = wheel.rgb;
-                let values = [r, g, b, wheel.master]
-                    .iter()
-                    .map(|&v| Value::Float(f64::from(v)))
-                    .collect();
-                object.insert(key, Value::Array(values));
+        let value = (!grade.is_neutral()).then(|| grade_to_value(&grade));
+        self.set_nox_value("grade", value);
+    }
+
+    /// Position, zoom, rotation and crop of a video clip
+    /// (`metadata.nox.transform`, default none).
+    pub fn transform(&self) -> Transform {
+        let Some(object) = self.nox_value("transform").and_then(Value::as_object) else {
+            return Transform::IDENTITY;
+        };
+        let number =
+            |key: &str, default: f64| object.get(key).and_then(Value::as_f64).unwrap_or(default);
+        let mut crop = [0.0; 4];
+        if let Some(values) = object.get("crop").and_then(Value::as_array) {
+            for (c, v) in crop.iter_mut().zip(values) {
+                *c = v.as_f64().unwrap_or(0.0).clamp(0.0, 1.0);
             }
+        }
+        Transform {
+            x: number("x", 0.0),
+            y: number("y", 0.0),
+            zoom: number("zoom", 1.0).max(0.0),
+            rotation: number("rotation", 0.0),
+            crop,
+        }
+    }
+
+    pub fn set_transform(&mut self, transform: Transform) {
+        let value = (!transform.is_identity()).then(|| {
+            let mut object = Object::new();
+            object.insert("x", Value::Float(transform.x));
+            object.insert("y", Value::Float(transform.y));
+            object.insert("zoom", Value::Float(transform.zoom));
+            object.insert("rotation", Value::Float(transform.rotation));
+            object.insert(
+                "crop",
+                Value::Array(transform.crop.iter().map(|&c| Value::Float(c)).collect()),
+            );
             Value::Object(object)
         });
-        self.set_nox_value("grade", value);
+        self.set_nox_value("transform", value);
+    }
+
+    /// How fast the item plays its media: the product of its linear time
+    /// warps (1 is normal speed), 0 if it is a freeze frame.
+    pub fn speed(&self) -> f64 {
+        let mut speed = 1.0;
+        for effect in self.effects.iter().filter(|e| e.enabled) {
+            match effect.kind {
+                EffectKind::LinearTimeWarp { time_scalar } => speed *= time_scalar,
+                EffectKind::FreezeFrame => return 0.0,
+                _ => {}
+            }
+        }
+        speed
+    }
+
+    /// Whether the item holds one frame (a freeze frame effect).
+    pub fn is_frozen(&self) -> bool {
+        self.effects
+            .iter()
+            .any(|e| e.enabled && e.kind == EffectKind::FreezeFrame)
+    }
+
+    /// Replaces the item's time effects with a linear time warp of `speed`
+    /// (none at 1) or a freeze frame; other effects stay.
+    pub(crate) fn set_time_effects(&mut self, speed: f64, frozen: bool) {
+        self.effects.retain(|e| {
+            !matches!(
+                e.kind,
+                EffectKind::LinearTimeWarp { .. } | EffectKind::FreezeFrame
+            )
+        });
+        let effect = |name: &str, kind| Effect {
+            name: name.into(),
+            metadata: Object::new(),
+            effect_name: name.into(),
+            enabled: true,
+            kind,
+            extra: Object::new(),
+        };
+        if frozen {
+            self.effects
+                .push(effect("FreezeFrame", EffectKind::FreezeFrame));
+        } else if speed != 1.0 {
+            self.effects.push(effect(
+                "LinearTimeWarp",
+                EffectKind::LinearTimeWarp { time_scalar: speed },
+            ));
+        }
     }
 
     /// Maps a time inside the item's trimmed range through its time effects
@@ -481,6 +745,56 @@ impl Item {
         }
         start + offset
     }
+}
+
+/// A grade from its stored form: `lift`, `gamma`, `gain` and `offset`, each
+/// `[r, g, b, master]`; missing or broken wheels are neutral.
+pub(crate) fn grade_from_value(value: &Value) -> Grade {
+    let Some(grade) = value.as_object() else {
+        return Grade::NEUTRAL;
+    };
+    let wheel = |key: &str, neutral: Wheel| {
+        let values: Vec<f32> = grade
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64().map(|v| v as f32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        match values[..] {
+            [r, g, b, master] if [r, g, b, master].iter().all(|v| v.is_finite()) => Wheel {
+                rgb: [r, g, b],
+                master,
+            },
+            _ => neutral,
+        }
+    };
+    Grade {
+        lift: wheel("lift", Wheel::ZERO),
+        gamma: wheel("gamma", Wheel::ONE),
+        gain: wheel("gain", Wheel::ONE),
+        offset: wheel("offset", Wheel::ZERO),
+    }
+}
+
+pub(crate) fn grade_to_value(grade: &Grade) -> Value {
+    let mut object = Object::new();
+    for (key, wheel) in [
+        ("lift", grade.lift),
+        ("gamma", grade.gamma),
+        ("gain", grade.gain),
+        ("offset", grade.offset),
+    ] {
+        let [r, g, b] = wheel.rgb;
+        let values = [r, g, b, wheel.master]
+            .iter()
+            .map(|&v| Value::Float(f64::from(v)))
+            .collect();
+        object.insert(key, Value::Array(values));
+    }
+    Value::Object(object)
 }
 
 /// `time * factor`, with the factor approximated as a fraction.
@@ -586,10 +900,18 @@ impl Composable {
                     return Vec::new();
                 };
                 let source_time = clip.item.warp(range.start, time);
+                let fade = clip
+                    .item
+                    .fade_gain(time.as_seconds(), range.duration.as_seconds());
+                let opacity = clip
+                    .item
+                    .value_at(crate::Param::Opacity, source_time.as_seconds());
                 vec![ResolvedClip {
                     clip,
                     source_time,
-                    opacity: clip.item.opacity(),
+                    opacity: opacity * fade,
+                    wipe: [0.0; 4],
+                    dip: None,
                 }]
             }
             Self::Track(track) => track.resolve(time, kind),
@@ -648,6 +970,13 @@ impl Clip {
         self.media_reference()?.available_range
     }
 
+    /// The media time `local` into the clip (from its start on the
+    /// timeline), through its time effects; keyframes are in this time.
+    pub fn media_time(&self, local: Time) -> Option<Time> {
+        let range = self.trimmed_range()?;
+        Some(self.item.warp(range.start, local))
+    }
+
     /// The used part of the media: `source_range`, or all of it.
     pub fn trimmed_range(&self) -> Option<TimeRange> {
         self.item.source_range.or_else(|| self.available_range())
@@ -672,6 +1001,203 @@ pub struct Transition {
     /// Fields from other tools or OTIO versions that Nox doesn't know,
     /// passed through.
     pub extra: Object,
+}
+
+/// What a transition does. Dissolves are OTIO's `SMPTE_Dissolve`; the
+/// others are `Custom_Transition`s named in `metadata.nox.transition`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransitionKind {
+    #[default]
+    Dissolve,
+    /// The incoming picture slides in over the outgoing one from a side,
+    /// revealed by a moving edge.
+    Wipe(Side),
+    /// The outgoing picture fades to a color, then the incoming one fades
+    /// in from it.
+    Dip(DipColor),
+}
+
+/// The color a dip goes through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DipColor {
+    Black,
+    White,
+}
+
+impl DipColor {
+    /// The color as display R'G'B' (BT.709), 0–1.
+    pub fn rgb(self) -> [f64; 3] {
+        match self {
+            Self::Black => [0.0; 3],
+            Self::White => [1.0; 3],
+        }
+    }
+}
+
+/// A solid color drawn with a layer during a dip: just before it (below)
+/// or just after it (above), at `opacity`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dip {
+    pub color: DipColor,
+    pub opacity: f64,
+    pub before: bool,
+}
+
+/// The side a wipe starts from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl TransitionKind {
+    pub const ALL: [TransitionKind; 7] = [
+        Self::Dissolve,
+        Self::Wipe(Side::Left),
+        Self::Wipe(Side::Right),
+        Self::Wipe(Side::Top),
+        Self::Wipe(Side::Bottom),
+        Self::Dip(DipColor::Black),
+        Self::Dip(DipColor::White),
+    ];
+
+    /// The name under `metadata.nox.transition` (and in `as_str`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dissolve => "dissolve",
+            Self::Wipe(Side::Left) => "wipe-left",
+            Self::Wipe(Side::Right) => "wipe-right",
+            Self::Wipe(Side::Top) => "wipe-top",
+            Self::Wipe(Side::Bottom) => "wipe-bottom",
+            Self::Dip(DipColor::Black) => "dip-black",
+            Self::Dip(DipColor::White) => "dip-white",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == name)
+    }
+
+    /// English name, also the transition's OTIO `name`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dissolve => "Cross Dissolve",
+            Self::Wipe(Side::Left) => "Wipe from Left",
+            Self::Wipe(Side::Right) => "Wipe from Right",
+            Self::Wipe(Side::Top) => "Wipe from Top",
+            Self::Wipe(Side::Bottom) => "Wipe from Bottom",
+            Self::Dip(DipColor::Black) => "Dip to Black",
+            Self::Dip(DipColor::White) => "Dip to White",
+        }
+    }
+}
+
+impl Transition {
+    /// A transition of `kind` reaching `in_offset` and `out_offset` across
+    /// the cut.
+    pub fn new(kind: TransitionKind, in_offset: Time, out_offset: Time) -> Self {
+        let mut transition = Self {
+            name: String::new(),
+            metadata: Object::new(),
+            transition_type: String::new(),
+            in_offset,
+            out_offset,
+            extra: Object::new(),
+        };
+        transition.set_kind(kind);
+        transition
+    }
+
+    pub fn kind(&self) -> TransitionKind {
+        if self.transition_type == "SMPTE_Dissolve" {
+            return TransitionKind::Dissolve;
+        }
+        self.metadata
+            .get("nox")
+            .and_then(Value::as_object)
+            .and_then(|nox| nox.get("transition"))
+            .and_then(Value::as_str)
+            .and_then(TransitionKind::parse)
+            // Unknown types play as dissolves.
+            .unwrap_or_default()
+    }
+
+    pub fn set_kind(&mut self, kind: TransitionKind) {
+        self.name = kind.label().into();
+        let mut nox = match self.metadata.remove("nox") {
+            Some(Value::Object(nox)) => nox,
+            _ => Object::new(),
+        };
+        if kind == TransitionKind::Dissolve {
+            self.transition_type = "SMPTE_Dissolve".into();
+            nox.remove("transition");
+        } else {
+            self.transition_type = "Custom_Transition".into();
+            nox.insert("transition", kind.as_str());
+        }
+        if !nox.is_empty() {
+            self.metadata.insert("nox", nox);
+        }
+    }
+
+    /// How the two pictures show at `progress` (0–1) through the
+    /// transition.
+    pub fn mix(&self, progress: f64) -> Mix {
+        let p = progress.clamp(0.0, 1.0);
+        let simple = |outgoing, incoming, wipe| Mix {
+            outgoing,
+            incoming,
+            wipe,
+            dip_out: None,
+            dip_in: None,
+        };
+        match self.kind() {
+            TransitionKind::Dissolve => simple(1.0, p, [0.0; 4]),
+            // The color covers the outgoing picture, then the incoming one
+            // covers the color.
+            TransitionKind::Dip(color) if p < 0.5 => Mix {
+                dip_out: Some(Dip {
+                    color,
+                    opacity: 2.0 * p,
+                    before: false,
+                }),
+                ..simple(1.0, 0.0, [0.0; 4])
+            },
+            TransitionKind::Dip(color) => Mix {
+                dip_in: Some(Dip {
+                    color,
+                    opacity: 1.0,
+                    before: true,
+                }),
+                ..simple(0.0, 2.0 * p - 1.0, [0.0; 4])
+            },
+            TransitionKind::Wipe(side) => {
+                let hidden = 1.0 - p;
+                let crop = match side {
+                    Side::Left => [0.0, 0.0, hidden, 0.0],
+                    Side::Right => [hidden, 0.0, 0.0, 0.0],
+                    Side::Top => [0.0, 0.0, 0.0, hidden],
+                    Side::Bottom => [0.0, hidden, 0.0, 0.0],
+                };
+                simple(1.0, 1.0, crop)
+            }
+        }
+    }
+}
+
+/// How a transition shows its two pictures at some point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mix {
+    /// Opacity factors of the outgoing and incoming picture.
+    pub outgoing: f64,
+    pub incoming: f64,
+    /// Cut off the incoming picture (left, top, right, bottom).
+    pub wipe: [f64; 4],
+    /// Solid colors drawn with the outgoing and the incoming picture.
+    pub dip_out: Option<Dip>,
+    pub dip_in: Option<Dip>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -797,14 +1323,28 @@ impl Track {
             {
                 continue;
             }
+            let Composable::Transition(transition) = child else {
+                unreachable!("checked above")
+            };
             let progress = (time - range.start).as_seconds() / range.duration.as_seconds();
-            let mut layers = before.resolve(time - ranges[i - 1].start, kind);
+            let mix = transition.mix(progress);
+            let mut layers: Vec<ResolvedClip<'_>> = before
+                .resolve(time - ranges[i - 1].start, kind)
+                .into_iter()
+                .map(|mut layer| {
+                    layer.opacity *= mix.outgoing;
+                    layer.dip = mix.dip_out;
+                    layer
+                })
+                .collect();
             layers.extend(
                 after
                     .resolve(time - ranges[i + 1].start, kind)
                     .into_iter()
                     .map(|mut layer| {
-                        layer.opacity *= progress.clamp(0.0, 1.0);
+                        layer.opacity *= mix.incoming;
+                        layer.wipe = mix.wipe;
+                        layer.dip = mix.dip_in;
                         layer
                     }),
             );
@@ -850,17 +1390,34 @@ impl Track {
                 place = TimeRange::from_start_end(place.start, place.end() + t.out_offset);
                 fade_out = t.in_offset + t.out_offset;
             }
+            // The clip's own fades, unless a crossfade is longer.
+            let seconds = |s: f64| Time::from_seconds(s, place.start.timebase);
+            fade_in = fade_in.max(seconds(clip.item.fade_in()));
+            fade_out = fade_out.max(seconds(clip.item.fade_out()));
             if !place.overlaps(range) {
                 continue;
             }
             let file_start = clip
                 .available_range()
                 .map_or(Time::zero(source_start.timebase), |r| r.start);
+            // Volume keyframes, from media time to timeline time.
+            let shift = place.start.as_seconds() - source_start.as_seconds();
+            let volume_keys = clip
+                .item
+                .keyframes(crate::Param::Volume)
+                .into_iter()
+                .map(|k| crate::Keyframe {
+                    time: k.time + shift,
+                    ..k
+                })
+                .collect();
             out.push(AudioSegment {
                 path,
                 place,
                 source_start: source_start - file_start,
                 volume: clip.item.volume(),
+                volume_keys,
+                speed: clip.item.speed(),
                 fade_in,
                 fade_out,
             });
@@ -877,6 +1434,11 @@ pub struct AudioSegment {
     /// From the start of the file.
     pub source_start: Time,
     pub volume: f64,
+    /// Volume keyframes in timeline seconds; if any, they replace `volume`.
+    pub volume_keys: Vec<crate::Keyframe>,
+    /// How fast the source plays (1 normal; 0 for a freeze frame: silent).
+    /// Changed speed changes the pitch, as varispeed on tape.
+    pub speed: f64,
     /// Length of the fade at the start (a crossfade with the previous clip).
     pub fade_in: Time,
     /// Length of the fade at the end.
@@ -892,7 +1454,11 @@ impl AudioSegment {
         if time < start || time >= end {
             return 0.0;
         }
-        let mut gain = self.volume;
+        let mut gain = if self.volume_keys.is_empty() {
+            self.volume
+        } else {
+            crate::keyframes::interpolate(&self.volume_keys, time).max(0.0)
+        };
         let fade_in = self.fade_in.as_seconds();
         if fade_in > 0.0 && time < start + fade_in {
             gain *= (std::f64::consts::FRAC_PI_2 * (time - start) / fade_in).sin();
@@ -910,9 +1476,20 @@ impl Timeline {
     /// audio track.
     pub fn audio_segments(&self, range: TimeRange) -> Vec<AudioSegment> {
         let mut segments = Vec::new();
+        let audible = |track: &Track| track.kind == TrackKind::Audio && track.item.enabled;
+        let soloing = self
+            .tracks()
+            .any(|(_, track)| audible(track) && track.item.solo());
         for (_, track) in self.tracks() {
-            if track.kind == TrackKind::Audio && track.item.enabled {
+            if audible(track) && (!soloing || track.item.solo()) {
                 track.audio_segments(range, &mut segments);
+            }
+        }
+        if let Some(dir) = &self.media_dir {
+            for segment in &mut segments {
+                if segment.path.is_relative() {
+                    segment.path = dir.join(&segment.path);
+                }
             }
         }
         segments
@@ -1233,6 +1810,138 @@ mod tests {
     }
 
     #[test]
+    fn fades_scale_opacity_and_volume() {
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        timeline.track_mut(0).unwrap().children = vec![clip("v", 0, 48)];
+        timeline.track_mut(1).unwrap().children = vec![clip("a", 0, 48)];
+        for track in [0, 1] {
+            let Composable::Clip(c) = &mut timeline.track_mut(track).unwrap().children[0] else {
+                unreachable!()
+            };
+            c.item.set_fade_in(0.5);
+            c.item.set_fade_out(1.0);
+        }
+        let opacity = |f| timeline.video_at(frames(f)).unwrap().opacity;
+        assert_eq!(opacity(0), 0.0);
+        assert_eq!(opacity(6), 0.5);
+        assert_eq!(opacity(12), 1.0);
+        assert_eq!(opacity(24), 1.0);
+        assert_eq!(opacity(36), 0.5);
+        assert!(opacity(47) < 0.05);
+        // Audio fades the same way (with equal-power curves).
+        let segment = &timeline.audio_segments(TimeRange::new(frames(0), frames(48)))[0];
+        assert_eq!(
+            (segment.fade_in, segment.fade_out),
+            (frames(12), frames(24))
+        );
+        assert_eq!(segment.gain_at(0.0), 0.0);
+        assert!((segment.gain_at(1.0) - 1.0).abs() < 1e-9);
+        assert!(segment.gain_at(1.5) < 1.0);
+        // Removing a fade removes its metadata.
+        let Composable::Clip(c) = &mut timeline.track_mut(0).unwrap().children[0] else {
+            unreachable!()
+        };
+        c.item.set_fade_in(0.0);
+        c.item.set_fade_out(0.0);
+        assert!(c.item.metadata.is_empty());
+    }
+
+    #[test]
+    fn transforms_are_stored_and_left_out_when_neutral() {
+        let mut item = Item::new("c");
+        assert!(item.transform().is_identity());
+        let transform = Transform {
+            x: 0.25,
+            y: -0.1,
+            zoom: 0.5,
+            rotation: 15.0,
+            crop: [0.1, 0.0, 0.2, 0.05],
+        };
+        item.set_transform(transform);
+        assert_eq!(item.transform(), transform);
+        item.set_transform(Transform::IDENTITY);
+        assert!(item.metadata.is_empty());
+    }
+
+    #[test]
+    fn keyframes_animate_layers_and_audio() {
+        use crate::Param;
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        // Media frames 24–72 at timeline 0–48.
+        timeline.track_mut(0).unwrap().children = vec![clip("v", 24, 48)];
+        timeline.track_mut(1).unwrap().children = vec![clip("a", 24, 48)];
+        for track in [0, 1] {
+            let Composable::Clip(c) = &mut timeline.track_mut(track).unwrap().children[0] else {
+                unreachable!()
+            };
+            // Media seconds 1 → 3: from 0 to 1.
+            for param in [Param::Opacity, Param::Volume] {
+                c.item.toggle_keyframe(param, 1.0);
+                c.item.set_value_at(param, 1.0, 0.0);
+                c.item.set_value_at(param, 3.0, 1.0);
+            }
+        }
+        assert_eq!(timeline.video_at(frames(0)).unwrap().opacity, 0.0);
+        assert_eq!(timeline.video_at(frames(24)).unwrap().opacity, 0.5);
+        // Audio keyframes are in timeline time: media 1 s is timeline 0.
+        let segment = &timeline.audio_segments(TimeRange::new(frames(0), frames(48)))[0];
+        assert!((segment.gain_at(1.0) - 0.5).abs() < 1e-9);
+        assert!((segment.gain_at(1.99) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn placement_and_transform_geometry() {
+        // A 16:9 picture fitted into a 9:16 sequence: full width, centered.
+        let placed = ScalingMode::Fit.place((1920, 1080), (1080, 1920));
+        assert_eq!(placed, [0.0, 656.25, 1080.0, 607.5]);
+        assert_eq!(
+            ScalingMode::Fill.place((1920, 1080), (1080, 1920))[3],
+            1920.0
+        );
+        let sequence = (1080, 1920);
+        // Moved right by a tenth, zoomed to half, turned a quarter.
+        let t = Transform {
+            x: 0.1,
+            zoom: 0.5,
+            rotation: 90.0,
+            ..Transform::IDENTITY
+        };
+        let (cx, cy) = t.center(placed, sequence);
+        assert!((cx - 648.0).abs() < 1e-9 && (cy - 960.0).abs() < 1e-9);
+        // The top left corner turns to the top right (clockwise).
+        let [top_left, ..] = t.corners(placed, sequence);
+        assert!(
+            (top_left.0 - (648.0 + 607.5 / 4.0)).abs() < 1e-9,
+            "{top_left:?}"
+        );
+        assert!((top_left.1 - (960.0 - 270.0)).abs() < 1e-9, "{top_left:?}");
+    }
+
+    #[test]
+    fn soloed_tracks_are_heard_alone() {
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        let a2 = timeline.add_track(TrackKind::Audio);
+        timeline.track_mut(1).unwrap().children = vec![clip("a", 0, 10)];
+        timeline.track_mut(a2).unwrap().children = vec![clip("b", 0, 10)];
+        let range = TimeRange::new(frames(0), frames(10));
+        let heard = |t: &Timeline| -> Vec<_> {
+            t.audio_segments(range)
+                .into_iter()
+                .map(|s| s.path.file_stem().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(heard(&timeline), ["a", "b"]);
+        timeline.track_mut(a2).unwrap().item.set_solo(true);
+        assert_eq!(heard(&timeline), ["b"]);
+        // A muted soloed track doesn't count: the others play.
+        timeline.track_mut(a2).unwrap().item.enabled = false;
+        assert_eq!(heard(&timeline), ["a"]);
+        timeline.track_mut(a2).unwrap().item.enabled = true;
+        timeline.track_mut(1).unwrap().item.set_solo(true);
+        assert_eq!(heard(&timeline), ["a", "b"]);
+    }
+
+    #[test]
     fn in_and_out_marks() {
         let mut settings = Settings::default();
         assert_eq!(settings.marked_range(), None);
@@ -1281,5 +1990,53 @@ mod tests {
             Some(Path::new("relative/b.mov"))
         );
         assert_eq!(url_to_path("https://example.com/x.mov"), None);
+    }
+
+    #[test]
+    fn relative_media_paths_follow_the_project_folder() {
+        let mut timeline = Timeline::new("t", Rational::new(24, 1));
+        let range = Some(TimeRange::new(frames(0), frames(10)));
+        let relative = |url: &str| {
+            MediaReference::new(
+                ReferenceKind::External {
+                    target_url: url.into(),
+                },
+                range,
+            )
+        };
+        timeline.track_mut(0).unwrap().children = vec![
+            Composable::Clip(Clip::new("rel", relative("clips/a.mov"), range.unwrap())),
+            Composable::Clip(Clip::new("abs", relative("/media/b.mov"), range.unwrap())),
+        ];
+        let paths = |t: &Timeline| -> Vec<_> {
+            t.clips()
+                .map(|c| t.media_path(c.media_reference().unwrap()).unwrap())
+                .collect()
+        };
+        // Without a folder, paths are taken as they are.
+        assert_eq!(
+            paths(&timeline),
+            [Path::new("clips/a.mov"), Path::new("/media/b.mov")]
+        );
+        timeline.media_dir = Some("/projects/x".into());
+        assert_eq!(
+            paths(&timeline),
+            [
+                Path::new("/projects/x/clips/a.mov"),
+                Path::new("/media/b.mov")
+            ]
+        );
+        // Saving elsewhere writes absolute URLs; absolute ones stay as they are.
+        let mut copy = timeline.clone();
+        copy.make_media_paths_absolute();
+        let urls: Vec<_> = copy
+            .clips()
+            .map(|c| match &c.media_reference().unwrap().kind {
+                ReferenceKind::External { target_url } => target_url.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(urls, ["file:///projects/x/clips/a.mov", "/media/b.mov"]);
+        assert_eq!(paths(&copy), paths(&timeline));
     }
 }

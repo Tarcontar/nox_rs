@@ -41,6 +41,9 @@ layout(push_constant) uniform Params {
     // SDR sources into the working space (nox_color::InputTransform).
     int transfer;
     int primaries;
+    // For HDR outputs: HDR sources keep their light (relative to SDR
+    // white) instead of being tone-mapped (InputTransform::apply_hdr).
+    int keep_hdr;
 } p;
 
 const int HDR_NONE = 0;
@@ -146,8 +149,13 @@ void main() {
     vec2 chroma_uv = uv + p.chroma_offset;
 
     vec3 samples;
+    // Straight (not premultiplied) alpha, as in PNG; formats without alpha
+    // read as 1. The compositor blends with it.
+    float alpha = 1.0;
     if (p.layout_mode == PACKED) {
-        samples = texture(plane0, uv).rgb;
+        vec4 texel = texture(plane0, uv);
+        samples = texel.rgb;
+        alpha = texel.a;
     } else {
         float y = texture(plane0, uv).r;
         vec2 c = vec2(0.0);
@@ -165,14 +173,30 @@ void main() {
     vec4 v = vec4(samples, 1.0);
     vec3 rgb = clamp(vec3(dot(p.row0, v), dot(p.row1, v), dot(p.row2, v)), 0.0, 1.0);
 #ifdef WORKING
-    vec3 linear = p.hdr_mode != HDR_NONE
-        ? to_working(PRIMARIES_BT709) * hdr_to_sdr_linear(rgb)
-        : to_working(p.primaries) * eotf(rgb, p.transfer);
-    imageStore(out_image, pos, vec4(linear, 1.0));
+    vec3 linear;
+    if (p.hdr_mode != HDR_NONE && p.keep_hdr != 0) {
+        vec3 light;
+        if (p.hdr_mode == HDR_PQ) {
+            light = vec3(pq_eotf(rgb.r), pq_eotf(rgb.g), pq_eotf(rgb.b)) * 10000.0;
+        } else {
+            vec3 weights = p.hdr_gamut == 1 ? vec3(0.2627, 0.6780, 0.0593)
+                                            : vec3(0.2126, 0.7152, 0.0722);
+            light = hlg_display_light(rgb, weights);
+        }
+        int gamut = p.hdr_gamut == 1 ? PRIMARIES_BT2020
+                  : p.hdr_gamut == 2 ? PRIMARIES_DISPLAYP3
+                                     : PRIMARIES_BT709;
+        linear = to_working(gamut) * light / SDR_WHITE;
+    } else if (p.hdr_mode != HDR_NONE) {
+        linear = to_working(PRIMARIES_BT709) * hdr_to_sdr_linear(rgb);
+    } else {
+        linear = to_working(p.primaries) * eotf(rgb, p.transfer);
+    }
+    imageStore(out_image, pos, vec4(linear, alpha));
 #else
     if (p.hdr_mode != HDR_NONE) {
         rgb = pow(hdr_to_sdr_linear(rgb), vec3(1.0 / 2.4));
     }
-    imageStore(out_image, pos, vec4(rgb, 1.0));
+    imageStore(out_image, pos, vec4(rgb, alpha));
 #endif
 }

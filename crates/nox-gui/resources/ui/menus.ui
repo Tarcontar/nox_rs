@@ -96,6 +96,44 @@
         <attribute name="action">win.ripple-delete</attribute>
       </item>
     </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Relink Media…</attribute>
+        <attribute name="action">win.relink-clip</attribute>
+      </item>
+    </section>
+  </menu>
+  <!-- Right-click menu of the ruler; it moves the playhead to the click
+       first, so the marks go there. -->
+  <menu id="ruler_menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Mark In</attribute>
+        <attribute name="action">win.set-in</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Mark Out</attribute>
+        <attribute name="action">win.set-out</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Add Marker</attribute>
+        <attribute name="action">win.add-marker</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Clear In</attribute>
+        <attribute name="action">win.clear-in</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Clear Out</attribute>
+        <attribute name="action">win.clear-out</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Clear In and Out</attribute>
+        <attribute name="action">win.clear-in-out</attribute>
+      </item>
+    </section>
   </menu>
   <!-- Right-click menu of video track headers; the track.* actions
        work on the track it was opened for. -->
@@ -114,6 +152,10 @@
       <item>
         <attribute name="label" translatable="yes">Lock Track</attribute>
         <attribute name="action">track.locked</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Sync Lock</attribute>
+        <attribute name="action">track.sync</attribute>
       </item>
     </section>
     <section>
@@ -138,8 +180,16 @@
         <attribute name="action">track.muted</attribute>
       </item>
       <item>
+        <attribute name="label" translatable="yes">Solo Track</attribute>
+        <attribute name="action">track.solo</attribute>
+      </item>
+      <item>
         <attribute name="label" translatable="yes">Lock Track</attribute>
         <attribute name="action">track.locked</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Sync Lock</attribute>
+        <attribute name="action">track.sync</attribute>
       </item>
     </section>
     <section>

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- A timeline track header (track_header.rs): the track's name over its
+       toggles. The timeline places one beside each track row. Icons,
+       tooltips and accessible labels depend on the track and are set in
+       code; the right-click menu is the timeline's track menu. -->
+  <template class="NoxTrackHeader" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="spacing">1</property>
+    <style><class name="track-header"/></style>
+    <child>
+      <object class="GtkLabel" id="name">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <style><class name="track-name"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox">
+        <property name="spacing">1</property>
+        <child>
+          <object class="GtkToggleButton" id="enabled">
+            <signal name="toggled" handler="on_enabled_toggled" swapped="true"/>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="solo">
+            <property name="icon-name">audio-headphones-symbolic</property>
+            <signal name="toggled" handler="on_solo_toggled" swapped="true"/>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="lock">
+            <property name="icon-name">changes-prevent-symbolic</property>
+            <signal name="toggled" handler="on_lock_toggled" swapped="true"/>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="sync">
+            <property name="icon-name">insert-link-symbolic</property>
+            <signal name="toggled" handler="on_sync_toggled" swapped="true"/>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

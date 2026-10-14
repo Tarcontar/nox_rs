@@ -1,6 +1,8 @@
-// Writes the accumulated picture (linear working space) through the output
-// transform as 4:2:0 Y'CbCr into the two planes of an NV12 image (e.g. a
-// video encoder's input), one invocation per 2×2 block. Chroma is
+// Writes the accumulated picture (linear working space), encoded as
+// `encoding` says (encode_output), as 4:2:0 Y'CbCr into the two planes of
+// an NV12 image (e.g. a video encoder's input), or of a P010 image with
+// DEEP defined (16-bit planes, for 10-bit HDR), one invocation per 2×2
+// block. Chroma is
 // left-sited, the MPEG-2/H.264 convention: horizontally filtered
 // [1/4 1/2 1/4] around the left column, averaged over the two rows (of
 // R'G'B', as encoders do).
@@ -12,8 +14,13 @@
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accum;
+#ifdef DEEP
+layout(set = 0, binding = 1, r16) uniform writeonly image2D luma;
+layout(set = 0, binding = 2, rg16) uniform writeonly image2D chroma;
+#else
 layout(set = 0, binding = 1, r8) uniform writeonly image2D luma;
 layout(set = 0, binding = 2, rg8) uniform writeonly image2D chroma;
+#endif
 
 layout(push_constant) uniform Params {
     // R'G'B' → normalized (Y, Cb, Cr) texel values (nox_color::ycbcr).
@@ -21,11 +28,12 @@ layout(push_constant) uniform Params {
     vec4 row1;
     vec4 row2;
     ivec2 size;
+    int encoding;
 } p;
 
 vec4 rgb_at(ivec2 pos) {
     pos = clamp(pos, ivec2(0), p.size - 1);
-    return vec4(output_transform(imageLoad(accum, pos).rgb), 1.0);
+    return vec4(encode_output(imageLoad(accum, pos).rgb, p.encoding), 1.0);
 }
 
 void main() {

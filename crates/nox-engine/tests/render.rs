@@ -480,3 +480,135 @@ fn clip_grades_are_rendered() {
     assert!(warm[0] > plain[0] + 10, "{plain:?} → {warm:?}");
     assert!(close(warm, expected), "{warm:?} vs {expected:?}");
 }
+
+/// A clip's transform reaches the compositor: zoomed out and moved right,
+/// it leaves the left of the picture to the track below.
+#[test]
+fn clip_transforms_are_rendered() {
+    let (Some(red), Some(blue)) = (
+        solid("red-under.mkv", "0xC03020"),
+        solid("blue-moved.mkv", "0x2060E0"),
+    ) else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    let v2 = timeline.add_track(TrackKind::Video);
+    timeline.place(0, clip(&red, 0, 20), f(0)).unwrap();
+    let mut moved = clip(&blue, 0, 20);
+    moved
+        .item_mut()
+        .unwrap()
+        .set_transform(nox_project::Transform {
+            x: 0.25,
+            zoom: 0.5,
+            ..nox_project::Transform::IDENTITY
+        });
+    timeline.place(v2, moved, f(0)).unwrap();
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    let frame = render(&engine, &events, 5);
+    // Blue covers x 80–160 and y 22–68 of 160 × 90.
+    let (left, right) = (pixel(&frame, 30, 45), pixel(&frame, 120, 45));
+    assert!(left[0] > left[2], "red on the left: {left:?}");
+    assert!(right[2] > right[0], "blue on the right: {right:?}");
+    let above = pixel(&frame, 120, 10);
+    assert!(above[0] > above[2], "red above the blue: {above:?}");
+}
+
+/// Clips at another speed play their audio that much faster (varispeed);
+/// freeze frames are silent.
+#[test]
+fn mixer_follows_clip_speed() {
+    const RATE: u32 = 48_000;
+    // A ramp: every sample tells its source time (t / 4).
+    let Some(path) = fixture(
+        "speed-ramp.wav",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=t/4|t/4:s=48000:d=4",
+            "-c:a",
+            "pcm_f32le",
+        ],
+    ) else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    let reference = MediaReference::from_path(&path, Some(TimeRange::new(f(0), f(100))));
+    let clip = Composable::Clip(Clip::new("a", reference, TimeRange::new(f(0), f(50))));
+    timeline.place(1, clip, f(0)).unwrap();
+    let a = ItemRef { track: 1, index: 0 };
+    let fast = timeline.set_speed(a, 2.0, true).unwrap();
+
+    let mut mixer = Mixer::new(RATE);
+    let mut block = vec![0.0f32; 2 * 480]; // 10 ms
+    // 0.5 s into the clip is 1 s into the source: 0.25.
+    mixer.mix(&timeline, 24_000, &mut block);
+    assert!((block[0] - 0.25).abs() < 1e-3, "{}", block[0]);
+    // Within the block the source advances twice as fast.
+    let step = block[2 * 479] - block[0];
+    assert!((step - 2.0 * 479.0 / 48_000.0 / 4.0).abs() < 1e-3, "{step}");
+
+    // Without the time warp it plays at normal speed again.
+    let mut normal = timeline.clone();
+    normal
+        .track_mut(fast.track)
+        .unwrap()
+        .children
+        .get_mut(fast.index)
+        .and_then(Composable::as_clip_mut)
+        .unwrap()
+        .item
+        .effects
+        .clear();
+    mixer.mix(&normal, 24_000, &mut block);
+    assert!(
+        (block[0] - 0.125).abs() < 1e-3,
+        "normal speed again: {}",
+        block[0]
+    );
+}
+
+/// A dip to white covers the outgoing picture with white, then the
+/// incoming one fades in over it, whatever is on the tracks below.
+#[test]
+fn dips_go_through_a_color() {
+    let (Some(red), Some(blue)) = (
+        solid("red-dip.mkv", "0xC03020"),
+        solid("blue-dip.mkv", "0x2060E0"),
+    ) else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    timeline.place(0, clip(&red, 20, 20), f(0)).unwrap();
+    timeline.place(0, clip(&blue, 20, 20), f(20)).unwrap();
+    timeline
+        .add_transition(
+            ItemRef { track: 0, index: 0 },
+            Edge::End,
+            f(20),
+            nox_project::TransitionKind::Dip(nox_project::DipColor::White),
+        )
+        .unwrap();
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    // The dip runs from frame 10 to 30; halfway it is all white.
+    let middle = pixel(&render(&engine, &events, 20), 80, 45);
+    assert!(middle.iter().all(|&c| c >= 250), "white: {middle:?}");
+    // A quarter through: red, half covered by white.
+    let quarter = pixel(&render(&engine, &events, 15), 80, 45);
+    assert!(
+        quarter[0] > 200 && quarter[1] > 100 && quarter[2] > 100,
+        "{quarter:?}"
+    );
+    assert!(quarter[1] < 250, "not white yet: {quarter:?}");
+}

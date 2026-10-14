@@ -16,5 +16,17 @@
     <file compressed="true" preprocess="xml-stripblanks">ui/color-wheels.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/clip-strip.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/clip-strip-item.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/track-header.ui</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-add-audio-track-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-add-video-track-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-dissolve-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-insert-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-mark-in-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-mark-out-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-keyframe-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-marker-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-overwrite-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-ripple-delete-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/nox-snapping-symbolic.svg</file>
   </gresource>
 </gresources>

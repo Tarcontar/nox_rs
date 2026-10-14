@@ -114,6 +114,11 @@ impl Time {
         Self::new(frame, fps.inverse())
     }
 
+    /// `seconds` in ticks of `timebase`, rounded to the nearest tick.
+    pub fn from_seconds(seconds: f64, timebase: Rational) -> Self {
+        Self::new((seconds / timebase.as_f64()).round() as i64, timebase)
+    }
+
     /// Converts to another timebase, rounding to the nearest tick
     /// (ties away from zero), like FFmpeg's `av_rescale_q`.
     pub fn rescale(self, timebase: Rational) -> Self {
@@ -161,6 +166,10 @@ impl Time {
 
     pub fn is_negative(self) -> bool {
         self.ticks < 0
+    }
+
+    pub fn is_positive(&self) -> bool {
+        self.ticks > 0
     }
 
     pub fn min(self, other: Self) -> Self {

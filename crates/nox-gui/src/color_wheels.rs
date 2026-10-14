@@ -343,6 +343,8 @@ mod panel {
         #[template_child]
         pub stack: TemplateChild<gtk::Stack>,
         #[template_child]
+        pub grade_key: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
         pub lift: TemplateChild<ColorWheel>,
         #[template_child]
         pub gamma: TemplateChild<ColorWheel>,
@@ -430,6 +432,12 @@ impl ColorWheels {
             self,
             move |_| wheels.refresh()
         ));
+        // A keyframed grade changes along the clip.
+        timeline.connect_playhead_changed(glib::clone!(
+            #[weak(rename_to = wheels)]
+            self,
+            move |_, _| wheels.refresh()
+        ));
         self.refresh();
     }
 
@@ -491,6 +499,41 @@ impl ColorWheels {
         self.reset(WheelKind::Offset);
     }
 
+    /// Adds or removes a grade keyframe at the playhead.
+    #[template_callback]
+    fn on_grade_key_toggled(&self, button: &gtk::ToggleButton) {
+        let imp = self.imp();
+        if imp.updating.get() {
+            return;
+        }
+        let Some(timeline) = imp.timeline.get() else {
+            return;
+        };
+        let Some(time) = timeline.selected_media_time() else {
+            return;
+        };
+        let label = if button.is_active() {
+            gettext("Add Keyframe")
+        } else {
+            gettext("Remove Keyframe")
+        };
+        timeline.edit_selected_clip(&label, None, |item| item.toggle_grade_keyframe(time));
+    }
+
+    #[template_callback]
+    fn on_previous_keyframe(&self) {
+        if let Some(timeline) = self.imp().timeline.get() {
+            timeline.jump_to_keyframe(false);
+        }
+    }
+
+    #[template_callback]
+    fn on_next_keyframe(&self) {
+        if let Some(timeline) = self.imp().timeline.get() {
+            timeline.jump_to_keyframe(true);
+        }
+    }
+
     fn reset(&self, kind: WheelKind) {
         let (wheel, master, _) = self.controls(kind);
         self.imp().updating.set(true);
@@ -514,10 +557,11 @@ impl ColorWheels {
         let values = kind.wheel(wheel.puck(), master.value() as f32);
         let label = fill(&gettext("Change {wheel}"), &[("wheel", &kind.name())]);
         let key = format!("grade-{kind:?}");
+        let time = timeline.selected_media_time().unwrap_or_default();
         timeline.edit_selected_clip(&label, Some(&key), |item| {
-            let mut grade = item.grade();
+            let mut grade = item.grade_at(time);
             kind.set(&mut grade, values);
-            item.set_grade(grade);
+            item.set_grade_at(time, grade);
         });
     }
 
@@ -529,19 +573,30 @@ impl ColorWheels {
         };
         let project = timeline.project();
         let model = project.timeline();
+        let time = timeline.selected_media_time().unwrap_or_default();
         let grade = timeline.selection().and_then(|item| {
             let video = model
                 .track(item.track)
                 .is_some_and(|t| t.kind == nox_project::TrackKind::Video);
             let clip = model.item(item).ok()?.as_clip()?;
-            video.then(|| clip.item.grade())
+            let item = &clip.item;
+            video.then(|| {
+                let keyed = !item.grade_keyframes().is_empty();
+                (item.grade_at(time), item.has_grade_keyframe(time), keyed)
+            })
         });
         drop(model);
-        let Some(grade) = grade else {
+        let Some((grade, at_keyframe, keyed)) = grade else {
             imp.stack.set_visible_child_name("empty");
             return;
         };
         imp.updating.set(true);
+        imp.grade_key.set_active(at_keyframe);
+        if keyed {
+            imp.grade_key.add_css_class("animated");
+        } else {
+            imp.grade_key.remove_css_class("animated");
+        }
         for kind in WheelKind::ALL {
             let (wheel, master, values) = self.controls(kind);
             let current = kind.get(&grade);

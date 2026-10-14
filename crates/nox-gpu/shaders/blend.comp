@@ -1,6 +1,8 @@
 // Grades one layer (converted into the linear working space by
 // ycbcr_to_working) and blends it onto the accumulated picture, in linear
-// light. Runs over the layer's rectangle only.
+// light. Runs over the layer's rectangle only, or for a transformed layer
+// (nox_gpu::Transform) over the pixels it covers, mapping each back into
+// the layer and sampling it bilinearly.
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
@@ -20,9 +22,30 @@ layout(push_constant) uniform Params {
     // Grade (nox_color::GradeCoefficients) on ACEScct values:
     // max(v * slope + add, 0) ^ power. slope.w is 1 if graded.
     vec4 slope;
-    vec4 add;
+    vec4 add;      // w: 1 if transformed
     vec4 power;
+    // Transformed layers: rows of the inverse scale and rotation; the
+    // transformed center (xy) and the placed half size (zw) in pixels; the
+    // uncropped part of the layer (u0, v0, u1, v1).
+    vec4 inverse;
+    vec4 geometry;
+    vec4 crop;
 } p;
+
+// Bilinear sample at uv (0-1), by hand: linear filtering of 32-bit float
+// images is optional in Vulkan.
+vec4 sample_bilinear(vec2 uv) {
+    ivec2 size = textureSize(layer, 0);
+    vec2 texel = uv * vec2(size) - 0.5;
+    ivec2 base = ivec2(floor(texel));
+    vec2 f = texel - vec2(base);
+    ivec2 limit = size - 1;
+    vec4 a = texelFetch(layer, clamp(base, ivec2(0), limit), 0);
+    vec4 b = texelFetch(layer, clamp(base + ivec2(1, 0), ivec2(0), limit), 0);
+    vec4 c = texelFetch(layer, clamp(base + ivec2(0, 1), ivec2(0), limit), 0);
+    vec4 d = texelFetch(layer, clamp(base + ivec2(1, 1), ivec2(0), limit), 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
 
 const int NORMAL = 0;
 const int ADD = 1;
@@ -36,8 +59,26 @@ void main() {
             || any(greaterThanEqual(pos, p.out_size))) {
         return;
     }
+    vec4 src;
+    if (p.add.w != 0.0) {
+        vec2 d = vec2(pos) + 0.5 - p.geometry.xy;
+        vec2 q = vec2(dot(p.inverse.xy, d), dot(p.inverse.zw, d));
+        vec2 uv = q / (2.0 * p.geometry.zw) + 0.5;
+        // Distance inside the crop edges in output pixels, for a one-pixel
+        // soft edge instead of jaggies along rotated edges.
+        float scale = 1.0 / length(p.inverse.xy);
+        vec2 pixels = 2.0 * p.geometry.zw * scale;
+        vec2 inside = min(uv - p.crop.xy, p.crop.zw - uv) * pixels;
+        float coverage = clamp(min(inside.x, inside.y) + 0.5, 0.0, 1.0);
+        if (coverage <= 0.0) {
+            return;
+        }
+        src = sample_bilinear(clamp(uv, p.crop.xy, p.crop.zw));
+        src.a *= coverage;
+    } else {
+        src = texelFetch(layer, local, 0);
+    }
     vec3 dst = imageLoad(accum, pos).rgb;
-    vec4 src = texelFetch(layer, local, 0);
     if (p.slope.w != 0.0) {
         vec3 v = acescct_from_linear(src.rgb);
         v = pow(max(v * p.slope.rgb + p.add.rgb, 0.0), p.power.rgb);

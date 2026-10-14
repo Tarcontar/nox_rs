@@ -5,16 +5,17 @@
 use gtk::{CompositeTemplate, gdk, gio, glib, prelude::*, subclass::prelude::*};
 use nox_project::{BlendMode, Edge, EditError, Rational, Time, TrackKind, supports_drop_frame};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::clip_strip::ClipStrip;
 use crate::color_wheels::ColorWheels;
-use crate::i18n::{fill, gettext};
+use crate::i18n::{fill, gettext, ngettext};
 use crate::inspector::Inspector;
 use crate::media_object::MediaObject;
 use crate::playback::Playback;
+use crate::project::Framing;
 use crate::project::Project;
 use crate::scopes::ScopesPanel;
 use crate::{media_pool::MediaPool, timeline::TimelineView, viewer::Viewer};
@@ -39,6 +40,8 @@ mod imp {
         pub color_viewer_slot: TemplateChild<gtk::Box>,
         #[template_child]
         pub inspector: TemplateChild<Inspector>,
+        #[template_child]
+        pub inspector_toggle: TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub clip_strip: TemplateChild<ClipStrip>,
         #[template_child]
@@ -135,7 +138,13 @@ pub fn build(app: &gtk::Application, files: &[gio::File]) -> Window {
     window.imp().inspector.set_timeline(&timeline);
     window.imp().clip_strip.set_up(&timeline, &pool);
     window.imp().color_wheels.set_timeline(&timeline);
+    window
+        .imp()
+        .viewer
+        .transform_overlay()
+        .set_up(&timeline, &pool);
     add_page_action(&window, &ui.playback);
+    add_shift_digit_keys(&window);
     add_transport_actions(window.upcast_ref(), &timeline, &project);
     add_project_actions(&ui);
     add_clip_actions(&ui);
@@ -207,6 +216,8 @@ impl Ui {
         undo.set_enabled(project.undo_label().is_some());
         let redo = self.action("redo");
         redo.set_enabled(project.redo_label().is_some());
+        self.action("relink-offline")
+            .set_enabled(!project.timeline().offline_files().is_empty());
 
         let fps = project.frame_rate();
         self.action("frame-rate")
@@ -235,7 +246,7 @@ impl Ui {
             .show(Some(&self.window));
     }
 
-    fn open(&self, path: &Path) {
+    fn open(self: &Rc<Self>, path: &Path) {
         if let Err(err) = self.project.open(path) {
             self.show_error(
                 &fill(&gettext("Cannot open {path}"), &[("path", &path.display())]),
@@ -244,12 +255,12 @@ impl Ui {
             return;
         }
         // Import the media the timeline uses, so it can be added again.
-        let paths: HashSet<PathBuf> = self
-            .project
-            .timeline()
+        let timeline = self.project.timeline();
+        let paths: HashSet<PathBuf> = timeline
             .clips()
-            .filter_map(|c| c.media_reference()?.path())
+            .filter_map(|c| timeline.media_path(c.media_reference()?))
             .collect();
+        drop(timeline);
         let mut missing = 0;
         for path in paths {
             if path.exists() {
@@ -259,11 +270,166 @@ impl Ui {
                 missing += 1;
             }
         }
-        if missing > 0 {
-            tracing::warn!("{missing} media files of {} are missing", path.display());
-        }
         self.timeline.set_selection(None);
         self.timeline.set_playhead(0);
+        if missing > 0 {
+            tracing::warn!("{missing} media files of {} are missing", path.display());
+            self.offer_relink(missing);
+        }
+    }
+
+    /// Tells that `missing` media files are offline, offering to look for
+    /// them in a folder.
+    fn offer_relink(self: &Rc<Self>, missing: usize) {
+        let message = fill(
+            &ngettext(
+                "{n} media file is offline",
+                "{n} media files are offline",
+                missing as u32,
+            ),
+            &[("n", &missing)],
+        );
+        let dialog = gtk::AlertDialog::builder()
+            .message(message)
+            .detail(gettext(
+                "Their clips show black. Choose a folder to look for the files in.",
+            ))
+            .buttons([gettext("Not Now"), gettext("Relink…")])
+            .cancel_button(0)
+            .default_button(1)
+            .modal(true)
+            .build();
+        let ui = self.clone();
+        dialog.choose(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            if result == Ok(1) {
+                ui.choose_relink_folder();
+            }
+        });
+    }
+
+    /// Asks for a folder and relinks the offline media found in it.
+    fn choose_relink_folder(self: &Rc<Self>) {
+        let dialog = gtk::FileDialog::builder()
+            .title(gettext("Relink Offline Media"))
+            .modal(true)
+            .build();
+        let ui = self.clone();
+        dialog.select_folder(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            if let Some(folder) = dialog_path(result) {
+                ui.relink_from_folder(&folder);
+            }
+        });
+    }
+
+    /// Relinks every offline file that has a namesake in `folder` (or
+    /// below), and tells how many were found.
+    fn relink_from_folder(&self, folder: &Path) {
+        let offline = self.project.timeline().offline_files();
+        if offline.is_empty() {
+            self.show_info(&gettext("No media is offline"), "");
+            return;
+        }
+        let found = nox_project::relink::find_in_folder(
+            &offline,
+            folder,
+            nox_project::relink::SEARCH_DEPTH,
+        );
+        self.relink(&found);
+        let message = fill(
+            &ngettext(
+                "Found {found} of {n} offline file",
+                "Found {found} of {n} offline files",
+                offline.len() as u32,
+            ),
+            &[("found", &found.len()), ("n", &offline.len())],
+        );
+        let detail = if found.is_empty() {
+            fill(
+                &gettext("No files of the same name are in {folder}."),
+                &[("folder", &folder.display())],
+            )
+        } else if found.len() < offline.len() {
+            gettext("The others are still offline.")
+        } else {
+            String::new()
+        };
+        self.show_info(&message, &detail);
+    }
+
+    /// Asks for a new file for the selected clip's media. Other offline
+    /// files that are in the chosen file's folder are relinked too.
+    fn choose_relink_file(self: &Rc<Self>) {
+        let old = self.timeline.selection().and_then(|item| {
+            let timeline = self.project.timeline();
+            match timeline.item(item).ok()? {
+                nox_project::Composable::Clip(clip) => timeline.media_path(clip.media_reference()?),
+                _ => None,
+            }
+        });
+        let Some(old) = old else {
+            tracing::info!("select a clip to relink");
+            return;
+        };
+        let name = old
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let dialog = gtk::FileDialog::builder()
+            .title(fill(&gettext("Relink {name}"), &[("name", &name)]))
+            .modal(true)
+            .initial_name(name)
+            .build();
+        if let Some(folder) = old.parent().filter(|f| f.is_dir()) {
+            dialog.set_initial_folder(Some(&gio::File::for_path(folder)));
+        }
+        let ui = self.clone();
+        dialog.open(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            if let Some(new) = dialog_path(result) {
+                ui.relink_file(&old, &new);
+            }
+        });
+    }
+
+    /// Relinks `old` to `new`, and other offline files to namesakes in
+    /// `new`'s folder.
+    fn relink_file(&self, old: &Path, new: &Path) {
+        let mut pairs = vec![(old.to_owned(), new.to_owned())];
+        if let Some(folder) = new.parent() {
+            let mut others = self.project.timeline().offline_files();
+            others.remove(old);
+            pairs.extend(nox_project::relink::find_in_folder(&others, folder, 0));
+        }
+        self.relink(&pairs);
+    }
+
+    /// Points the clips using each first path at the second, as one edit,
+    /// and imports the new files into the media pool.
+    fn relink(&self, pairs: &[(PathBuf, PathBuf)]) {
+        let result = self.project.edit(&gettext("Relink Media"), |t| {
+            match pairs
+                .iter()
+                .map(|(old, new)| t.relink(old, new))
+                .sum::<usize>()
+            {
+                0 => Err("nothing to relink"),
+                _ => Ok(()),
+            }
+        });
+        if result.is_ok() {
+            for (_, new) in pairs {
+                if self.pool.find(new).is_none() {
+                    self.pool.import(&gio::File::for_path(new));
+                }
+            }
+        }
+    }
+
+    fn show_info(&self, message: &str, detail: &str) {
+        gtk::AlertDialog::builder()
+            .message(message)
+            .detail(detail)
+            .modal(true)
+            .build()
+            .show(Some(&self.window));
     }
 
     /// Saves to the project's file, or asks for one. Calls `then` after a
@@ -366,7 +532,7 @@ impl Ui {
     }
 
     /// Applies `change` to the selected clip as one undoable edit.
-    fn edit_selected_clip(&self, label: &str, change: impl FnOnce(&mut nox_project::Item)) {
+    fn edit_selected_clip(&self, label: &str, change: impl Fn(&mut nox_project::Item)) {
         self.timeline.edit_selected_clip(label, None, change);
     }
 
@@ -406,14 +572,70 @@ impl Ui {
         });
     }
 
+    /// Edits the media pool's selection into the sequence at the playhead,
+    /// one after another, inserting (pushing what follows) or overwriting,
+    /// as F9/F10 in Resolve; the playhead moves past the last clip.
+    fn edit_selected_media(self: &Rc<Self>, insert: bool) {
+        let mut queue = VecDeque::new();
+        for media in self.pool.selected() {
+            match media.info() {
+                Some(info) => queue.push_back(info),
+                None => tracing::info!("{} is still loading", media.name()),
+            }
+        }
+        self.add_media_batch(queue, self.timeline.playhead(), insert, None);
+    }
+
+    /// Adds `queue` from `frame` on, one clip after another. A clip that
+    /// doesn't fit the timeline's orientation asks how to fit it; the answer
+    /// holds for the rest of the batch.
+    fn add_media_batch(
+        self: &Rc<Self>,
+        mut queue: VecDeque<nox_media::MediaInfo>,
+        frame: i64,
+        insert: bool,
+        choice: Option<Framing>,
+    ) {
+        let Some(info) = queue.pop_front() else {
+            self.timeline.set_playhead(frame);
+            return;
+        };
+        let ui = self.clone();
+        let name = info.path.display().to_string();
+        crate::framing::add_media(
+            &self.window,
+            &self.project,
+            info,
+            (None, frame, insert),
+            choice,
+            move |result, asked| {
+                let frame = match result {
+                    Ok(length) => frame + length,
+                    Err(err) => {
+                        tracing::info!("cannot add {name}: {err}");
+                        frame
+                    }
+                };
+                ui.add_media_batch(queue, frame, insert, asked.or(choice));
+            },
+        );
+    }
+
     /// Adds `media` at the end of the sequence.
-    fn append_media(&self, media: &MediaObject) {
+    fn append_media(self: &Rc<Self>, media: &MediaObject) {
         let Some(info) = media.info() else {
             tracing::info!("{} is still loading", media.name());
             return;
         };
         let end = self.project.duration_frames();
-        let _ = self.project.add_media(&info, None, end);
+        crate::framing::add_media(
+            &self.window,
+            &self.project,
+            info,
+            (None, end, false),
+            None,
+            |_, _| {},
+        );
     }
 }
 
@@ -443,6 +665,47 @@ fn dialog_path(result: Result<gio::File, glib::Error>) -> Option<PathBuf> {
 /// `win.page` ("edit" or "color"; Shift+4 and Shift+6 as in Resolve)
 /// switches pages. The one viewer moves to the visible page, so there is
 /// one engine and nothing renders twice.
+/// Shift+4, Shift+6 and Shift+9 as in DaVinci Resolve: the Edit and Color
+/// pages and Project Settings. Matched by the physical key, since Shift
+/// plus a digit key types a different character on most layouts (`^` for
+/// Shift+6 on US English, `&` on German), which a `<Shift>6` trigger
+/// misses. A key counts as digit `d` if it types `d` without Shift (US,
+/// German) or with it (French). Runs after the focused widget, like the
+/// window's other single-key shortcuts.
+fn add_shift_digit_keys(window: &Window) {
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(glib::clone!(
+        #[weak]
+        window,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, keyval, keycode, state| {
+            let mods = state & gtk::accelerator_get_default_mod_mask();
+            if mods != gdk::ModifierType::SHIFT_MASK {
+                return glib::Propagation::Proceed;
+            }
+            let digit = |k: gdk::Key| k.to_unicode().and_then(|c| c.to_digit(10));
+            let unshifted = WidgetExt::display(&window)
+                .map_keycode(keycode)
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|(key, _)| key.level() == 0 && key.group() == 0)
+                        .and_then(|(_, k)| digit(*k))
+                });
+            let action = match digit(keyval).or(unshifted) {
+                Some(4) => ("win.page", Some("edit".to_variant())),
+                Some(6) => ("win.page", Some("color".to_variant())),
+                Some(9) => ("win.project-settings", None),
+                _ => return glib::Propagation::Proceed,
+            };
+            let _ = WidgetExt::activate_action(&window, action.0, action.1.as_ref());
+            glib::Propagation::Stop
+        }
+    ));
+    window.add_controller(keys);
+}
+
 fn add_page_action(window: &Window, playback: &Rc<Playback>) {
     let imp = window.imp();
     let page = gio::SimpleAction::new_stateful(
@@ -471,6 +734,8 @@ fn add_page_action(window: &Window, playback: &Rc<Playback>) {
             let imp = window.imp();
             let name = pages.visible_child_name().unwrap_or_default();
             page.set_state(&name.to_variant());
+            imp.inspector_toggle.set_visible(name == "edit");
+            imp.viewer.transform_overlay().set_enabled(name == "edit");
             let slot = if name == "color" {
                 &imp.color_viewer_slot
             } else {
@@ -589,6 +854,11 @@ fn add_project_actions(ui: &Rc<Ui>) {
                     _ => Ok(()),
                 });
         }),
+        simple("relink-clip", |ui| ui.choose_relink_file()),
+        simple("relink-offline", |ui| ui.choose_relink_folder()),
+        with_path("relink-folder", |ui, path| ui.relink_from_folder(path)),
+        simple("insert-media", |ui| ui.edit_selected_media(true)),
+        simple("overwrite-media", |ui| ui.edit_selected_media(false)),
         simple("add-video-track", |ui| ui.add_track(TrackKind::Video)),
         simple("add-audio-track", |ui| ui.add_track(TrackKind::Audio)),
         with_path("open-path", |ui, path| ui.open(path)),
@@ -629,6 +899,13 @@ fn add_project_actions(ui: &Rc<Ui>) {
                 tracing::warn!("screenshot failed: {err}");
             }
         }));
+        ui.window
+            .add_action(&with_path("screenshot-titlebar", |ui, path| {
+                let titlebar = ui.window.titlebar().expect("header bar");
+                if let Err(err) = screenshot(&titlebar, path) {
+                    tracing::warn!("screenshot failed: {err}");
+                }
+            }));
         // Like the title bar's close button (close-request and all).
         let close = gio::SimpleAction::new("close", None);
         close.connect_activate(glib::clone!(
@@ -722,6 +999,21 @@ fn add_project_actions(ui: &Rc<Ui>) {
         }
     ));
     ui.window.add_action(&snapping);
+
+    // The inspector can be hidden, giving the viewer its room.
+    let inspector = gio::SimpleAction::new_stateful("show-inspector", None, &true.to_variant());
+    inspector.connect_activate(glib::clone!(
+        #[weak]
+        ui,
+        move |action, _| {
+            let window = ui.window.downcast_ref::<Window>().expect("Nox window");
+            let inspector = window.imp().inspector.get();
+            let shown = !inspector.is_visible();
+            inspector.set_visible(shown);
+            action.set_state(&shown.to_variant());
+        }
+    ));
+    ui.window.add_action(&inspector);
 }
 
 /// Renders `widget` with GTK's renderer and saves it as PNG.
@@ -807,6 +1099,72 @@ fn add_clip_actions(ui: &Rc<Ui>) {
         }
     ));
     ui.window.add_action(&select);
+    // Several at once, the first primary: `select-clips([(track, index)])`.
+    let select_many =
+        gio::SimpleAction::new("select-clips", Some(glib::VariantTy::new("a(xx)").unwrap()));
+    select_many.connect_activate(glib::clone!(
+        #[weak]
+        ui,
+        move |_, parameter| {
+            let items: Vec<nox_project::ItemRef> = parameter
+                .and_then(|p| p.get::<Vec<(i64, i64)>>())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(track, index)| {
+                    Some(nox_project::ItemRef {
+                        track: usize::try_from(track).ok()?,
+                        index: usize::try_from(index).ok()?,
+                    })
+                })
+                .filter(|&item| ui.project.timeline().item(item).is_ok())
+                .collect();
+            ui.timeline.select_items(items);
+        }
+    ));
+    ui.window.add_action(&select_many);
+    // Slip or slide the selected clip by frames, for scripting.
+    for (name, slide) in [("slip-clip", false), ("slide-clip", true)] {
+        let action = gio::SimpleAction::new(name, Some(glib::VariantTy::INT64));
+        action.connect_activate(glib::clone!(
+            #[weak]
+            ui,
+            move |_, parameter| {
+                let (Some(item), Some(frames)) = (
+                    ui.timeline.selection(),
+                    parameter.and_then(|p| p.get::<i64>()),
+                ) else {
+                    return;
+                };
+                let delta = Time::from_frames(frames, ui.project.frame_rate());
+                let result = if slide {
+                    ui.project
+                        .edit(&gettext("Slide Clip"), |t| t.slide(item, delta))
+                } else {
+                    ui.project
+                        .edit(&gettext("Slip Clip"), |t| t.slip(item, delta))
+                        .map(|()| item)
+                };
+                if let Ok(item) = result {
+                    ui.timeline.set_selection(Some(item));
+                }
+            }
+        ));
+        ui.window.add_action(&action);
+    }
+    // Timeline marker by index, for scripting; -1 clears.
+    let select_marker = gio::SimpleAction::new("select-marker", Some(glib::VariantTy::INT64));
+    select_marker.connect_activate(glib::clone!(
+        #[weak]
+        ui,
+        move |_, parameter| {
+            let index = parameter
+                .and_then(|p| p.get::<i64>())
+                .and_then(|i| usize::try_from(i).ok())
+                .filter(|&i| i < ui.project.timeline().markers().len());
+            ui.timeline.select_marker(index);
+        }
+    ));
+    ui.window.add_action(&select_marker);
     let dissolve = gio::SimpleAction::new("add-dissolve", None);
     dissolve.connect_activate(glib::clone!(
         #[weak]
@@ -943,5 +1301,9 @@ fn add_transport_actions(
             "select-clip-at-playhead",
             TimelineView::select_clip_at_playhead,
         ),
+        timeline_entry("add-marker", TimelineView::add_marker_at_playhead),
+        timeline_entry("previous-marker", |t| t.go_to_marker(false)),
+        timeline_entry("next-marker", |t| t.go_to_marker(true)),
+        timeline_entry("delete-marker", TimelineView::delete_selected_marker),
     ]);
 }

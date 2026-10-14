@@ -4,19 +4,76 @@
   <template class="NoxViewer" parent="GtkBox">
     <property name="orientation">vertical</property>
     <child>
-      <object class="GtkPicture" id="picture">
-        <property name="content-fit">contain</property>
+      <!-- The transform handles of the selected clip over the picture. -->
+      <object class="GtkOverlay">
         <property name="hexpand">true</property>
         <property name="vexpand">true</property>
-        <style>
-          <class name="viewer-canvas"/>
-        </style>
+        <property name="child">
+          <object class="GtkPicture" id="picture">
+            <property name="content-fit">contain</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <style>
+              <class name="viewer-canvas"/>
+            </style>
+          </object>
+        </property>
+        <child type="overlay">
+          <object class="NoxTransformOverlay" id="transform_overlay"/>
+        </child>
       </object>
     </child>
     <child>
       <object class="GtkCenterBox">
         <property name="margin-top">4</property>
         <property name="margin-bottom">4</property>
+        <!-- Marks and markers, as in Premiere's Program Monitor. -->
+        <property name="start-widget">
+          <object class="GtkBox">
+            <property name="spacing">2</property>
+            <property name="margin-start">4</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkButton">
+                <property name="icon-name">nox-mark-in-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Mark In (I)</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Mark In</property>
+                  <property name="key-shortcuts">I</property>
+                </accessibility>
+                <property name="action-name">win.set-in</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton">
+                <property name="icon-name">nox-mark-out-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Mark Out (O)</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Mark Out</property>
+                  <property name="key-shortcuts">O</property>
+                </accessibility>
+                <property name="action-name">win.set-out</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton">
+                <property name="icon-name">nox-marker-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Add Marker (M)</property>
+                <accessibility>
+                  <property name="label" translatable="yes">Add Marker</property>
+                  <property name="key-shortcuts">M</property>
+                </accessibility>
+                <property name="action-name">win.add-marker</property>
+                <property name="focus-on-click">false</property>
+                <style><class name="flat"/></style>
+              </object>
+            </child>
+          </object>
+        </property>
         <property name="center-widget">
           <object class="GtkBox">
             <property name="spacing">2</property>

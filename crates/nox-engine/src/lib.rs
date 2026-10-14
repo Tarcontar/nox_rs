@@ -11,13 +11,13 @@ mod render;
 pub use audio::Mixer;
 pub use engine::Engine;
 pub use export::{
-    EXPORT_AUDIO_RATE, Export, ExportError, ExportEvent, ExportSettings, ExportSummary, export,
-    full_range, marked_range,
+    EXPORT_AUDIO_RATE, Export, ExportError, ExportEvent, ExportSettings, ExportSummary,
+    available_encoders, export, full_range, has_audio, marked_range,
 };
 pub use nox_gpu::{
     DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F, Image, ScopeImages, scope_sizes,
 };
-pub use nox_media::{EncodeQuality, VideoCodec};
+pub use nox_media::{EncodeQuality, EncoderProbe, VideoCodec};
 
 /// Display-referred RGBA at the requested output size.
 #[derive(Debug)]

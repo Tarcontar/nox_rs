@@ -64,8 +64,11 @@ fn settings(name: &str, codec: VideoCodec, hardware: bool) -> ExportSettings {
         codec,
         quality: EncodeQuality::High,
         hardware,
+        encoder: None,
         range: None,
         audio: true,
+        encoding: nox_media::OutputEncoding::Sdr,
+        peak_nits: 1000.0,
     }
 }
 
@@ -186,4 +189,192 @@ fn cancelling_removes_the_file() {
     let result = export(&timeline, &settings, |done, _| done < 10);
     assert!(matches!(result, Err(ExportError::Cancelled)));
     assert!(!settings.path.exists());
+}
+
+/// The 10-bit luma at the picture's center (an HDR export decodes to a
+/// 10-bit format).
+fn center_luma10(path: &Path, frame: i64) -> f64 {
+    let decoded = VideoDecoder::open(path, None)
+        .unwrap()
+        .frame_at(frame)
+        .unwrap();
+    assert_eq!(
+        decoded.format(),
+        nox_media::ffmpeg::format::Pixel::YUV420P10LE
+    );
+    let stride = decoded.stride(0);
+    let i = 90 * stride + 160 * 2;
+    let data = decoded.data(0);
+    f64::from(u16::from_le_bytes([data[i], data[i + 1]]))
+}
+
+/// HDR exports (HEVC Main 10, BT.2020): SDR material sits at the levels
+/// BT.2408 puts SDR white at, so the same gray encodes to the PQ and HLG
+/// values the SDR export's light implies. Tags and the HDR10 mastering
+/// display are in the file.
+#[test]
+fn hdr_exports_encode_pq_and_hlg() {
+    use nox_media::OutputEncoding;
+    let Some(gray) = solid("x-gray.mkv", "0x9A9A9A", "320x180") else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    (timeline.settings.width, timeline.settings.height) = (320, 180);
+    timeline.place(0, clip(&gray, 0, 10), f(0)).unwrap();
+    // The light of the gray, from the SDR export (8-bit limited BT.709).
+    let sdr = settings("hdr-ref.mp4", VideoCodec::H264, false);
+    export(&timeline, &sdr, |_, _| true).unwrap();
+    let y8 = {
+        let decoded = VideoDecoder::open(&sdr.path, None)
+            .unwrap()
+            .frame_at(5)
+            .unwrap();
+        f64::from(decoded.data(0)[90 * decoded.stride(0) + 160])
+    };
+    let light = ((y8 - 16.0) / 219.0).powf(2.4) as f32;
+    let code = |signal: f32| 64.0 + 876.0 * f64::from(signal);
+    let pq = code(nox_color::hdr::pq_inverse_eotf(light * 203.0 / 10_000.0));
+    let hlg = code(nox_color::hdr::hlg_encode([light * 203.0; 3])[0]);
+    for (name, encoding, hardware, expected) in [
+        ("hdr-pq-hw.mp4", OutputEncoding::Pq, true, pq),
+        ("hdr-pq-sw.mp4", OutputEncoding::Pq, false, pq),
+        ("hdr-hlg-hw.mp4", OutputEncoding::Hlg, true, hlg),
+        ("hdr-hlg-sw.mp4", OutputEncoding::Hlg, false, hlg),
+    ] {
+        let mut settings = settings(name, VideoCodec::Hevc, hardware);
+        settings.encoding = encoding;
+        settings.audio = false;
+        let summary = export(&timeline, &settings, |_, _| true).unwrap();
+        let luma = center_luma10(&settings.path, 5);
+        assert!(
+            (luma - expected).abs() <= 3.0,
+            "{name} ({}): luma {luma}, expected {expected:.1}",
+            summary.encoder
+        );
+        eprintln!(
+            "{name}: {}{}",
+            summary.encoder,
+            if summary.zero_copy { ", zero copy" } else { "" }
+        );
+        // HDR10 files say how bright they get: here, the gray all over,
+        // measured on the CPU or (frames on the GPU) by the compositor.
+        if encoding == OutputEncoding::Pq {
+            let (max_cll, max_fall) = content_light(&settings.path).expect("clli");
+            let nits = light * 203.0;
+            assert!(
+                (max_cll - nits).abs() <= 2.0,
+                "MaxCLL {max_cll}, gray {nits}"
+            );
+            assert!(
+                (max_fall - nits).abs() <= 2.0,
+                "MaxFALL {max_fall}, gray {nits}"
+            );
+        }
+        let info = probe(&settings.path).unwrap();
+        let video = info.video.unwrap();
+        let transfer = if encoding == OutputEncoding::Pq {
+            16
+        } else {
+            18
+        };
+        assert_eq!(
+            (
+                video.color.primaries,
+                video.color.transfer,
+                video.color.matrix
+            ),
+            (9, transfer, 9),
+            "{name}"
+        );
+    }
+    // H.264 can't carry HDR.
+    let mut h264 = settings("hdr-h264.mp4", VideoCodec::H264, false);
+    h264.encoding = OutputEncoding::Pq;
+    assert!(export(&timeline, &h264, |_, _| true).is_err());
+}
+
+/// An HDR10 source keeps its light in an HDR10 export (no tone mapping):
+/// a bright PQ gray comes out with the code it went in with, where the SDR
+/// export compresses it.
+#[test]
+fn hdr_sources_pass_through_hdr_exports() {
+    use nox_media::OutputEncoding;
+    // A gray around 1000 nits, tagged BT.2020 PQ, 10 bit.
+    let args = [
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=0xC0C0C0:size=320x180:rate=25:duration=2,format=yuv444p10le,\
+         setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
+        "-c:v",
+        "ffv1",
+    ];
+    let Some(source) = fixture("x-pq-gray2.mkv", &args) else {
+        return;
+    };
+    let source_luma = {
+        let decoded = VideoDecoder::open(&source, None)
+            .unwrap()
+            .frame_at(5)
+            .unwrap();
+        let i = 90 * decoded.stride(0) + 160 * 2;
+        let data = decoded.data(0);
+        f64::from(u16::from_le_bytes([data[i], data[i + 1]]))
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    (timeline.settings.width, timeline.settings.height) = (320, 180);
+    let reference = MediaReference::from_path(&source, Some(TimeRange::new(f(0), f(50))));
+    timeline
+        .place(
+            0,
+            Composable::Clip(Clip::new("pq", reference, TimeRange::new(f(0), f(10)))),
+            f(0),
+        )
+        .unwrap();
+    let mut settings = settings("hdr-pass.mp4", VideoCodec::Hevc, false);
+    settings.encoding = OutputEncoding::Pq;
+    settings.audio = false;
+    export(&timeline, &settings, |_, _| true).unwrap();
+    let luma = center_luma10(&settings.path, 5);
+    assert!(
+        (luma - source_luma).abs() <= 3.0,
+        "PQ in {source_luma}, out {luma}"
+    );
+    // Brighter than SDR white (PQ 0.58: code 572).
+    assert!(luma > 620.0, "{luma}");
+}
+
+/// MaxCLL and MaxFALL from a file's content light metadata, read with
+/// ffprobe.
+fn content_light(path: &Path) -> Option<(f32, f32)> {
+    let output = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+        .arg("stream_side_data=max_content,max_average")
+        .args(["-of", "default=nw=1"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = |key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key)?.parse::<f32>().ok())
+    };
+    Some((value("max_content=")?, value("max_average=")?))
+}
+
+/// A timeline without audio exports without an audio track, even with
+/// audio asked for, rather than with a silent one.
+#[test]
+fn no_audio_track_without_audio() {
+    let Some(gray) = solid("x-gray-silent.mkv", "0x808080", "320x180") else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    (timeline.settings.width, timeline.settings.height) = (320, 180);
+    timeline.place(0, clip(&gray, 0, 10), f(0)).unwrap();
+    assert!(!nox_engine::has_audio(&timeline, &(0..10)));
+    let settings = settings("silent.mp4", VideoCodec::H264, false);
+    assert!(settings.audio);
+    export(&timeline, &settings, |_, _| true).unwrap();
+    assert!(probe(&settings.path).unwrap().audio.is_empty());
 }

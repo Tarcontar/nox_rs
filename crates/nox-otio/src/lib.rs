@@ -172,6 +172,7 @@ impl Reader {
                     tracks,
                     settings: Settings::default(),
                     extra: Object::new(),
+                    media_dir: None,
                 })
             }
             other => self.error(format!("cannot open a {other} as a timeline")),
@@ -198,6 +199,7 @@ impl Reader {
                 tracks,
                 settings,
                 extra: extra_fields(object, TIMELINE_FIELDS),
+                media_dir: None,
             })
         })
     }

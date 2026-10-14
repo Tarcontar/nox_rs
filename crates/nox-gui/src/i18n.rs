@@ -76,6 +76,20 @@ pub fn blend_mode_name(mode: nox_project::BlendMode) -> String {
     }
 }
 
+/// The translated name of a transition kind.
+pub fn transition_name(kind: nox_project::TransitionKind) -> String {
+    use nox_project::{DipColor, Side, TransitionKind};
+    match kind {
+        TransitionKind::Dissolve => gettext("Cross Dissolve"),
+        TransitionKind::Wipe(Side::Left) => gettext("Wipe from Left"),
+        TransitionKind::Wipe(Side::Right) => gettext("Wipe from Right"),
+        TransitionKind::Wipe(Side::Top) => gettext("Wipe from Top"),
+        TransitionKind::Wipe(Side::Bottom) => gettext("Wipe from Bottom"),
+        TransitionKind::Dip(DipColor::Black) => gettext("Dip to Black"),
+        TransitionKind::Dip(DipColor::White) => gettext("Dip to White"),
+    }
+}
+
 /// Replaces each `{name}` in `template` (a translated message) with its
 /// value.
 pub fn fill(template: &str, values: &[(&str, &dyn Display)]) -> String {

@@ -122,6 +122,19 @@ impl MediaPool {
             .find(|media| media.path() == path)
     }
 
+    /// The selected items, in pool order.
+    pub fn selected(&self) -> Vec<MediaObject> {
+        let imp = self.imp();
+        let selected = imp.selection.selection();
+        imp.store
+            .iter::<MediaObject>()
+            .flatten()
+            .enumerate()
+            .filter(|&(i, _)| selected.contains(i as u32))
+            .map(|(_, media)| media)
+            .collect()
+    }
+
     /// Calls `f` when items are added or removed.
     pub fn connect_items_changed<F: Fn() + 'static>(&self, f: F) {
         self.imp()

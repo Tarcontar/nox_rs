@@ -172,7 +172,7 @@ impl ClipStrip {
                 let start = range.start.frame(fps);
                 let media = clip
                     .media_reference()
-                    .and_then(|r| r.path())
+                    .and_then(|r| model.media_path(r))
                     .and_then(|path| pool.find(&path));
                 let row: ClipRow = glib::Object::builder()
                     .property("name", &clip.item.name)

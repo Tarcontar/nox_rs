@@ -15,6 +15,85 @@
     <property name="page-increment">1</property>
   </object>
 
+  <!-- Fade lengths in seconds; the upper limit follows the clip. -->
+  <object class="GtkAdjustment" id="fade_in_adjustment">
+    <property name="upper">10</property>
+    <property name="step-increment">0.04</property>
+    <property name="page-increment">1</property>
+  </object>
+  <object class="GtkAdjustment" id="fade_out_adjustment">
+    <property name="upper">10</property>
+    <property name="step-increment">0.04</property>
+    <property name="page-increment">1</property>
+  </object>
+
+  <!-- Transform: position in timeline pixels, zoom and crop in percent. -->
+  <object class="GtkAdjustment" id="position_x_adjustment">
+    <property name="lower">-100000</property>
+    <property name="upper">100000</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">10</property>
+  </object>
+  <object class="GtkAdjustment" id="position_y_adjustment">
+    <property name="lower">-100000</property>
+    <property name="upper">100000</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">10</property>
+  </object>
+  <object class="GtkAdjustment" id="zoom_adjustment">
+    <property name="lower">0</property>
+    <property name="upper">1000</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">10</property>
+  </object>
+  <object class="GtkAdjustment" id="rotation_adjustment">
+    <property name="lower">-360</property>
+    <property name="upper">360</property>
+    <property name="step-increment">0.1</property>
+    <property name="page-increment">1.0</property>
+  </object>
+  <object class="GtkAdjustment" id="crop_left_adjustment">
+    <property name="lower">0</property>
+    <property name="upper">100</property>
+    <property name="step-increment">0.1</property>
+    <property name="page-increment">1.0</property>
+  </object>
+  <object class="GtkAdjustment" id="crop_right_adjustment">
+    <property name="lower">0</property>
+    <property name="upper">100</property>
+    <property name="step-increment">0.1</property>
+    <property name="page-increment">1.0</property>
+  </object>
+  <object class="GtkAdjustment" id="crop_top_adjustment">
+    <property name="lower">0</property>
+    <property name="upper">100</property>
+    <property name="step-increment">0.1</property>
+    <property name="page-increment">1.0</property>
+  </object>
+  <object class="GtkAdjustment" id="crop_bottom_adjustment">
+    <property name="lower">0</property>
+    <property name="upper">100</property>
+    <property name="step-increment">0.1</property>
+    <property name="page-increment">1.0</property>
+  </object>
+
+  <!-- Transition length in seconds; the step follows the frame rate. -->
+  <object class="GtkAdjustment" id="transition_length_adjustment">
+    <property name="lower">0.04</property>
+    <property name="upper">60</property>
+    <property name="step-increment">0.04</property>
+    <property name="page-increment">1</property>
+  </object>
+
+  <!-- Clip speed in percent. -->
+  <object class="GtkAdjustment" id="speed_adjustment">
+    <property name="lower">1</property>
+    <property name="upper">10000</property>
+    <property name="value">100</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">10</property>
+  </object>
+
   <!-- Properties of the item selected on the timeline. -->
   <template class="NoxInspector" parent="GtkBox">
     <property name="orientation">vertical</property>
@@ -53,9 +132,114 @@
         </child>
         <child>
           <object class="GtkStackPage">
+            <property name="name">marker</property>
+            <property name="child">
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="spacing">10</property>
+                <property name="margin-start">10</property>
+                <property name="margin-end">10</property>
+                <property name="margin-top">4</property>
+                <child>
+                  <object class="GtkLabel" id="marker_title">
+                    <property name="xalign">0</property>
+                    <style>
+                      <class name="inspector-name"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkGrid">
+                    <property name="row-spacing">6</property>
+                    <property name="column-spacing">8</property>
+                    <child>
+                      <object class="GtkLabel" id="marker_name_label">
+                        <property name="label" translatable="yes">Name</property>
+                        <property name="xalign">0</property>
+                        <layout>
+                          <property name="column">0</property>
+                          <property name="row">0</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkEntry" id="marker_name">
+                        <property name="hexpand">true</property>
+                        <signal name="changed" handler="on_marker_changed" swapped="true"/>
+                        <accessibility>
+                          <relation name="labelled-by">marker_name_label</relation>
+                        </accessibility>
+                        <layout>
+                          <property name="column">1</property>
+                          <property name="row">0</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel" id="marker_color_label">
+                        <property name="label" translatable="yes">Color</property>
+                        <property name="xalign">0</property>
+                        <layout>
+                          <property name="column">0</property>
+                          <property name="row">1</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkDropDown" id="marker_color">
+                        <signal name="notify::selected" handler="on_marker_changed" swapped="true"/>
+                        <accessibility>
+                          <relation name="labelled-by">marker_color_label</relation>
+                        </accessibility>
+                        <layout>
+                          <property name="column">1</property>
+                          <property name="row">1</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel" id="marker_note_label">
+                        <property name="label" translatable="yes">Note</property>
+                        <property name="xalign">0</property>
+                        <layout>
+                          <property name="column">0</property>
+                          <property name="row">2</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkEntry" id="marker_note">
+                        <property name="hexpand">true</property>
+                        <signal name="changed" handler="on_marker_changed" swapped="true"/>
+                        <accessibility>
+                          <relation name="labelled-by">marker_note_label</relation>
+                        </accessibility>
+                        <layout>
+                          <property name="column">1</property>
+                          <property name="row">2</property>
+                        </layout>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label" translatable="yes">Delete Marker</property>
+                    <property name="halign">start</property>
+                    <property name="action-name">win.delete-marker</property>
+                  </object>
+                </child>
+              </object>
+            </property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkStackPage">
             <property name="name">item</property>
             <property name="child">
-              <object class="GtkScrolledWindow">
+              <!-- The wheel scrolls the page rather than changing the field
+                   under the pointer (inspector.rs). -->
+              <object class="GtkScrolledWindow" id="item_scroller">
                 <property name="hscrollbar-policy">never</property>
                 <property name="child">
                   <object class="GtkBox">
@@ -147,6 +331,25 @@
                               </object>
                             </child>
                             <child>
+                              <object class="GtkToggleButton" id="opacity_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">opacity_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">3</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
                               <object class="GtkLabel" id="blend_label">
                                 <property name="label" translatable="yes">Blend Mode</property>
                                 <property name="xalign">0</property>
@@ -165,6 +368,592 @@
                                   <property name="column">1</property>
                                   <property name="row">2</property>
                                   <property name="column-span">2</property>
+                                </layout>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkGrid" id="transition_section">
+                        <property name="row-spacing">6</property>
+                        <property name="column-spacing">8</property>
+                        <child>
+                          <object class="GtkLabel" id="transition_type_label">
+                            <property name="label" translatable="yes">Type</property>
+                            <property name="xalign">0</property>
+                            <property name="hexpand">true</property>
+                            <layout>
+                              <property name="column">0</property>
+                              <property name="row">0</property>
+                            </layout>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkDropDown" id="transition_type">
+                            <accessibility>
+                              <relation name="labelled-by">transition_type_label</relation>
+                            </accessibility>
+                            <signal name="notify::selected" handler="on_transition_type_changed" swapped="true"/>
+                            <layout>
+                              <property name="column">1</property>
+                              <property name="row">0</property>
+                            </layout>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel" id="transition_length_label">
+                            <property name="label" translatable="yes">Length</property>
+                            <property name="xalign">0</property>
+                            <layout>
+                              <property name="column">0</property>
+                              <property name="row">1</property>
+                            </layout>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkSpinButton" id="transition_length">
+                            <property name="adjustment">transition_length_adjustment</property>
+                            <property name="digits">2</property>
+                            <property name="width-chars">5</property>
+                            <property name="tooltip-text" translatable="yes">Seconds, limited by the media the clips have beyond the cut</property>
+                            <accessibility>
+                              <relation name="labelled-by">transition_length_label</relation>
+                            </accessibility>
+                            <layout>
+                              <property name="column">1</property>
+                              <property name="row">1</property>
+                            </layout>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="transform_section">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkBox">
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label" translatable="yes">Transform</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton">
+                                <property name="icon-name">edit-undo-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Reset Transform</property>
+                                <accessibility>
+                                  <property name="label" translatable="yes">Reset Transform</property>
+                                </accessibility>
+                                <signal name="clicked" handler="on_reset_transform" swapped="true"/>
+                                <style>
+                                  <class name="flat"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkGrid">
+                            <property name="row-spacing">2</property>
+                            <property name="column-spacing">8</property>
+                            <child>
+                              <object class="GtkLabel" id="position_x_label">
+                                <property name="label" translatable="yes">Position X</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="position_x">
+                                <property name="adjustment">position_x_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">position_x_label</relation>
+                                </accessibility>
+                                <property name="digits">0</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Pixels right of center, in the timeline's resolution</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="position_x_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">position_x_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="position_y_label">
+                                <property name="label" translatable="yes">Position Y</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">1</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="position_y">
+                                <property name="adjustment">position_y_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">position_y_label</relation>
+                                </accessibility>
+                                <property name="digits">0</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Pixels below center, in the timeline's resolution</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">1</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="position_y_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">position_y_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">1</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="zoom_label">
+                                <property name="label" translatable="yes">Zoom</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">2</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="zoom">
+                                <property name="adjustment">zoom_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">zoom_label</relation>
+                                </accessibility>
+                                <property name="digits">1</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Percent of the fitted size</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">2</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="zoom_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">zoom_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">2</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="rotation_label">
+                                <property name="label" translatable="yes">Rotation</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">3</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="rotation">
+                                <property name="adjustment">rotation_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">rotation_label</relation>
+                                </accessibility>
+                                <property name="digits">1</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Degrees, clockwise</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">3</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="rotation_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">rotation_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">3</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="crop_left_label">
+                                <property name="label" translatable="yes">Crop Left</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">4</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="crop_left">
+                                <property name="adjustment">crop_left_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_left_label</relation>
+                                </accessibility>
+                                <property name="digits">1</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Percent of the picture</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">4</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="crop_left_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_left_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">4</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="crop_right_label">
+                                <property name="label" translatable="yes">Crop Right</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">5</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="crop_right">
+                                <property name="adjustment">crop_right_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_right_label</relation>
+                                </accessibility>
+                                <property name="digits">1</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Percent of the picture</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">5</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="crop_right_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_right_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">5</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="crop_top_label">
+                                <property name="label" translatable="yes">Crop Top</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">6</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="crop_top">
+                                <property name="adjustment">crop_top_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_top_label</relation>
+                                </accessibility>
+                                <property name="digits">1</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Percent of the picture</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">6</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="crop_top_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_top_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">6</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="crop_bottom_label">
+                                <property name="label" translatable="yes">Crop Bottom</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">7</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="crop_bottom">
+                                <property name="adjustment">crop_bottom_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_bottom_label</relation>
+                                </accessibility>
+                                <property name="digits">1</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Percent of the picture</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">7</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="crop_bottom_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">crop_bottom_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">2</property>
+                                  <property name="row">7</property>
+                                </layout>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="speed_section">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">Speed</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkGrid">
+                            <property name="row-spacing">2</property>
+                            <property name="column-spacing">8</property>
+                            <child>
+                              <object class="GtkLabel" id="speed_label">
+                                <property name="label" translatable="yes">Speed</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="speed">
+                                <property name="adjustment">speed_adjustment</property>
+                                <property name="width-chars">6</property>
+                                <property name="tooltip-text" translatable="yes">Percent of normal speed; the clip gets shorter or longer and shows the same media</property>
+                                <accessibility>
+                                  <relation name="labelled-by">speed_label</relation>
+                                </accessibility>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkCheckButton" id="speed_ripple">
+                            <property name="label" translatable="yes">Move what follows</property>
+                            <property name="active">true</property>
+                            <property name="tooltip-text" translatable="yes">When the speed changes the clip's length, move the clips after it (as Resolve's Ripple Sequence); otherwise leave a gap or cover them</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkCheckButton" id="freeze">
+                            <property name="label" translatable="yes">Freeze Frame</property>
+                            <property name="tooltip-text" translatable="yes">Hold the frame under the playhead for the whole clip</property>
+                            <signal name="toggled" handler="on_freeze_toggled" swapped="true"/>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="fade_section">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">Fades</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkGrid">
+                            <property name="row-spacing">2</property>
+                            <property name="column-spacing">8</property>
+                            <child>
+                              <object class="GtkLabel" id="fade_in_label">
+                                <property name="label" translatable="yes">Fade In</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="fade_in">
+                                <property name="adjustment">fade_in_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">fade_in_label</relation>
+                                </accessibility>
+                                <property name="digits">2</property>
+                                <property name="width-chars">5</property>
+                                <property name="tooltip-text" translatable="yes">Seconds; also set by dragging the handles at the clip's top corners</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkLabel" id="fade_out_label">
+                                <property name="label" translatable="yes">Fade Out</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">1</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="fade_out">
+                                <property name="adjustment">fade_out_adjustment</property>
+                                <accessibility>
+                                  <relation name="labelled-by">fade_out_label</relation>
+                                </accessibility>
+                                <property name="digits">2</property>
+                                <property name="width-chars">5</property>
+                                <property name="tooltip-text" translatable="yes">Seconds; also set by dragging the handles at the clip's top corners</property>
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">1</property>
                                 </layout>
                               </object>
                             </child>
@@ -230,6 +1019,83 @@
                                 </layout>
                               </object>
                             </child>
+                            <child>
+                              <object class="GtkToggleButton" id="volume_key">
+                                <property name="icon-name">nox-keyframe-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Keyframe at the playhead</property>
+                                <accessibility>
+                                  <relation name="labelled-by">volume_label</relation>
+                                  <property name="description" translatable="yes">Adds or removes a keyframe at the playhead</property>
+                                </accessibility>
+                                <signal name="toggled" handler="on_keyframe_toggled" swapped="true"/>
+                                <style>
+                                  <class name="keyframe"/>
+                                  <class name="flat"/>
+                                </style>
+                                <layout>
+                                  <property name="column">3</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="keyframe_section">
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkLabel" id="keyframes_label">
+                            <property name="label" translatable="yes">Keyframes</property>
+                            <property name="xalign">0</property>
+                            <property name="hexpand">true</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton">
+                            <property name="icon-name">go-previous-symbolic</property>
+                            <property name="tooltip-text" translatable="yes">Previous Keyframe</property>
+                            <accessibility>
+                              <property name="label" translatable="yes">Previous Keyframe</property>
+                            </accessibility>
+                            <signal name="clicked" handler="on_previous_keyframe" swapped="true"/>
+                            <style>
+                              <class name="flat"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton">
+                            <property name="icon-name">go-next-symbolic</property>
+                            <property name="tooltip-text" translatable="yes">Next Keyframe</property>
+                            <accessibility>
+                              <property name="label" translatable="yes">Next Keyframe</property>
+                            </accessibility>
+                            <signal name="clicked" handler="on_next_keyframe" swapped="true"/>
+                            <style>
+                              <class name="flat"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkDropDown" id="ease_dropdown">
+                            <property name="tooltip-text" translatable="yes">How the values move from the keyframes at the playhead to the next ones</property>
+                            <accessibility>
+                              <property name="label" translatable="yes">Easing</property>
+                            </accessibility>
+                            <property name="model">
+                              <object class="GtkStringList">
+                                <items>
+                                  <item translatable="yes">Linear</item>
+                                  <item translatable="yes">Ease In and Out</item>
+                                </items>
+                              </object>
+                            </property>
+                            <signal name="notify::selected" handler="on_ease_changed" swapped="true"/>
                           </object>
                         </child>
                       </object>

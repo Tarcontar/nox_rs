@@ -17,6 +17,8 @@ mod imp {
         #[template_child]
         pub picture: TemplateChild<gtk::Picture>,
         #[template_child]
+        pub transform_overlay: TemplateChild<crate::transform_overlay::TransformOverlay>,
+        #[template_child]
         pub timecode: TemplateChild<gtk::Label>,
         #[template_child]
         pub play_button: TemplateChild<gtk::Button>,
@@ -29,6 +31,7 @@ mod imp {
         type ParentType = gtk::Box;
 
         fn class_init(klass: &mut Self::Class) {
+            crate::transform_overlay::TransformOverlay::ensure_type();
             klass.bind_template();
         }
 
@@ -51,6 +54,11 @@ glib::wrapper! {
 impl Viewer {
     pub fn picture(&self) -> gtk::Picture {
         self.imp().picture.get()
+    }
+
+    /// The on-screen transform controls.
+    pub fn transform_overlay(&self) -> crate::transform_overlay::TransformOverlay {
+        self.imp().transform_overlay.get()
     }
 
     pub fn set_timecode(&self, text: &str) {

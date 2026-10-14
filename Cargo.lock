@@ -982,6 +982,7 @@ version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
  "libc",
+ "libloading",
  "nox-color",
  "nox-gpu",
  "nox-project",

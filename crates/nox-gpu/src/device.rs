@@ -47,6 +47,12 @@ pub struct GpuDevice {
     _owner: Box<dyn Any + Send + Sync>,
 }
 
+impl std::fmt::Debug for GpuDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuDevice").finish_non_exhaustive()
+    }
+}
+
 impl GpuDevice {
     /// Wraps an existing device.
     ///
@@ -98,6 +104,19 @@ impl GpuDevice {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The device's UUID, which other APIs (CUDA) use to find the same
+    /// GPU.
+    pub fn uuid(&self) -> [u8; 16] {
+        let mut id = vk::PhysicalDeviceIDProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+        // SAFETY: valid physical device (Vulkan 1.1 core query).
+        unsafe {
+            self.instance
+                .get_physical_device_properties2(self.physical_device, &mut properties)
+        };
+        id.device_uuid
     }
 
     pub fn has_extension(&self, name: &CStr) -> bool {

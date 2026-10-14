@@ -17,6 +17,29 @@ pub const DEFAULT_FRAME_RATE: Rational = Rational::new(25, 1);
 /// Length of still images added to the timeline.
 const STILL_SECONDS: i64 = 5;
 
+/// How a clip whose shape doesn't match the timeline is fitted
+/// (`framing.rs` asks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Framing {
+    /// As the project's image scaling says (by default all of it, with
+    /// black bars).
+    #[default]
+    Keep,
+    /// Zoomed so it covers the frame (cropping the overhang).
+    Fill,
+    /// The timeline takes the clip's size.
+    MatchTimeline,
+}
+
+/// The zoom that makes a picture of `size` cover a frame of `frame` size
+/// after being fitted into it.
+pub fn fill_zoom(size: (u32, u32), frame: (u32, u32)) -> f64 {
+    let (w, h) = (f64::from(size.0.max(1)), f64::from(size.1.max(1)));
+    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    let fit = (fw / w).min(fh / h);
+    (fw / (w * fit)).max(fh / (h * fit))
+}
+
 /// `hint` if it is a track of `kind`, else the first track of that kind,
 /// else a new one.
 fn pick_track(timeline: &mut Timeline, hint: Option<usize>, kind: TrackKind) -> usize {
@@ -129,14 +152,23 @@ impl Project {
 
     /// Adds `media` at sequence frame `frame`: its video on `track` (or the
     /// lowest video track) and its audio on `track` (or the first audio
-    /// track), linked. Stills get a fixed length.
+    /// track), linked. Stills get a fixed length. Overwrites what is there,
+    /// or with `insert`, pushes it (and sync-locked tracks) later. Returns
+    /// the clip's length in sequence frames.
     pub fn add_media(
         &self,
         media: &MediaInfo,
         track: Option<usize>,
         frame: i64,
-    ) -> Result<(), EditError> {
-        self.edit(&gettext("Add Clip"), |timeline| {
+        insert: bool,
+        framing: Framing,
+    ) -> Result<i64, EditError> {
+        let label = if insert {
+            gettext("Insert Clip")
+        } else {
+            gettext("Add Clip")
+        };
+        self.edit(&label, |timeline| {
             // The first clip sets up the sequence: its frame rate and size.
             if timeline.clips().next().is_none()
                 && let Some(video) = &media.video
@@ -155,6 +187,20 @@ impl Project {
                     timeline.frame_rate().as_f64(),
                     media.path.display()
                 );
+            }
+            let mut zoom = None;
+            if let Some(video) = &media.video {
+                let size = (video.width, video.height);
+                match framing {
+                    Framing::Keep => {}
+                    Framing::MatchTimeline => {
+                        (timeline.settings.width, timeline.settings.height) = size;
+                    }
+                    Framing::Fill => {
+                        let frame = (timeline.settings.width, timeline.settings.height);
+                        zoom = Some(fill_zoom(size, frame));
+                    }
+                }
             }
             let fps = timeline.frame_rate();
             let at = Time::from_frames(frame.max(0), fps);
@@ -183,20 +229,49 @@ impl Project {
             let has_audio = !media.audio.is_empty();
             let link = (has_video && has_audio).then(|| timeline.new_link_id());
 
-            let mut place = |kind: TrackKind| {
-                let index = pick_track(timeline, track, kind);
-                let mut clip = Clip::new(name.clone(), reference.clone(), source);
-                clip.item.set_link(link);
-                timeline.place(index, Composable::Clip(clip), at)
-            };
-            if has_video {
-                place(TrackKind::Video)?;
+            let mut clips = Vec::new();
+            for (kind, wanted) in [(TrackKind::Video, has_video), (TrackKind::Audio, has_audio)] {
+                if wanted {
+                    let video = kind == TrackKind::Video;
+                    let index = pick_track(timeline, track, kind);
+                    let mut clip = Clip::new(name.clone(), reference.clone(), source);
+                    clip.item.set_link(link);
+                    if let (Some(zoom), true) = (zoom, video) {
+                        clip.item.set_transform(nox_project::Transform {
+                            zoom,
+                            ..nox_project::Transform::IDENTITY
+                        });
+                    }
+                    clips.push((index, Composable::Clip(clip)));
+                }
             }
-            if has_audio {
-                place(TrackKind::Audio)?;
+            if insert {
+                timeline.insert_clips(clips, at)?;
+            } else {
+                for (index, clip) in clips {
+                    timeline.place(index, clip, at)?;
+                }
             }
-            Ok(())
+            Ok(length)
         })
+    }
+
+    /// Whether `media`'s picture is portrait where the timeline is
+    /// landscape or the other way round, so fitting it would leave it small
+    /// between bars. Only asked once the timeline has clips (the first one
+    /// sets its size) and while the image scaling fits pictures.
+    pub fn orientation_differs(&self, media: &MediaInfo) -> bool {
+        let timeline = self.timeline();
+        let Some(video) = &media.video else {
+            return false;
+        };
+        let settings = &timeline.settings;
+        let portrait = |w: u32, h: u32| h > w;
+        timeline.clips().next().is_some()
+            && settings.scaling == nox_project::ScalingMode::Fit
+            && video.width != video.height
+            && settings.width != settings.height
+            && portrait(video.width, video.height) != portrait(settings.width, settings.height)
     }
 
     pub fn undo(&self) {
@@ -255,7 +330,10 @@ impl Project {
     }
 
     pub fn open(&self, path: &Path) -> Result<(), nox_otio::Error> {
-        let timeline = nox_otio::read_file(path)?;
+        let mut timeline = nox_otio::read_file(path)?;
+        timeline.media_dir = std::path::absolute(path)
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_owned));
         tracing::info!(
             "opened {} ({} clips, {} fps)",
             path.display(),
@@ -269,11 +347,40 @@ impl Project {
     }
 
     pub fn save_as(&self, path: &Path) -> Result<(), nox_otio::Error> {
-        nox_otio::write_file(path, self.document.borrow().timeline())?;
+        let document = self.document.borrow();
+        let timeline = document.timeline();
+        // Relative media paths only stay valid next to the original file.
+        let dir = std::path::absolute(path)
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_owned));
+        if timeline.media_dir.is_some() && timeline.media_dir != dir {
+            let mut copy = timeline.clone();
+            copy.make_media_paths_absolute();
+            nox_otio::write_file(path, &copy)?;
+        } else {
+            nox_otio::write_file(path, timeline)?;
+        }
+        drop(document);
         self.document.borrow_mut().mark_saved();
         self.path.replace(Some(path.to_owned()));
         tracing::info!("saved {}", path.display());
         self.notify();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fill_zoom;
+
+    #[test]
+    fn fill_zoom_covers_the_frame() {
+        // Landscape UHD in a portrait UHD frame: fitted to 2160 × 1215, so
+        // 316% to fill the height.
+        let zoom = fill_zoom((3840, 2160), (2160, 3840));
+        assert!((zoom - 3840.0 / 1215.0).abs() < 1e-3, "{zoom}");
+        // The same shape needs no zoom; a 4:3 picture in 16:9 fills by width.
+        assert_eq!(fill_zoom((1920, 1080), (3840, 2160)), 1.0);
+        assert!((fill_zoom((1440, 1080), (1920, 1080)) - 4.0 / 3.0).abs() < 1e-9);
     }
 }

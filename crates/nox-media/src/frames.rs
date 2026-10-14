@@ -144,6 +144,22 @@ pub fn with_cpu_frame<R>(frame: &frame::Video, f: impl FnOnce(&CpuFrame<'_>) -> 
     Ok(f(&cpu))
 }
 
+/// A small frame of one color (display R'G'B', BT.709, full range), for
+/// solid layers such as a dip to white. The compositor scales it to any
+/// size.
+pub fn solid_frame(rgb: [u8; 3]) -> frame::Video {
+    let mut frame = frame::Video::new(format::Pixel::RGBA, 2, 2);
+    let stride = frame.stride(0);
+    let data = frame.data_mut(0);
+    for row in 0..2 {
+        for column in 0..2 {
+            let i = row * stride + column * 4;
+            data[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
+    }
+    frame
+}
+
 /// Converts to 8-bit RGBA at `width` × `height` on the CPU.
 pub fn rgba_cpu(frame: &frame::Video, width: u32, height: u32) -> Result<Image> {
     let software;

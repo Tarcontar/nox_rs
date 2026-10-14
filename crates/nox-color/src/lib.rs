@@ -16,7 +16,7 @@ pub use grade::{Grade, GradeCoefficients, Wheel};
 pub use hdr::ToneMapping;
 pub use primaries::Primaries;
 pub use transfer::Transfer;
-pub use working::{InputTransform, OutputTransform, WORKING_PRIMARIES};
+pub use working::{InputTransform, OutputEncoding, OutputTransform, WORKING_PRIMARIES};
 pub use ycbcr::{Coefficients, Matrix3x4, Quantization};
 
 /// A 3×3 matrix, row-major, applied to column vectors.

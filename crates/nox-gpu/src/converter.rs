@@ -40,7 +40,7 @@ pub enum PlaneFormat {
 }
 
 impl PlaneFormat {
-    fn vk(self) -> vk::Format {
+    pub(crate) fn vk(self) -> vk::Format {
         match self {
             Self::R8 => vk::Format::R8_UNORM,
             Self::R16 => vk::Format::R16_UNORM,
@@ -224,6 +224,7 @@ struct PushConstants {
     source_peak: f32,
     transfer: i32,
     primaries: i32,
+    keep_hdr: i32,
 }
 
 pub(crate) struct GpuImage {
@@ -248,6 +249,8 @@ struct Inputs {
 pub(crate) struct Readback {
     pub width: u32,
     pub height: u32,
+    /// 4 (RGBA8) or 8 (RGBA16).
+    pub bytes_per_pixel: usize,
     pub image: GpuImage,
     pub buffer: GpuBuffer,
 }
@@ -255,7 +258,7 @@ pub(crate) struct Readback {
 impl Readback {
     /// The image data after `record_readback` completed.
     pub fn read(&self) -> Image {
-        let stride = self.width as usize * 4;
+        let stride = self.width as usize * self.bytes_per_pixel;
         let data = self
             .buffer
             .allocation
@@ -299,6 +302,8 @@ pub struct Converter {
     inputs: Option<Inputs>,
     readback: Option<Readback>,
     export: Option<ExportPool>,
+    /// HDR sources keep their light in the working space (for HDR outputs).
+    keep_hdr: bool,
 }
 
 impl Converter {
@@ -416,6 +421,7 @@ impl Converter {
                 inputs: None,
                 readback: None,
                 export: None,
+                keep_hdr: false,
             })
         }
     }
@@ -455,7 +461,7 @@ impl Converter {
             .is_none_or(|r| (r.width, r.height) != (width, height))
         {
             self.destroy_readback();
-            self.readback = Some(self.create_readback(width, height)?);
+            self.readback = Some(self.create_readback(width, height, false)?);
         }
         let readback = self.readback.take().expect("readback");
         let result = self.run(&mut input, width, height, Target::Readback(&readback));
@@ -757,6 +763,7 @@ impl Converter {
                 source_peak: params.color.tone.source_peak,
                 transfer: params.color.transfer as i32,
                 primaries: params.color.primaries as i32,
+                keep_hdr: self.keep_hdr.into(),
             };
             device.cmd_push_constants(
                 cmd,
@@ -867,18 +874,31 @@ impl Converter {
         })
     }
 
-    pub(crate) fn create_readback(&self, width: u32, height: u32) -> Result<Readback> {
+    /// Whether HDR sources keep their light when converted into the
+    /// working space (for HDR outputs) or are tone-mapped to SDR.
+    pub fn set_keep_hdr(&mut self, keep: bool) {
+        self.keep_hdr = keep;
+    }
+
+    /// A readback of RGBA8, or with `deep` of RGBA16 (little endian).
+    pub(crate) fn create_readback(&self, width: u32, height: u32, deep: bool) -> Result<Readback> {
+        let (format, bytes) = if deep {
+            (vk::Format::R16G16B16A16_UNORM, 8)
+        } else {
+            (vk::Format::R8G8B8A8_UNORM, 4)
+        };
         Ok(Readback {
             width,
             height,
+            bytes_per_pixel: bytes,
             image: self.create_image(
-                vk::Format::R8G8B8A8_UNORM,
+                format,
                 width,
                 height,
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
             )?,
             buffer: self.create_buffer(
-                width as u64 * height as u64 * 4,
+                width as u64 * height as u64 * bytes as u64,
                 vk::BufferUsageFlags::TRANSFER_DST,
                 MemoryLocation::GpuToCpu,
             )?,

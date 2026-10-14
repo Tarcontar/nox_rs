@@ -40,6 +40,15 @@ pub enum Gamut {
 }
 
 impl Gamut {
+    /// The primaries these stand for.
+    pub fn primaries(self) -> crate::Primaries {
+        match self {
+            Self::Bt709 => crate::Primaries::Bt709,
+            Self::Bt2020 => crate::Primaries::Bt2020,
+            Self::DisplayP3 => crate::Primaries::DisplayP3,
+        }
+    }
+
     /// Linear RGB in these primaries to linear BT.709 RGB (same white).
     pub fn to_bt709(self) -> [[f32; 3]; 3] {
         match self {
@@ -109,6 +118,16 @@ impl ToneMapping {
         self.apply_linear(rgb).map(|v| v.powf(1.0 / 2.4))
     }
 
+    /// Display light in nits, in the source's primaries, without tone
+    /// mapping: what an HDR output keeps. HDR frames only.
+    pub fn light(&self, rgb: [f32; 3]) -> [f32; 3] {
+        match self.transfer {
+            HdrTransfer::None => panic!("light on an SDR frame"),
+            HdrTransfer::Pq => rgb.map(|v| pq_eotf(v) * 10_000.0),
+            HdrTransfer::Hlg => hlg_display_light(rgb, self.gamut),
+        }
+    }
+
     /// Like `apply`, but returns linear BT.709 light relative to SDR white
     /// (0–1), before the BT.1886 encoding. HDR frames only.
     pub fn apply_linear(&self, rgb: [f32; 3]) -> [f32; 3] {
@@ -169,6 +188,34 @@ fn hlg_display_light(rgb: [f32; 3], gamut: Gamut) -> [f32; 3] {
     let y = weights[0] * scene[0] + weights[1] * scene[1] + weights[2] * scene[2];
     let gain = DEFAULT_PEAK_NITS * y.max(1e-6).powf(0.2);
     scene.map(|v| v * gain)
+}
+
+/// HLG OETF (BT.2100): scene light (0–1) to signal.
+pub fn hlg_oetf(scene: f32) -> f32 {
+    const A: f32 = 0.178_832_77;
+    const B: f32 = 0.284_668_92;
+    const C: f32 = 0.559_910_7;
+    let e = scene.max(0.0);
+    if e <= 1.0 / 12.0 {
+        (3.0 * e).sqrt()
+    } else {
+        A * (12.0 * e - B).ln() + C
+    }
+}
+
+/// BT.2020 display light in nits to an HLG signal for the nominal
+/// 1000-nit display: the inverse of the BT.2100 OOTF (system gamma 1.2),
+/// then the OETF. Light above the display's peak is clipped.
+pub fn hlg_encode(light: [f32; 3]) -> [f32; 3] {
+    let display = light.map(|v| (v / DEFAULT_PEAK_NITS).clamp(0.0, 1.0));
+    let y = 0.2627 * display[0] + 0.6780 * display[1] + 0.0593 * display[2];
+    // Fd = Ys^(γ-1) · E with Yd = Ys^γ, so E = Fd · Yd^((1-γ)/γ).
+    let gain = if y > 0.0 {
+        y.powf((1.0 - 1.2) / 1.2)
+    } else {
+        0.0
+    };
+    display.map(|v| hlg_oetf((v * gain).min(1.0)))
 }
 
 /// BT.2390 EETF: maps `nits` from content with peak `source_peak` onto a

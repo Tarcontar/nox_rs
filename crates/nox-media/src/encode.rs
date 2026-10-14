@@ -1,25 +1,29 @@
 //! Writing media files: encodes rendered RGBA frames and mixed audio, and
 //! muxes them into a container chosen by the file extension.
 //!
-//! Video is tagged BT.709 (Nox renders display-referred BT.709 R'G'B'; HDR
-//! sources are tone-mapped to SDR). Encoders are tried in order:
+//! Video is SDR, tagged BT.709, or HDR (`OutputEncoding::Pq`, `Hlg`): 10-bit
+//! BT.2020 with PQ or HLG, for HEVC (Main 10) and ProRes, with the mastering
+//! display in the file for PQ (HDR10). Encoders are tried in order:
 //!
 //! 1. Vulkan Video (`h264_vulkan`, `hevc_vulkan`) on the device Nox renders
-//!    with: the compositor writes Y'CbCr straight into the encoder's input
-//!    images (`write_vulkan`), no copies.
-//! 2. NVENC, fed from system memory.
+//!    with. Not for HDR by default (see `open_video`).
+//! 2. NVENC, fed from GPU memory through CUDA (from system memory without
+//!    a CUDA driver, or with `NOX_NVENC_MEMORY=1`).
 //! 3. Software (x264, x265; ProRes is always software).
 //!
-//! Frames in system memory (`write_video`) are converted with swscale.
+//! Hardware encoders that take frames on the GPU (`hwenc`) are written by
+//! the compositor directly (`write_gpu`), no copies; frames in system
+//! memory (`write_video`) are converted with swscale.
 
 use ffmpeg::{ChannelLayout, Dictionary, codec, encoder, ffi, format, frame, software};
 use nox_project::Rational;
 use std::path::{Path, PathBuf};
 
-use crate::vulkan_frame::FrameLock;
+use crate::hwenc::{self, GpuFrames};
 use crate::{CHANNELS, Error, HwDevice, Image, Result};
-use nox_color::ycbcr::{self, Coefficients, Quantization};
-use nox_gpu::{ImageSync, PlaneFormat, VkPlane, YuvTarget, vk};
+use nox_color::OutputEncoding;
+use nox_gpu::{FrameLight, GpuDevice, GpuTarget};
+use std::sync::Arc;
 
 /// Video codecs Nox can export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,11 +87,20 @@ pub struct OutputSettings {
     pub quality: Quality,
     /// Try hardware encoders first.
     pub hardware: bool,
-    /// The device frames are rendered on; enables Vulkan Video encoding
-    /// without copies.
+    /// Use this FFmpeg encoder of `codec` (e.g. `hevc_nvenc`) rather than
+    /// the first that works.
+    pub encoder: Option<String>,
+    /// The device frames are rendered on, as FFmpeg's and as Nox's
+    /// (the same device); enables hardware encoding without copies.
     pub device: Option<HwDevice>,
+    pub gpu: Option<Arc<GpuDevice>>,
     /// Stereo audio at this rate (AAC, or PCM in MOV), or no audio track.
     pub audio_rate: Option<u32>,
+    /// SDR, or HDR (PQ or HLG; HEVC and ProRes only). Frames from memory
+    /// are then RGBA16 in this encoding.
+    pub encoding: OutputEncoding,
+    /// Peak of the mastering display in nits, written for PQ (HDR10).
+    pub peak_nits: f32,
 }
 
 struct VideoOutput {
@@ -108,21 +121,8 @@ enum VideoInput {
         rgba: frame::Video,
         yuv: frame::Video,
     },
-    /// NV12 Vulkan images from the encoder's frames pool, written by the
-    /// compositor.
-    Vulkan {
-        frames: *mut ffi::AVBufferRef,
-        matrix: nox_color::Matrix3x4,
-    },
-}
-
-impl Drop for VideoInput {
-    fn drop(&mut self) {
-        if let Self::Vulkan { frames, .. } = self {
-            // SAFETY: we own one reference.
-            unsafe { ffi::av_buffer_unref(frames) };
-        }
-    }
+    /// Hardware frames on the GPU, written by the compositor.
+    Gpu(Box<dyn GpuFrames>),
 }
 
 struct AudioOutput {
@@ -145,6 +145,82 @@ pub struct MediaWriter {
     audio: Option<AudioOutput>,
     frames: i64,
     path: PathBuf,
+    encoding: OutputEncoding,
+    /// For HDR10: the light levels of the frames written so far.
+    light: Option<LightLevels>,
+}
+
+/// MaxCLL and MaxFALL (CTA-861.3) of HDR10 frames, measured as they are
+/// written: the brightest pixel, and the brightest frame average, of the
+/// largest of R, G and B in nits.
+#[derive(Debug, Clone, Default)]
+pub struct LightLevels {
+    pub max_cll: f32,
+    pub max_fall: f32,
+    /// Frames measured.
+    frames: i64,
+    /// Nits of every 16-bit PQ code.
+    table: Vec<f32>,
+}
+
+impl LightLevels {
+    fn new() -> Self {
+        let table = (0..=u16::MAX)
+            .map(|code| nox_color::hdr::pq_eotf(f32::from(code) / 65535.0) * 10_000.0)
+            .collect();
+        Self {
+            table,
+            ..Self::default()
+        }
+    }
+
+    /// Adds a frame measured on the GPU.
+    fn add_measured(&mut self, light: FrameLight) {
+        self.max_cll = self.max_cll.max(light.peak);
+        self.max_fall = self.max_fall.max(light.average);
+        self.frames += 1;
+    }
+
+    /// Measures one RGBA16 (little-endian) frame of PQ R'G'B'.
+    fn add(&mut self, image: &Image) {
+        let rows: Vec<&[u8]> = image
+            .data
+            .chunks(image.stride)
+            .take(image.height as usize)
+            .collect();
+        let table = &self.table;
+        // Rows in parallel: a UHD frame is 8 million pixels.
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let per = rows.len().div_ceil(threads).max(1);
+        let (peak, sum) = std::thread::scope(|scope| {
+            let jobs: Vec<_> = rows
+                .chunks(per)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        let (mut peak, mut sum) = (0f32, 0f64);
+                        for row in chunk {
+                            for pixel in row[..image.width as usize * 8].as_chunks::<8>().0 {
+                                let code = |i: usize| u16::from_le_bytes([pixel[i], pixel[i + 1]]);
+                                let brightest = code(0).max(code(2)).max(code(4));
+                                let nits = table[usize::from(brightest)];
+                                peak = peak.max(nits);
+                                sum += f64::from(nits);
+                            }
+                        }
+                        (peak, sum)
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|job| job.join().expect("light meter"))
+                .fold((0f32, 0f64), |(p, s), (q, t)| (p.max(q), s + t))
+        });
+        let pixels = f64::from(image.width) * f64::from(image.height);
+        self.add_measured(FrameLight {
+            peak,
+            average: (sum / pixels.max(1.0)) as f32,
+        });
+    }
 }
 
 impl MediaWriter {
@@ -155,6 +231,11 @@ impl MediaWriter {
                 "{}×{}: width and height must be even",
                 settings.width, settings.height
             )));
+        }
+        if settings.encoding.is_hdr() && settings.codec == VideoCodec::H264 {
+            return Err(Error::Encode(
+                "HDR needs HEVC or ProRes (H.264 exports are SDR)".into(),
+            ));
         }
         let mut output = format::output(&settings.path)?;
         let global_header = output
@@ -176,12 +257,16 @@ impl MediaWriter {
         options.set("movflags", "+faststart");
         output.write_header_with(options)?;
         tracing::info!(
-            "writing {} ({}×{}, {} with {}{})",
+            "writing {} ({}×{}, {} with {}, frames from {}{})",
             settings.path.display(),
             settings.width,
             settings.height,
             settings.codec.name(),
             video.name,
+            match &video.input {
+                VideoInput::Gpu(frames) => frames.api(),
+                VideoInput::Memory { .. } => "memory",
+            },
             if audio.is_some() { ", AAC audio" } else { "" }
         );
         Ok(Self {
@@ -190,6 +275,8 @@ impl MediaWriter {
             audio,
             frames: 0,
             path: settings.path.clone(),
+            encoding: settings.encoding,
+            light: (settings.encoding == OutputEncoding::Pq).then(LightLevels::new),
         })
     }
 
@@ -198,18 +285,18 @@ impl MediaWriter {
         self.video.name
     }
 
-    /// Whether frames go in as Vulkan images (`write_vulkan`) rather than
-    /// from memory (`write_video`).
-    pub fn takes_vulkan_frames(&self) -> bool {
-        matches!(self.video.input, VideoInput::Vulkan { .. })
+    /// Whether frames go in on the GPU (`write_gpu`) rather than from
+    /// memory (`write_video`).
+    pub fn takes_gpu_frames(&self) -> bool {
+        matches!(self.video.input, VideoInput::Gpu(_))
     }
 
-    /// Appends one frame (RGBA8 at the output size). Not for Vulkan
-    /// encoders.
+    /// Appends one frame (RGBA8 at the output size, RGBA16 for HDR). Not
+    /// for encoders that take frames on the GPU.
     pub fn write_video(&mut self, image: &Image) -> Result<()> {
         let video = &mut self.video;
         let VideoInput::Memory { scaler, rgba, yuv } = &mut video.input else {
-            return Err(Error::Encode(format!("{} takes Vulkan frames", video.name)));
+            return Err(Error::Encode(format!("{} takes GPU frames", video.name)));
         };
         if (image.width, image.height) != (video.width, video.height) {
             return Err(Error::Encode(format!(
@@ -218,37 +305,48 @@ impl MediaWriter {
             )));
         }
         let stride = rgba.stride(0);
-        let row = image.width as usize * 4;
+        let bytes = if self.encoding.is_hdr() { 8 } else { 4 };
+        let row = image.width as usize * bytes;
+        if image.stride < row {
+            return Err(Error::Encode("frame has the wrong pixel size".into()));
+        }
         let data = rgba.data_mut(0);
         for y in 0..image.height as usize {
             data[y * stride..][..row].copy_from_slice(&image.data[y * image.stride..][..row]);
         }
         scaler.run(rgba, yuv)?;
         let mut frame = yuv.clone();
+        if let Some(light) = &mut self.light {
+            light.add(image);
+        }
         self.send_video(&mut frame)
     }
 
-    /// Appends one frame rendered by `render` into an encoder input image
-    /// (for Vulkan encoders; see `takes_vulkan_frames`), without copies.
-    pub fn write_vulkan(
+    /// Appends one frame that `render` writes into the encoder's next
+    /// input frame on the GPU (see `takes_gpu_frames`), without copies.
+    /// `render` gets whether to measure the frame's light (for HDR10
+    /// metadata) and returns the measurement if it took one.
+    pub fn write_gpu(
         &mut self,
-        render: impl FnOnce(&mut YuvTarget) -> nox_gpu::Result<()>,
+        render: impl FnOnce(GpuTarget<'_>, bool) -> nox_gpu::Result<Option<FrameLight>>,
     ) -> Result<()> {
-        let VideoInput::Vulkan { frames, matrix } = &self.video.input else {
+        let VideoInput::Gpu(frames) = &mut self.video.input else {
             return Err(Error::Encode(format!(
                 "{} takes frames from memory",
                 self.video.name
             )));
         };
-        let (frames, matrix) = (*frames, *matrix);
-        let mut frame = frame::Video::empty();
-        // SAFETY: valid frames context; the frame takes a pool image.
-        let ret = unsafe { ffi::av_hwframe_get_buffer(frames, frame.as_mut_ptr(), 0) };
-        if ret < 0 {
-            return Err(ffmpeg::Error::from(ret).into());
+        let measure = self.light.is_some();
+        let mut render = Some(render);
+        let mut light = None;
+        let mut frame = frames.next(&mut |target| {
+            let render = render.take().expect("one frame rendered once");
+            light = render(target, measure)?;
+            Ok(())
+        })?;
+        if let (Some(levels), Some(frame_light)) = (&mut self.light, light) {
+            levels.add_measured(frame_light);
         }
-        // SAFETY: `frame` is a Vulkan frame of `frames`, alive for the call.
-        unsafe { render_into(frames, &frame, matrix, render)? };
         self.send_video(&mut frame)
     }
 
@@ -258,7 +356,7 @@ impl MediaWriter {
         // duration and average rate count the last frame too.
         // SAFETY: plain field write on a valid frame.
         unsafe { (*frame.as_mut_ptr()).duration = 1 };
-        set_color_tags(frame);
+        set_color_tags(frame, self.encoding);
         self.video.encoder.send_frame(frame)?;
         self.frames += 1;
         self.drain_video()
@@ -291,6 +389,26 @@ impl MediaWriter {
         self.drain_audio()?;
         self.video.encoder.send_eof()?;
         self.drain_video()?;
+        // MP4 and MOV write their header (`moov`, with `clli`) last, so the
+        // measured light levels still get in. Light levels are only written
+        // when every frame was measured (Vulkan images aren't).
+        let frames = self.frames;
+        if let Some(light) = self
+            .light
+            .as_ref()
+            .filter(|light| frames > 0 && light.frames == frames)
+        {
+            // SAFETY: the stream's own parameters, before the trailer.
+            unsafe {
+                let stream = self.output.stream(self.video.stream).expect("stream");
+                add_content_light((*stream.as_ptr()).codecpar, light.max_cll, light.max_fall);
+            }
+            tracing::info!(
+                "HDR10 light levels: MaxCLL {:.0}, MaxFALL {:.0} nits",
+                light.max_cll,
+                light.max_fall
+            );
+        }
         self.output.write_trailer()?;
         tracing::info!("wrote {} ({} frames)", self.path.display(), self.frames);
         Ok(self.path)
@@ -338,17 +456,34 @@ fn open_video(
     global_header: bool,
 ) -> Result<VideoOutput> {
     let mut failures = Vec::new();
-    for &name in settings.codec.encoders(settings.hardware) {
-        let Some(codec) = encoder::find_by_name(name) else {
-            failures.push(format!("{name}: not available"));
-            continue;
+    let mut names = settings.codec.encoders(settings.hardware);
+    if let Some(wanted) = &settings.encoder {
+        let all = settings.codec.encoders(true);
+        let Some(i) = all.iter().position(|name| name == wanted) else {
+            return Err(Error::Encode(format!(
+                "{wanted} isn't an encoder for {}",
+                settings.codec.name()
+            )));
         };
-        if name.ends_with("_vulkan") && settings.device.is_none() {
-            failures.push(format!("{name}: no shared Vulkan device"));
-            continue;
-        }
-        match open_video_encoder(codec, name, settings, global_header) {
-            Ok((encoder, pixel_format, vulkan_frames)) => {
+        names = &all[i..=i];
+    }
+    for &name in names {
+        let codec = match find_encoder(name, settings) {
+            Ok(codec) => codec,
+            Err(err) => {
+                failures.push(format!("{name}: {err}"));
+                continue;
+            }
+        };
+        let gpu_frames = match hwenc::open(name, settings) {
+            Ok(frames) => frames,
+            Err(err) => {
+                failures.push(format!("{name}: {err}"));
+                continue;
+            }
+        };
+        match open_video_encoder(codec, name, settings, global_header, gpu_frames.as_deref()) {
+            Ok((encoder, pixel_format)) => {
                 let time_base = ffmpeg::Rational::new(
                     settings.frame_rate.den as i32,
                     settings.frame_rate.num as i32,
@@ -356,6 +491,14 @@ fn open_video(
                 let mut stream = output.add_stream(codec)?;
                 stream.set_parameters(&encoder);
                 stream.set_time_base(time_base);
+                if settings.encoding == OutputEncoding::Pq {
+                    // SAFETY: the stream's own parameters; FFmpeg owns the
+                    // side data it allocates.
+                    unsafe {
+                        let par = (*stream.as_mut_ptr()).codecpar;
+                        add_hdr10_stream_data(par, settings.peak_nits);
+                    }
+                }
                 let rate = ffmpeg::Rational::new(
                     settings.frame_rate.num as i32,
                     settings.frame_rate.den as i32,
@@ -367,25 +510,25 @@ fn open_video(
                 if !failures.is_empty() {
                     tracing::info!("video encoder {name} ({})", failures.join("; "));
                 }
-                if let Some(frames) = vulkan_frames {
+                let hdr = settings.encoding.is_hdr();
+                if let Some(frames) = gpu_frames {
                     return Ok(VideoOutput {
                         encoder,
                         stream: index,
                         time_base,
-                        input: VideoInput::Vulkan {
-                            frames,
-                            matrix: ycbcr::rgb_to_ycbcr(
-                                Coefficients::BT709,
-                                Quantization::eight_bit(false),
-                            ),
-                        },
+                        input: VideoInput::Gpu(frames),
                         width: w,
                         height: h,
                         name,
                     });
                 }
+                let source = if hdr {
+                    format::Pixel::RGBA64LE
+                } else {
+                    format::Pixel::RGBA
+                };
                 let mut scaler = software::scaling::Context::get(
-                    format::Pixel::RGBA,
+                    source,
                     w,
                     h,
                     pixel_format,
@@ -395,15 +538,21 @@ fn open_video(
                         | software::scaling::Flags::FULL_CHR_H_INT
                         | software::scaling::Flags::ACCURATE_RND,
                 )?;
-                // Full-range R'G'B' in, limited-range BT.709 Y'CbCr out.
+                // Full-range R'G'B' in, limited-range Y'CbCr out (BT.709,
+                // or BT.2020 for HDR).
                 // SAFETY: valid context; coefficient tables are static.
                 unsafe {
-                    let bt709 = ffi::sws_getCoefficients(ffi::SWS_CS_ITU709);
+                    let space = if hdr {
+                        ffi::SWS_CS_BT2020
+                    } else {
+                        ffi::SWS_CS_ITU709
+                    };
+                    let coefficients = ffi::sws_getCoefficients(space);
                     ffi::sws_setColorspaceDetails(
                         scaler.as_mut_ptr(),
-                        bt709,
+                        coefficients,
                         1,
-                        bt709,
+                        coefficients,
                         0,
                         0,
                         1 << 16,
@@ -416,7 +565,7 @@ fn open_video(
                     time_base,
                     input: VideoInput::Memory {
                         scaler,
-                        rgba: frame::Video::new(format::Pixel::RGBA, w, h),
+                        rgba: frame::Video::new(source, w, h),
                         yuv: frame::Video::new(pixel_format, w, h),
                     },
                     width: w,
@@ -434,18 +583,99 @@ fn open_video(
     )))
 }
 
-/// Opens encoder `name`; for Vulkan encoders also returns the frames pool
-/// (NV12 images the compositor can write) it takes input from.
+/// FFmpeg's encoder `name`, if Nox may use it for `settings`.
+fn find_encoder(name: &str, settings: &OutputSettings) -> Result<ffmpeg::Codec> {
+    let codec = encoder::find_by_name(name).ok_or_else(|| Error::Encode("not available".into()))?;
+    // 10-bit P010 input to Vulkan Video encoders came out wrong on NVIDIA
+    // 580 (chroma near zero, luma striped), although the writes follow the
+    // spec (16-bit views of the planes); writing through an invalid 8-bit
+    // view "fixes" it, so the driver and the spec disagree about the
+    // planes. HDR goes to NVENC (through CUDA) instead, unless
+    // NOX_HDR_VULKAN_ENCODE=1 tries Vulkan Video.
+    if name.ends_with("_vulkan")
+        && settings.encoding.is_hdr()
+        && std::env::var_os("NOX_HDR_VULKAN_ENCODE").is_none()
+    {
+        return Err(Error::Encode("not used for HDR".into()));
+    }
+    Ok(codec)
+}
+
+/// An encoder that works on this system, from `probe_encoders`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderProbe {
+    /// FFmpeg's name, e.g. `hevc_nvenc` (for `OutputSettings::encoder`).
+    pub name: &'static str,
+    /// Runs on the GPU's video engine rather than the CPU.
+    pub hardware: bool,
+    /// The API it takes frames on the GPU through (`Vulkan`, `CUDA`), or
+    /// `None` for frames from memory.
+    pub gpu_frames: Option<&'static str>,
+}
+
+/// The encoders of `codec` that open for `encoding` on this system, best
+/// first: each is actually opened (at 1920×1080), as an encoder can be
+/// built into FFmpeg without the hardware or driver it needs. Takes a
+/// moment, mostly for hardware encoders.
+pub fn probe_encoders(
+    codec: VideoCodec,
+    encoding: OutputEncoding,
+    device: Option<HwDevice>,
+    gpu: Option<Arc<GpuDevice>>,
+) -> Vec<EncoderProbe> {
+    crate::init();
+    if encoding.is_hdr() && codec == VideoCodec::H264 {
+        return Vec::new();
+    }
+    let settings = OutputSettings {
+        path: PathBuf::new(),
+        width: 1920,
+        height: 1080,
+        frame_rate: Rational::new(30, 1),
+        codec,
+        quality: Quality::High,
+        hardware: true,
+        encoder: None,
+        device,
+        gpu,
+        audio_rate: None,
+        encoding,
+        peak_nits: 1000.0,
+    };
+    codec
+        .encoders(true)
+        .iter()
+        .filter_map(|&name| {
+            let found = find_encoder(name, &settings).ok()?;
+            let frames = hwenc::open(name, &settings).ok()?;
+            if let Err(err) = open_video_encoder(found, name, &settings, false, frames.as_deref()) {
+                tracing::debug!("{name} doesn't open: {err}");
+                return None;
+            }
+            Some(EncoderProbe {
+                name,
+                hardware: !matches!(name, "libx264" | "libx265" | "prores_ks"),
+                gpu_frames: frames.map(|f| f.api()),
+            })
+        })
+        .collect()
+}
+
+/// Opens encoder `name`, taking frames from `gpu_frames` if given, and
+/// returns it with its input pixel format.
 fn open_video_encoder(
     codec: ffmpeg::Codec,
     name: &str,
     settings: &OutputSettings,
     global_header: bool,
-) -> Result<(encoder::Video, format::Pixel, Option<*mut ffi::AVBufferRef>)> {
-    let vulkan = name.ends_with("_vulkan");
+    gpu_frames: Option<&dyn GpuFrames>,
+) -> Result<(encoder::Video, format::Pixel)> {
+    let hdr = settings.encoding.is_hdr();
     let pixel_format = match name {
+        _ if let Some(frames) = gpu_frames => frames.pixel_format(),
         "prores_ks" => format::Pixel::YUV422P10LE,
-        _ if vulkan => format::Pixel::VULKAN,
+        "hevc_nvenc" if hdr => format::Pixel::P010LE,
+        _ if hdr => format::Pixel::YUV420P10LE,
         _ => format::Pixel::YUV420P,
     };
     let mut video = codec::context::Context::new_with_codec(codec)
@@ -465,25 +695,26 @@ fn open_video_encoder(
     // SAFETY: plain field writes on an unopened context.
     unsafe {
         let ctx = video.as_mut_ptr();
+        let (primaries, transfer, space) = ffi_color(settings.encoding);
         (*ctx).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
-        (*ctx).colorspace = ffi::AVColorSpace::AVCOL_SPC_BT709;
-        (*ctx).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT709;
-        (*ctx).color_trc = ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
-    }
-    let frames = if vulkan {
-        let device = settings.device.as_ref().expect("checked by the caller");
-        // SAFETY: valid device; the frames context is set up before init and
-        // its reference handed to the encoder context (which keeps its own).
-        unsafe {
-            let frames = vulkan_frames(device, settings.width, settings.height)?;
-            let ctx = video.as_mut_ptr();
-            (*ctx).hw_frames_ctx = ffi::av_buffer_ref(frames);
-            (*ctx).hw_device_ctx = ffi::av_buffer_ref(device.as_ptr());
-            Some(frames)
+        (*ctx).colorspace = space;
+        (*ctx).color_primaries = primaries;
+        (*ctx).color_trc = transfer;
+        // HDR10: encoders that write SEI (x265, NVENC) take the mastering
+        // display from here.
+        if settings.encoding == OutputEncoding::Pq {
+            add_hdr10_encoder_data(ctx, settings.peak_nits);
         }
-    } else {
-        None
-    };
+    }
+    if let Some(frames) = gpu_frames {
+        // SAFETY: valid contexts; the encoder context gets references of its
+        // own.
+        unsafe {
+            let ctx = video.as_mut_ptr();
+            (*ctx).hw_frames_ctx = ffi::av_buffer_ref(frames.frames_context());
+            (*ctx).hw_device_ctx = ffi::av_buffer_ref(frames.device_context());
+        }
+    }
     let mut options = Dictionary::new();
     let level = |high, medium, low| match settings.quality {
         Quality::High => high,
@@ -503,6 +734,9 @@ fn open_video_encoder(
             options.set("cq", level("19", "24", "29"));
             options.set("preset", "p5");
             options.set("b:v", "0");
+            if hdr {
+                options.set("profile", "main10");
+            }
         }
         "prores_ks" => {
             options.set("profile", level("3", "2", "1"));
@@ -513,119 +747,7 @@ fn open_video_encoder(
         }
         _ => {}
     }
-    match video.open_as_with(codec, options) {
-        Ok(opened) => Ok((opened, pixel_format, frames)),
-        Err(err) => {
-            if let Some(mut frames) = frames {
-                // SAFETY: our reference; the failed context drops its own.
-                unsafe { ffi::av_buffer_unref(&mut frames) };
-            }
-            Err(err.into())
-        }
-    }
-}
-
-/// An NV12 frames pool on `device` whose images the compositor can write
-/// (storage views of the planes) and a Vulkan encoder can read.
-///
-/// # Safety
-/// `device` must be a valid Vulkan device context.
-unsafe fn vulkan_frames(
-    device: &HwDevice,
-    width: u32,
-    height: u32,
-) -> Result<*mut ffi::AVBufferRef> {
-    // SAFETY: guaranteed by the caller; fields are set before init.
-    unsafe {
-        let mut frames = ffi::av_hwframe_ctx_alloc(device.as_ptr());
-        if frames.is_null() {
-            return Err(Error::Encode("cannot allocate Vulkan frames".into()));
-        }
-        let ctx = (*frames).data.cast::<ffi::AVHWFramesContext>();
-        (*ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_VULKAN;
-        (*ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
-        (*ctx).width = width as i32;
-        (*ctx).height = height as i32;
-        let vk_ctx = (*ctx).hwctx.cast::<ffi::AVVulkanFramesContext>();
-        // FFmpeg's defaults plus storage, for the compositor's plane views
-        // (with extended usage, as NV12 itself isn't a storage format).
-        (*vk_ctx).usage = (vk::ImageUsageFlags::TRANSFER_SRC
-            | vk::ImageUsageFlags::TRANSFER_DST
-            | vk::ImageUsageFlags::SAMPLED
-            | vk::ImageUsageFlags::STORAGE
-            | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR)
-            .as_raw() as _;
-        (*vk_ctx).img_flags = (vk::ImageCreateFlags::MUTABLE_FORMAT
-            | vk::ImageCreateFlags::EXTENDED_USAGE
-            | vk::ImageCreateFlags::VIDEO_PROFILE_INDEPENDENT_KHR)
-            .as_raw() as _;
-        let ret = ffi::av_hwframe_ctx_init(frames);
-        if ret < 0 {
-            ffi::av_buffer_unref(&mut frames);
-            return Err(ffmpeg::Error::from(ret).into());
-        }
-        Ok(frames)
-    }
-}
-
-/// Describes the NV12 Vulkan `frame` for the compositor and runs `render`
-/// on it, following FFmpeg's frame protocol (lock, semaphores, recorded
-/// state, unlock).
-///
-/// # Safety
-/// `frame` must be a valid Vulkan frame from `frames`.
-unsafe fn render_into(
-    frames: *mut ffi::AVBufferRef,
-    frame: &frame::Video,
-    matrix: nox_color::Matrix3x4,
-    render: impl FnOnce(&mut YuvTarget) -> nox_gpu::Result<()>,
-) -> Result<()> {
-    // SAFETY: guaranteed by the caller; lock/unlock bracket all access to
-    // the AVVkFrame state, as FFmpeg requires.
-    unsafe {
-        let ctx = (*frames).data.cast::<ffi::AVHWFramesContext>();
-        let vkf = (*frame.as_ptr()).data[0].cast::<ffi::AVVkFrame>();
-        let (width, height) = ((*ctx).width as u32, (*ctx).height as u32);
-        let multi_planar = (*vkf).img[1] == 0;
-        let plane = |i: usize, format: PlaneFormat, w: u32, h: u32| VkPlane {
-            image: vk::Handle::from_raw((*vkf).img[if multi_planar { 0 } else { i }]),
-            aspect: if multi_planar {
-                [vk::ImageAspectFlags::PLANE_0, vk::ImageAspectFlags::PLANE_1][i]
-            } else {
-                vk::ImageAspectFlags::COLOR
-            },
-            format,
-            width: w,
-            height: h,
-        };
-        let _lock = FrameLock::new(ctx, vkf);
-        let count = if multi_planar { 1 } else { 2 };
-        let mut target = YuvTarget {
-            width,
-            height,
-            luma: plane(0, PlaneFormat::R8, width, height),
-            chroma: plane(1, PlaneFormat::Rg8, width.div_ceil(2), height.div_ceil(2)),
-            images: (0..count)
-                .map(|i| ImageSync {
-                    image: vk::Handle::from_raw((*vkf).img[i]),
-                    layout: vk::ImageLayout::from_raw((*vkf).layout[i]),
-                    access: vk::AccessFlags::from_raw((*vkf).access[i] as u32),
-                    queue_family: (*vkf).queue_family[i],
-                    semaphore: vk::Handle::from_raw((*vkf).sem[i]),
-                    value: (*vkf).sem_value[i],
-                })
-                .collect(),
-            matrix,
-        };
-        let result = render(&mut target);
-        for (i, sync) in target.images.iter().enumerate() {
-            (*vkf).layout[i] = sync.layout.as_raw();
-            (*vkf).access[i] = sync.access.as_raw() as _;
-            (*vkf).queue_family[i] = sync.queue_family;
-            (*vkf).sem_value[i] = sync.value;
-        }
-        result.map_err(Error::from)
-    }
+    Ok((video.open_as_with(codec, options)?, pixel_format))
 }
 
 fn open_audio(
@@ -711,11 +833,162 @@ fn send_audio(audio: &mut AudioOutput, samples: &[f32]) -> Result<()> {
     Ok(())
 }
 
-fn set_color_tags(frame: &mut frame::Video) {
-    frame.set_color_range(ffmpeg::color::Range::MPEG);
-    frame.set_color_space(ffmpeg::color::Space::BT709);
-    frame.set_color_primaries(ffmpeg::color::Primaries::BT709);
-    frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
+fn set_color_tags(frame: &mut frame::Video, encoding: OutputEncoding) {
+    let (primaries, transfer, space) = ffi_color(encoding);
+    // SAFETY: plain field writes on a valid frame.
+    unsafe {
+        let f = frame.as_mut_ptr();
+        (*f).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
+        (*f).color_primaries = primaries;
+        (*f).color_trc = transfer;
+        (*f).colorspace = space;
+    }
+}
+
+/// FFmpeg's color tags for `encoding`.
+fn ffi_color(
+    encoding: OutputEncoding,
+) -> (
+    ffi::AVColorPrimaries,
+    ffi::AVColorTransferCharacteristic,
+    ffi::AVColorSpace,
+) {
+    use ffi::{AVColorPrimaries as P, AVColorSpace as S, AVColorTransferCharacteristic as T};
+    match encoding {
+        OutputEncoding::Sdr => (P::AVCOL_PRI_BT709, T::AVCOL_TRC_BT709, S::AVCOL_SPC_BT709),
+        OutputEncoding::Pq => (
+            P::AVCOL_PRI_BT2020,
+            T::AVCOL_TRC_SMPTE2084,
+            S::AVCOL_SPC_BT2020_NCL,
+        ),
+        OutputEncoding::Hlg => (
+            P::AVCOL_PRI_BT2020,
+            T::AVCOL_TRC_ARIB_STD_B67,
+            S::AVCOL_SPC_BT2020_NCL,
+        ),
+    }
+}
+
+/// libavutil's `AVMasteringDisplayMetadata` (not in the generated
+/// bindings; its layout is part of FFmpeg's ABI).
+#[repr(C)]
+struct MasteringDisplay {
+    display_primaries: [[ffi::AVRational; 2]; 3],
+    white_point: [ffi::AVRational; 2],
+    min_luminance: ffi::AVRational,
+    max_luminance: ffi::AVRational,
+    has_primaries: i32,
+    has_luminance: i32,
+}
+
+/// The mastering display written for HDR10: P3 primaries with a D65 white
+/// (as most HDR is graded on), `peak` nits, 0.0001 nits black.
+fn mastering_display(peak: f32) -> MasteringDisplay {
+    // Chromaticities in SMPTE ST 2086 units (1/50000).
+    let xy = |x: f64, y: f64| {
+        let r = |v: f64| ffi::AVRational {
+            num: (v * 50_000.0).round() as i32,
+            den: 50_000,
+        };
+        [r(x), r(y)]
+    };
+    MasteringDisplay {
+        display_primaries: [xy(0.680, 0.320), xy(0.265, 0.690), xy(0.150, 0.060)],
+        white_point: xy(0.3127, 0.3290),
+        min_luminance: ffi::AVRational {
+            num: 1,
+            den: 10_000,
+        },
+        max_luminance: ffi::AVRational {
+            num: peak.round().max(1.0) as i32,
+            den: 1,
+        },
+        has_primaries: 1,
+        has_luminance: 1,
+    }
+}
+
+/// Puts the HDR10 mastering display where encoders look for it.
+///
+/// # Safety
+/// `ctx` must be an unopened encoder context.
+unsafe fn add_hdr10_encoder_data(ctx: *mut ffi::AVCodecContext, peak: f32) {
+    // SAFETY: guaranteed by the caller; FFmpeg allocates and owns the data.
+    unsafe {
+        let data = ffi::av_frame_side_data_new(
+            &mut (*ctx).decoded_side_data,
+            &mut (*ctx).nb_decoded_side_data,
+            ffi::AVFrameSideDataType::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+            size_of::<MasteringDisplay>(),
+            0,
+        );
+        if !data.is_null() {
+            (*data)
+                .data
+                .cast::<MasteringDisplay>()
+                .write_unaligned(mastering_display(peak));
+        }
+    }
+}
+
+/// libavutil's `AVContentLightMetadata`.
+#[repr(C)]
+struct ContentLight {
+    max_cll: u32,
+    max_fall: u32,
+}
+
+/// Adds MaxCLL and MaxFALL (nits) to the stream, where the MP4 and MOV
+/// muxers write them (`clli`).
+///
+/// # Safety
+/// `par` must be the stream's codec parameters, before the trailer is
+/// written.
+unsafe fn add_content_light(par: *mut ffi::AVCodecParameters, max_cll: f32, max_fall: f32) {
+    // SAFETY: guaranteed by the caller; FFmpeg allocates and owns the data.
+    unsafe {
+        let data = ffi::av_packet_side_data_new(
+            &mut (*par).coded_side_data,
+            &mut (*par).nb_coded_side_data,
+            ffi::AVPacketSideDataType::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+            size_of::<ContentLight>(),
+            0,
+        );
+        if !data.is_null() {
+            (*data)
+                .data
+                .cast::<ContentLight>()
+                .write_unaligned(ContentLight {
+                    max_cll: max_cll.round().clamp(0.0, 65535.0) as u32,
+                    max_fall: max_fall.round().clamp(0.0, 65535.0) as u32,
+                });
+        }
+    }
+}
+
+/// Puts the HDR10 mastering display into the stream, where the MP4 and MOV
+/// muxers write it (`mdcv`).
+///
+/// # Safety
+/// `par` must be the stream's codec parameters, before the header is
+/// written.
+unsafe fn add_hdr10_stream_data(par: *mut ffi::AVCodecParameters, peak: f32) {
+    // SAFETY: guaranteed by the caller; FFmpeg allocates and owns the data.
+    unsafe {
+        let data = ffi::av_packet_side_data_new(
+            &mut (*par).coded_side_data,
+            &mut (*par).nb_coded_side_data,
+            ffi::AVPacketSideDataType::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+            size_of::<MasteringDisplay>(),
+            0,
+        );
+        if !data.is_null() {
+            (*data)
+                .data
+                .cast::<MasteringDisplay>()
+                .write_unaligned(mastering_display(peak));
+        }
+    }
 }
 
 /// The container FFmpeg would pick for `path`, if any.

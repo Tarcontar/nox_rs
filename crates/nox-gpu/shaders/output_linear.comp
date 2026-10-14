@@ -1,0 +1,124 @@
+// Writes the accumulated picture (linear working space), encoded as
+// `encoding` says (encode_output), as 4:2:0 Y'CbCr into a buffer another
+// API reads (e.g. CUDA for NVENC): luma rows, then interleaved chroma rows,
+// each `pitch` bytes apart. P010 (16-bit samples, 10 bits in the high
+// bits) with `deep` set, one invocation per 2×2 block; else NV12 (8-bit),
+// one invocation per 4×2 block, so every write is a whole 32-bit word.
+// Chroma is left-sited, filtered as in output_yuv.comp.
+//
+// With `measure` set, also measures the light of HDR10 frames (MaxCLL and
+// MaxFALL, CTA-861.3): every workgroup writes the brightest pixel and the
+// sum over its pixels of max(R, G, B) in nits to `light`.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "color.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accum;
+layout(set = 0, binding = 1, std430) writeonly buffer Frame {
+    uint words[];
+} frame;
+layout(set = 0, binding = 2, std430) writeonly buffer Light {
+    vec2 partials[];
+} light;
+
+layout(push_constant) uniform Params {
+    // R'G'B' → normalized (Y, Cb, Cr) values (nox_color::ycbcr).
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
+    ivec2 size;
+    int encoding;
+    int deep;
+    // In 32-bit words.
+    uint luma_offset;
+    uint chroma_offset;
+    uint pitch;
+    int measure;
+} p;
+
+shared vec2 shared_light[gl_WorkGroupSize.x * gl_WorkGroupSize.y];
+
+// The largest of R, G, B in nits, as PQ represents it.
+float nits_at(ivec2 pos) {
+    vec3 nits = min(max(WORKING_TO_BT2020 * imageLoad(accum, pos).rgb, 0.0) * 203.0, 10000.0);
+    return max(nits.r, max(nits.g, nits.b));
+}
+
+vec4 rgb_at(ivec2 pos) {
+    pos = clamp(pos, ivec2(0), p.size - 1);
+    return vec4(encode_output(imageLoad(accum, pos).rgb, p.encoding), 1.0);
+}
+
+// Cb, Cr (normalized) of the chroma sample at luma column `x`, rows
+// `y` and `y + 1`.
+vec2 chroma_at(int x, int y) {
+    vec4 rgb = vec4(0.0);
+    for (int dy = 0; dy < 2; dy++) {
+        ivec2 row = ivec2(x, y + dy);
+        rgb += 0.25 * rgb_at(row - ivec2(1, 0)) + 0.5 * rgb_at(row) + 0.25 * rgb_at(row + ivec2(1, 0));
+    }
+    rgb *= 0.5;
+    return vec2(dot(p.row1, rgb), dot(p.row2, rgb));
+}
+
+uint unorm16(float v) {
+    return uint(round(clamp(v, 0.0, 1.0) * 65535.0));
+}
+
+uint unorm8(float v) {
+    return uint(round(clamp(v, 0.0, 1.0) * 255.0));
+}
+
+void main() {
+    ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+    int columns = p.deep != 0 ? 2 : 4;
+    ivec2 base = block * ivec2(columns, 2);
+    vec2 measured = vec2(0.0);
+    if (all(lessThan(base, p.size))) {
+        for (int dy = 0; dy < 2; dy++) {
+            int y = base.y + dy;
+            if (y >= p.size.y) {
+                // The next row would be chroma.
+                break;
+            }
+            uint word = 0u;
+            for (int dx = 0; dx < columns; dx++) {
+                ivec2 pos = ivec2(base.x + dx, y);
+                float luma = dot(p.row0, rgb_at(pos));
+                word |= p.deep != 0 ? unorm16(luma) << (16 * dx) : unorm8(luma) << (8 * dx);
+                if (p.measure != 0 && pos.x < p.size.x) {
+                    float nits = nits_at(pos);
+                    measured = vec2(max(measured.x, nits), measured.y + nits);
+                }
+            }
+            frame.words[p.luma_offset + uint(y) * p.pitch + uint(block.x)] = word;
+        }
+        uint chroma = 0u;
+        for (int c = 0; c < columns / 2; c++) {
+            vec2 cbcr = chroma_at(base.x + 2 * c, base.y);
+            chroma |= p.deep != 0 ? unorm16(cbcr.x) | (unorm16(cbcr.y) << 16)
+                                  : (unorm8(cbcr.x) | (unorm8(cbcr.y) << 8)) << (16 * c);
+        }
+        frame.words[p.chroma_offset + uint(block.y) * p.pitch + uint(block.x)] = chroma;
+    }
+    if (p.measure == 0) {
+        return;
+    }
+    // Reduce the workgroup's measurements (uniform control flow from here).
+    uint index = gl_LocalInvocationIndex;
+    shared_light[index] = measured;
+    barrier();
+    for (uint stride = gl_WorkGroupSize.x * gl_WorkGroupSize.y / 2; stride > 0; stride /= 2) {
+        if (index < stride) {
+            vec2 other = shared_light[index + stride];
+            shared_light[index] = vec2(max(shared_light[index].x, other.x), shared_light[index].y + other.y);
+        }
+        barrier();
+    }
+    if (index == 0) {
+        light.partials[gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x] = shared_light[0];
+    }
+}

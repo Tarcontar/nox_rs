@@ -9,3 +9,18 @@
 timeline { font-size: 8pt; }
 .inspector-name { font-weight: bold; }
 timeline:focus-visible { outline: 2px solid #3584e4; outline-offset: -2px; }
+.track-header { background: #2b2c31; padding: 1px 4px; }
+.track-header .track-name { font-size: 8pt; color: #b0b2b8; }
+.track-header button { min-height: 20px; min-width: 22px; padding: 0; border: none; border-radius: 3px; background: none; box-shadow: none; color: #808288; }
+.track-header button:hover { background: alpha(white, 0.08); }
+.track-header button:checked { color: #f08a40; }
+.track-header button image { -gtk-icon-size: 14px; }
+.timeline-toolbar { padding: 3px 6px; border-bottom: 1px solid #121315; min-height: 28px; }
+.timeline-toolbar .flat-group { border-right: 1px solid alpha(white, 0.08); padding-right: 6px; }
+.timeline-toolbar .flat-group:last-child { border-right: none; }
+.timeline-toolbar button { min-height: 26px; min-width: 28px; padding: 0 4px; background: none; box-shadow: none; border: none; }
+.timeline-toolbar button:hover { background: alpha(white, 0.08); }
+.timeline-toolbar button:checked { background: alpha(white, 0.14); color: #f08a40; }
+button.keyframe { min-height: 20px; min-width: 20px; padding: 0 2px; color: alpha(currentColor, 0.45); }
+button.keyframe.animated { color: currentColor; }
+button.keyframe:checked { background: none; color: #f08a40; -gtk-icon-shadow: 0 0 2px #f08a40; }

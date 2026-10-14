@@ -6,16 +6,22 @@ mod compositor;
 mod converter;
 mod device;
 mod export;
+mod interop;
 mod scope_layout;
 mod scopes;
 
 pub use ash::vk;
-pub use compositor::{BlendMode, Compositor, LayerStyle, MAX_LAYERS, Placement, Rect, YuvTarget};
+pub use compositor::{
+    BlendMode, Compositor, LayerStyle, MAX_LAYERS, Placement, Rect, Transform, YuvTarget,
+};
 pub use converter::{
     Converter, CpuFrame, ImageSync, Input, Layout, Plane, PlaneFormat, VkFrame, VkPlane,
 };
 pub use device::{ExternalDevice, GpuDevice, QueueLock};
 pub use export::{DmabufFormat, DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F};
+pub use interop::{
+    BufferTarget, FrameLight, GpuTarget, LinearFormat, LinearLayout, MemoryHandle, SharedBuffer,
+};
 pub use scopes::ScopeImages;
 /// Sizes of the scope images.
 pub mod scope_sizes {

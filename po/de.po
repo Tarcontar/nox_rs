@@ -221,17 +221,9 @@ msgstr "Projekteinstellungen ändern"
 msgid "muted"
 msgstr "stumm"
 
-#: src/timeline.rs:993
-msgid "Move Clip"
-msgstr "Clip verschieben"
-
 #: src/timeline.rs:1013
 msgid "Trim Clip"
 msgstr "Clip trimmen"
-
-#: src/timeline.rs:1137
-msgid "Delete Clip"
-msgstr "Clip löschen"
 
 #: src/viewer.rs:63
 msgid "Pause"
@@ -402,26 +394,6 @@ msgstr "Zum Ende"
 msgid "New Project"
 msgstr "Neues Projekt"
 
-#: resources/ui/window.ui:11
-msgid "Open…"
-msgstr "Öffnen …"
-
-#: resources/ui/window.ui:19
-msgid "Save As…"
-msgstr "Speichern unter …"
-
-#: resources/ui/window.ui:23
-msgid "Export…"
-msgstr "Exportieren …"
-
-#: resources/ui/window.ui:28
-msgid "Sequence"
-msgstr "Sequenz"
-
-#: resources/ui/window.ui:30
-msgid "Project Settings…"
-msgstr "Projekteinstellungen …"
-
 #: resources/ui/window.ui:42
 msgid "Add Video Track"
 msgstr "Videospur hinzufügen"
@@ -441,10 +413,6 @@ msgstr "Rückgängig"
 #: resources/ui/window.ui:85
 msgid "Redo"
 msgstr "Wiederholen"
-
-#: resources/ui/window.ui:92
-msgid "Main Menu"
-msgstr "Hauptmenü"
 
 #: src/export_dialog.rs:219
 msgid "Entire timeline"
@@ -612,8 +580,48 @@ msgid "_Quality"
 msgstr "_Qualität"
 
 #: resources/ui/export-dialog.ui:118
-msgid "Use _hardware encoding (Vulkan Video, NVENC)"
-msgstr "_Hardware-Kodierung verwenden (Vulkan Video, NVENC)"
+msgid "Enco_der"
+msgstr "Enco_der"
+
+#: src/export_dialog.rs
+msgid "Automatic"
+msgstr "Automatisch"
+
+#: src/export_dialog.rs
+msgid "Encodes on the graphics card's video engine, and the frames never leave the card: the fastest choice, on AMD, Intel and NVIDIA cards. Files are somewhat larger than from a software encoder at the same quality."
+msgstr "Kodiert mit der Video-Einheit der Grafikkarte, und die Bilder verlassen die Karte nie: die schnellste Wahl, auf AMD-, Intel- und NVIDIA-Karten. Die Dateien sind bei gleicher Qualität etwas größer als von einem Software-Encoder."
+
+#: src/export_dialog.rs
+msgid "NVIDIA's video engine: very fast, with better quality for the size than most hardware encoders. NVIDIA cards only."
+msgstr "NVIDIAs Video-Einheit: sehr schnell, mit besserer Qualität für die Dateigröße als die meisten Hardware-Encoder. Nur auf NVIDIA-Karten."
+
+#: src/export_dialog.rs
+msgid "Encodes on the processor: the best quality for the size and the most compatible files, but much slower than hardware, especially at 4K."
+msgstr "Kodiert auf dem Prozessor: die beste Qualität für die Dateigröße und die kompatibelsten Dateien, aber viel langsamer als Hardware, besonders in 4K."
+
+#: src/export_dialog.rs
+msgid "Encodes on the processor: the smallest files at a given quality, but the slowest choice. Good when size matters more than time."
+msgstr "Kodiert auf dem Prozessor: die kleinsten Dateien bei gegebener Qualität, aber die langsamste Wahl. Gut, wenn die Größe wichtiger ist als die Zeit."
+
+#: src/export_dialog.rs
+msgid "Encodes on the processor: large files that decode easily, made for editing and grading in other applications rather than for watching."
+msgstr "Kodiert auf dem Prozessor: große, leicht zu dekodierende Dateien, gemacht für Schnitt und Farbkorrektur in anderen Programmen statt zum Anschauen."
+
+#: src/export_dialog.rs
+msgid "Checking which encoders work on this computer…"
+msgstr "Prüfe, welche Encoder auf diesem Computer funktionieren …"
+
+#: src/export_dialog.rs
+msgid "Uses the fastest encoder that works, now {encoder}."
+msgstr "Verwendet den schnellsten Encoder, der funktioniert, derzeit {encoder}."
+
+#: src/export_dialog.rs
+msgid "No encoder for this format works on this computer."
+msgstr "Kein Encoder für dieses Format funktioniert auf diesem Computer."
+
+#: src/export_dialog.rs
+msgid "Frames go through system memory on the way, which is slower."
+msgstr "Die Bilder gehen dabei durch den Arbeitsspeicher, was langsamer ist."
 
 #: resources/ui/export-dialog.ui:126
 msgid "Include _audio"
@@ -682,10 +690,6 @@ msgstr "Überblendung, {length}"
 #: src/timeline.rs:1608
 msgid "{name}, {start} to {end}"
 msgstr "{name}, {start} bis {end}"
-
-#: src/timeline.rs:320
-msgid "Left and Right step one frame, Up and Down jump to edit points, Shift+V selects the clip at the playhead, Shift+F10 opens its menu, Delete removes it."
-msgstr "Links und Rechts gehen ein Bild weiter, Hoch und Runter springen zu Schnittpunkten, Umschalt+V wählt den Clip am Abspielkopf, Umschalt+F10 öffnet sein Menü, Entf entfernt ihn."
 
 #: src/scopes.rs:25
 msgid "Waveform"
@@ -762,3 +766,650 @@ msgstr "Lautstärke in Dezibel"
 #: src/inspector.rs:97
 msgid "Change Volume"
 msgstr "Lautstärke ändern"
+
+#: src/timeline.rs:1532
+msgid "Move Clip"
+msgid_plural "Move Clips"
+msgstr[0] "Clip verschieben"
+msgstr[1] "Clips verschieben"
+
+#: src/timeline.rs:2069
+msgid "Delete Clip"
+msgid_plural "Delete Clips"
+msgstr[0] "Clip löschen"
+msgstr[1] "Clips löschen"
+
+#: src/timeline.rs:1716
+msgid "{n} clip selected"
+msgid_plural "{n} clips selected"
+msgstr[0] "{n} Clip ausgewählt"
+msgstr[1] "{n} Clips ausgewählt"
+
+#: src/inspector.rs:156
+msgid "Change Marker"
+msgstr "Marker ändern"
+
+#: src/inspector.rs:271
+msgid "Marker at {timecode}"
+msgstr "Marker bei {timecode}"
+
+#: src/timeline.rs:568
+msgid "Marker"
+msgstr "Marker"
+
+#: src/timeline.rs:1651
+msgid "Move Marker"
+msgstr "Marker verschieben"
+
+#: src/timeline.rs:2211
+msgid "Add Marker"
+msgstr "Marker hinzufügen"
+
+#: src/timeline.rs:2246
+msgid "Delete Marker"
+msgstr "Marker löschen"
+
+#: resources/ui/inspector.ui:78
+msgid "Name"
+msgstr "Name"
+
+#: resources/ui/inspector.ui:123
+msgid "Note"
+msgstr "Notiz"
+
+#: src/inspector.rs:298
+msgctxt "marker color"
+msgid "Red"
+msgstr "Rot"
+
+#: src/inspector.rs:299
+msgctxt "marker color"
+msgid "Pink"
+msgstr "Rosa"
+
+#: src/inspector.rs:300
+msgctxt "marker color"
+msgid "Orange"
+msgstr "Orange"
+
+#: src/inspector.rs:301
+msgctxt "marker color"
+msgid "Yellow"
+msgstr "Gelb"
+
+#: src/inspector.rs:302
+msgctxt "marker color"
+msgid "Green"
+msgstr "Grün"
+
+#: src/inspector.rs:303
+msgctxt "marker color"
+msgid "Cyan"
+msgstr "Cyan"
+
+#: src/inspector.rs:304
+msgctxt "marker color"
+msgid "Purple"
+msgstr "Lila"
+
+#: src/inspector.rs:305
+msgctxt "marker color"
+msgid "Magenta"
+msgstr "Magenta"
+
+#: src/inspector.rs:306
+msgctxt "marker color"
+msgid "White"
+msgstr "Weiß"
+
+#: src/inspector.rs:307
+msgctxt "marker color"
+msgid "Black"
+msgstr "Schwarz"
+
+#: src/inspector.rs:308
+msgctxt "marker color"
+msgid "Blue"
+msgstr "Blau"
+
+#: src/timeline.rs:1140
+msgid "Slide {frames}"
+msgstr "Slide {frames}"
+
+#: src/timeline.rs:1148
+msgid "Slip {frames}"
+msgstr "Slip {frames}"
+
+#: src/timeline.rs:1754
+msgid "Slide Clip"
+msgstr "Clip schieben (Slide)"
+
+#: src/timeline.rs:1759
+msgid "Slip Clip"
+msgstr "Inhalt verschieben (Slip)"
+
+#: src/project.rs
+msgid "Insert Clip"
+msgstr "Clip einfügen"
+
+#: src/timeline.rs
+msgid "Sync Lock Track"
+msgstr "Spur synchron sperren"
+
+#: src/timeline.rs
+msgid "Remove Sync Lock"
+msgstr "Synchronsperre aufheben"
+
+#: resources/ui/menus.ui
+msgid "Sync Lock"
+msgstr "Synchronsperre"
+
+#: src/timeline.rs
+msgid "Offline"
+msgstr "Offline"
+
+#: src/window.rs
+msgid "Not Now"
+msgstr "Nicht jetzt"
+
+#: src/window.rs
+msgid "Relink…"
+msgstr "Neu verknüpfen …"
+
+#: src/window.rs
+msgid "Relink Offline Media"
+msgstr "Offline-Medien neu verknüpfen"
+
+#: src/window.rs
+msgid "No media is offline"
+msgstr "Keine Medien sind offline"
+
+#: src/window.rs
+#, python-brace-format
+msgid "No files of the same name are in {folder}."
+msgstr "In {folder} sind keine Dateien gleichen Namens."
+
+#: src/window.rs
+msgid "The others are still offline."
+msgstr "Die übrigen sind weiterhin offline."
+
+#: src/window.rs
+#, python-brace-format
+msgid "Relink {name}"
+msgstr "{name} neu verknüpfen"
+
+#: src/window.rs
+msgid "Relink Media"
+msgstr "Medien neu verknüpfen"
+
+#: src/window.rs
+msgid "Their clips show black. Choose a folder to look for the files in."
+msgstr "Ihre Clips bleiben schwarz. Wählen Sie einen Ordner, in dem nach den Dateien gesucht wird."
+
+#: resources/ui/menus.ui
+msgid "Relink Media…"
+msgstr "Medien neu verknüpfen …"
+
+#: resources/ui/window.ui
+msgid "Relink Offline Media…"
+msgstr "Offline-Medien neu verknüpfen …"
+
+#: src/window.rs
+#, python-brace-format
+msgid "{n} media file is offline"
+msgid_plural "{n} media files are offline"
+msgstr[0] "{n} Mediendatei ist offline"
+msgstr[1] "{n} Mediendateien sind offline"
+
+#: src/window.rs
+#, python-brace-format
+msgid "Found {found} of {n} offline file"
+msgid_plural "Found {found} of {n} offline files"
+msgstr[0] "{found} von {n} Offline-Datei gefunden"
+msgstr[1] "{found} von {n} Offline-Dateien gefunden"
+
+#: src/timeline.rs
+msgid "Solo Track"
+msgstr "Spur solo schalten"
+
+#: src/timeline.rs
+msgid "Unsolo Track"
+msgstr "Solo der Spur aufheben"
+
+#: src/track_header.rs
+#, python-brace-format
+msgid "Mute {track}"
+msgstr "{track} stummschalten"
+
+#: src/track_header.rs
+#, python-brace-format
+msgid "Hide {track}"
+msgstr "{track} ausblenden"
+
+#: src/track_header.rs
+msgid "Hide"
+msgstr "Ausblenden"
+
+#: src/track_header.rs
+#, python-brace-format
+msgid "Solo {track}"
+msgstr "{track} solo"
+
+#: src/track_header.rs
+msgid "Solo"
+msgstr "Solo"
+
+#: src/track_header.rs
+#, python-brace-format
+msgid "Lock {track}"
+msgstr "{track} sperren"
+
+#: src/track_header.rs
+msgid "Lock"
+msgstr "Sperren"
+
+#: src/track_header.rs
+#, python-brace-format
+msgid "Sync lock {track}"
+msgstr "{track} synchron sperren"
+
+#: src/track_header.rs
+msgid "Sync Lock: follow ripple edits on other tracks"
+msgstr "Synchronsperre: Ripple-Bearbeitungen anderer Spuren folgen"
+
+#: resources/ui/viewer.ui
+msgid "Mark In (I)"
+msgstr "In-Punkt setzen (I)"
+
+#: resources/ui/viewer.ui
+msgid "Mark Out (O)"
+msgstr "Out-Punkt setzen (O)"
+
+#: resources/ui/viewer.ui
+msgid "Add Marker (M)"
+msgstr "Marker hinzufügen (M)"
+
+#: resources/ui/window.ui
+msgid "New Project (Ctrl+N)"
+msgstr "Neues Projekt (Strg+N)"
+
+#: resources/ui/window.ui
+msgid "Open Project (Ctrl+O)"
+msgstr "Projekt öffnen (Strg+O)"
+
+#: resources/ui/window.ui
+msgid "Save Project (Ctrl+S)"
+msgstr "Projekt speichern (Strg+S)"
+
+#: resources/ui/window.ui
+msgid "Save Project As (Ctrl+Shift+S)"
+msgstr "Projekt speichern unter (Strg+Umschalt+S)"
+
+#: resources/ui/window.ui
+msgid "Save Project As"
+msgstr "Projekt speichern unter"
+
+#: resources/ui/window.ui
+msgid "Undo (Ctrl+Z)"
+msgstr "Rückgängig (Strg+Z)"
+
+#: resources/ui/window.ui
+msgid "Redo (Ctrl+Shift+Z)"
+msgstr "Wiederholen (Strg+Umschalt+Z)"
+
+#: resources/ui/window.ui
+msgid "Export the timeline (Ctrl+E)"
+msgstr "Die Timeline exportieren (Strg+E)"
+
+#: resources/ui/window.ui
+msgid "Project Settings (Shift+9)"
+msgstr "Projekteinstellungen (Umschalt+9)"
+
+#: resources/ui/window.ui
+msgid "Project Settings"
+msgstr "Projekteinstellungen"
+
+#: resources/ui/window.ui
+msgid "Timeline Tools"
+msgstr "Timeline-Werkzeuge"
+
+#: resources/ui/window.ui
+msgid "Insert the selected media at the playhead (F9)"
+msgstr "Ausgewählte Medien am Abspielkopf einfügen (F9)"
+
+#: resources/ui/window.ui
+msgid "Insert"
+msgstr "Einfügen"
+
+#: resources/ui/window.ui
+msgid "Overwrite at the playhead with the selected media (F10)"
+msgstr "Am Abspielkopf mit den ausgewählten Medien überschreiben (F10)"
+
+#: resources/ui/window.ui
+msgid "Overwrite"
+msgstr "Überschreiben"
+
+#: resources/ui/window.ui
+msgid "Split at the playhead (Ctrl+B)"
+msgstr "Am Abspielkopf teilen (Strg+B)"
+
+#: resources/ui/window.ui
+msgid "Ripple delete the selected clips (Shift+Delete)"
+msgstr "Ausgewählte Clips mit Lückenschluss löschen (Umschalt+Entf)"
+
+#: resources/ui/window.ui
+msgid "Add a dissolve to the selected clip (Ctrl+T)"
+msgstr "Dem ausgewählten Clip eine Überblendung hinzufügen (Strg+T)"
+
+#: resources/ui/window.ui
+msgid "Snapping (N)"
+msgstr "Einrasten (N)"
+
+#: src/timeline.rs
+msgid "Left and Right step one frame, Up and Down jump to edit points, Shift+V selects the clip at the playhead, Ctrl+A all clips and Escape none, Shift+F10 opens the clip menu (in a track header, the track menu), Delete removes the selected clips."
+msgstr "Links und Rechts gehen ein Bild weiter, Hoch und Runter springen zu Schnittpunkten, Umschalt+V wählt den Clip am Abspielkopf, Strg+A alle Clips und Esc keinen, Umschalt+F10 öffnet das Clip-Menü (in einem Spurkopf das Spurmenü), Entf entfernt die ausgewählten Clips."
+
+#: src/inspector.rs
+msgid "Fade In"
+msgstr "Einblenden"
+
+#: src/inspector.rs
+msgid "Fade Out"
+msgstr "Ausblenden"
+
+#: resources/ui/inspector.ui
+msgid "Fades"
+msgstr "Blenden"
+
+#: resources/ui/inspector.ui
+msgid "Seconds; also set by dragging the handles at the clip's top corners"
+msgstr "Sekunden; auch durch Ziehen der Griffe an den oberen Ecken des Clips"
+
+#: src/inspector.rs
+msgid "Change Transform"
+msgstr "Transformation ändern"
+
+#: src/inspector.rs
+msgid "Reset Transform"
+msgstr "Transformation zurücksetzen"
+
+#: resources/ui/inspector.ui
+msgid "Transform"
+msgstr "Transformation"
+
+#: resources/ui/inspector.ui
+msgid "Position X"
+msgstr "Position X"
+
+#: resources/ui/inspector.ui
+msgid "Position Y"
+msgstr "Position Y"
+
+#: resources/ui/inspector.ui
+msgid "Zoom"
+msgstr "Zoom"
+
+#: resources/ui/inspector.ui
+msgid "Rotation"
+msgstr "Drehung"
+
+#: resources/ui/inspector.ui
+msgid "Crop Left"
+msgstr "Links beschneiden"
+
+#: resources/ui/inspector.ui
+msgid "Crop Right"
+msgstr "Rechts beschneiden"
+
+#: resources/ui/inspector.ui
+msgid "Crop Top"
+msgstr "Oben beschneiden"
+
+#: resources/ui/inspector.ui
+msgid "Crop Bottom"
+msgstr "Unten beschneiden"
+
+#: resources/ui/inspector.ui
+msgid "Pixels right of center, in the timeline's resolution"
+msgstr "Pixel rechts der Mitte, in der Auflösung der Timeline"
+
+#: resources/ui/inspector.ui
+msgid "Pixels below center, in the timeline's resolution"
+msgstr "Pixel unter der Mitte, in der Auflösung der Timeline"
+
+#: resources/ui/inspector.ui
+msgid "Percent of the fitted size"
+msgstr "Prozent der eingepassten Größe"
+
+#: resources/ui/inspector.ui
+msgid "Degrees, clockwise"
+msgstr "Grad, im Uhrzeigersinn"
+
+#: resources/ui/inspector.ui
+msgid "Percent of the picture"
+msgstr "Prozent des Bildes"
+
+#: src/inspector.rs
+msgid "Add Keyframe"
+msgstr "Keyframe hinzufügen"
+
+#: src/inspector.rs
+msgid "Remove Keyframe"
+msgstr "Keyframe entfernen"
+
+#: src/inspector.rs
+msgid "Change Easing"
+msgstr "Interpolation ändern"
+
+#: resources/ui/inspector.ui
+msgid "Keyframe at the playhead"
+msgstr "Keyframe am Abspielkopf"
+
+#: resources/ui/inspector.ui
+msgid "Adds or removes a keyframe at the playhead"
+msgstr "Fügt am Abspielkopf einen Keyframe hinzu oder entfernt ihn"
+
+#: resources/ui/inspector.ui
+msgid "Keyframes"
+msgstr "Keyframes"
+
+#: resources/ui/inspector.ui
+msgid "Previous Keyframe"
+msgstr "Vorheriger Keyframe"
+
+#: resources/ui/inspector.ui
+msgid "Next Keyframe"
+msgstr "Nächster Keyframe"
+
+#: resources/ui/inspector.ui
+msgid "How the values move from the keyframes at the playhead to the next ones"
+msgstr "Wie sich die Werte von den Keyframes am Abspielkopf zu den nächsten bewegen"
+
+#: resources/ui/inspector.ui
+msgid "Easing"
+msgstr "Interpolation"
+
+#: resources/ui/inspector.ui
+msgid "Linear"
+msgstr "Linear"
+
+#: resources/ui/inspector.ui
+msgid "Ease In and Out"
+msgstr "Sanft ein und aus"
+
+#: src/i18n.rs
+msgid "Cross Dissolve"
+msgstr "Überblendung"
+
+#: src/i18n.rs
+msgid "Wipe from Left"
+msgstr "Wischen von links"
+
+#: src/i18n.rs
+msgid "Wipe from Right"
+msgstr "Wischen von rechts"
+
+#: src/i18n.rs
+msgid "Wipe from Top"
+msgstr "Wischen von oben"
+
+#: src/i18n.rs
+msgid "Wipe from Bottom"
+msgstr "Wischen von unten"
+
+#: src/i18n.rs
+msgid "Dip to Black"
+msgstr "Über Schwarz"
+
+#: src/inspector.rs
+msgid "Change Transition"
+msgstr "Übergang ändern"
+
+#: src/inspector.rs
+msgid "Change Transition Length"
+msgstr "Übergangslänge ändern"
+
+#: resources/ui/inspector.ui
+msgid "Type"
+msgstr "Art"
+
+#: resources/ui/inspector.ui
+msgid "Length"
+msgstr "Länge"
+
+#: resources/ui/inspector.ui
+msgid "Seconds, limited by the media the clips have beyond the cut"
+msgstr "Sekunden, begrenzt durch das Material der Clips jenseits des Schnitts"
+
+#: src/inspector.rs
+msgid "Change Speed"
+msgstr "Geschwindigkeit ändern"
+
+#: src/inspector.rs
+msgid "Freeze Frame"
+msgstr "Standbild"
+
+#: src/inspector.rs
+msgid "Remove Freeze Frame"
+msgstr "Standbild entfernen"
+
+#: src/timeline.rs
+msgid "Freeze"
+msgstr "Standbild"
+
+#: resources/ui/inspector.ui
+msgid "Speed"
+msgstr "Geschwindigkeit"
+
+#: resources/ui/inspector.ui
+msgid "Percent of normal speed; the clip gets shorter or longer and shows the same media"
+msgstr "Prozent der normalen Geschwindigkeit; der Clip wird kürzer oder länger und zeigt dasselbe Material"
+
+#: resources/ui/inspector.ui
+msgid "Move what follows"
+msgstr "Nachfolgendes verschieben"
+
+#: resources/ui/inspector.ui
+msgid "When the speed changes the clip's length, move the clips after it (as Resolve's Ripple Sequence); otherwise leave a gap or cover them"
+msgstr "Wenn die Geschwindigkeit die Länge des Clips ändert, die folgenden Clips verschieben (wie Resolves „Ripple Sequence“); sonst eine Lücke lassen oder sie überdecken"
+
+#: resources/ui/inspector.ui
+msgid "Hold the frame under the playhead for the whole clip"
+msgstr "Das Bild unter dem Abspielkopf für den ganzen Clip halten"
+
+#: src/framing.rs
+msgid "This clip is portrait, the timeline is landscape"
+msgstr "Dieser Clip ist hochkant, die Timeline im Querformat"
+
+#: src/framing.rs
+msgid "This clip is landscape, the timeline is portrait"
+msgstr "Dieser Clip ist im Querformat, die Timeline hochkant"
+
+#: src/framing.rs
+#, python-brace-format
+msgid "Fit shows all of the picture, small between black bars. Fill zooms it to cover the {width}×{height} frame, cropping the rest; its zoom and position can be changed in the inspector. Or the timeline can change to the clip's {clip_width}×{clip_height}, fitting the other clips."
+msgstr "Einpassen zeigt das ganze Bild, klein zwischen schwarzen Balken. Füllen vergrößert es, bis es das {width}×{height}-Bild bedeckt, und schneidet den Rest ab; Zoom und Position lassen sich im Inspektor ändern. Oder die Timeline übernimmt die {clip_width}×{clip_height} des Clips, und die anderen Clips werden eingepasst."
+
+#: src/framing.rs
+msgid "Fit"
+msgstr "Einpassen"
+
+#: src/framing.rs
+msgid "Fill"
+msgstr "Füllen"
+
+#: src/framing.rs
+msgid "Change Timeline"
+msgstr "Timeline ändern"
+
+#: resources/ui/window.ui
+msgid "Show Inspector"
+msgstr "Inspektor anzeigen"
+
+#: src/transform_overlay.rs
+msgid "Move Picture"
+msgstr "Bild verschieben"
+
+#: src/transform_overlay.rs
+msgid "Zoom Picture"
+msgstr "Bild zoomen"
+
+#: src/transform_overlay.rs
+msgid "Rotate Picture"
+msgstr "Bild drehen"
+
+#: src/timeline.rs
+msgid "Move Keyframe"
+msgstr "Keyframe verschieben"
+
+#: src/i18n.rs
+msgid "Dip to White"
+msgstr "Über Weiß"
+
+#: resources/ui/color-wheels.ui
+msgid "Grade keyframe at the playhead"
+msgstr "Grading-Keyframe am Abspielkopf"
+
+#: src/export_dialog.rs
+msgid "SDR (Rec. 709)"
+msgstr "SDR (Rec. 709)"
+
+#: src/export_dialog.rs
+msgid "HDR10 (PQ, Rec. 2020)"
+msgstr "HDR10 (PQ, Rec. 2020)"
+
+#: src/export_dialog.rs
+msgid "HLG (Rec. 2020)"
+msgstr "HLG (Rec. 2020)"
+
+#: src/export_dialog.rs
+msgid "HDR10 Master (HEVC)"
+msgstr "HDR10-Master (HEVC)"
+
+#: src/export_dialog.rs
+msgid "HLG for broadcast and phones (HEVC)"
+msgstr "HLG für Fernsehen und Smartphones (HEVC)"
+
+#: resources/ui/export-dialog.ui
+msgid "D_ynamic range"
+msgstr "D_ynamikumfang"
+
+#: resources/ui/export-dialog.ui
+msgid "HDR exports are 10-bit Rec. 2020 (HEVC or ProRes); SDR material sits at 203 nits, as BT.2408 recommends"
+msgstr "HDR-Exporte sind 10 Bit Rec. 2020 (HEVC oder ProRes); SDR-Material liegt bei 203 Nits, wie BT.2408 empfiehlt"
+
+#: resources/ui/export-dialog.ui
+msgid "Mastering _peak"
+msgstr "Mastering-_Spitze"
+
+#: resources/ui/export-dialog.ui
+msgid "Brightest the HDR10 master is meant for; written into the file for players and TVs"
+msgstr "Die Helligkeit, für die der HDR10-Master gedacht ist; wird für Player und Fernseher in die Datei geschrieben"
+
+#: resources/ui/export-dialog.ui
+msgid "nits"
+msgstr "Nits"
+
+#: src/export_dialog.rs
+msgid "The timeline has no audio in this range"
+msgstr "Die Timeline hat in diesem Bereich keinen Ton"

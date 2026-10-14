@@ -1,6 +1,7 @@
 mod clip_strip;
 mod color_wheels;
 mod export_dialog;
+mod framing;
 mod i18n;
 mod inspector;
 mod media_cell;
@@ -13,7 +14,10 @@ mod settings_dialog;
 #[cfg(test)]
 mod template_tests;
 mod timeline;
+mod track_header;
+mod transform_overlay;
 mod viewer;
+mod waveforms;
 mod window;
 
 use gtk::{gdk, gio, glib, prelude::*};
@@ -40,6 +44,10 @@ fn main() -> glib::ExitCode {
         if let Some(settings) = gtk::Settings::default() {
             settings.set_gtk_application_prefer_dark_theme(true);
         }
+        // The app's own symbolic icons (timeline tools), also when run
+        // with another app id.
+        gtk::IconTheme::for_display(&gdk::Display::default().expect("no display"))
+            .add_resource_path("/io/github/nox/Nox/icons");
         let provider = gtk::CssProvider::new();
         provider.load_from_resource("/io/github/nox/Nox/style.css");
         gtk::style_context_add_provider_for_display(

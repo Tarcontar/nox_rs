@@ -4,7 +4,7 @@ mod common;
 
 use common::fixture;
 use nox_color::{InputTransform, OutputTransform};
-use nox_gpu::{BlendMode, Compositor, Converter, LayerStyle, Rect};
+use nox_gpu::{BlendMode, Compositor, Converter, LayerStyle, Rect, Transform};
 use nox_media::{HwDevice, VideoDecoder, ffmpeg, with_cpu_frame};
 use std::sync::{Arc, OnceLock};
 
@@ -389,4 +389,121 @@ fn grades_match_the_cpu_reference() {
             "{grade:?} had no effect"
         );
     }
+}
+
+/// Sources with straight alpha (an RGBA PNG title over video) blend by
+/// their alpha: transparent pixels show the layer below.
+#[test]
+fn alpha_channels_blend() {
+    let Some((_, gpu)) = gpu() else { return };
+    // Blue at alpha 0 on the left half, at alpha 128/255 on the right.
+    let input = "color=c=0x2060E0:size=64x36:rate=25:duration=0.2,format=rgba,\
+                 geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lt(X,32),0,128)'";
+    let (Some(red), Some(path)) = (
+        solid("red-under-alpha.nut", "0xC03020", "64x36"),
+        fixture("alpha.png", &["-f", "lavfi", "-i", input, "-frames:v", "1"]),
+    ) else {
+        return;
+    };
+    let title = VideoDecoder::open(&path, None)
+        .unwrap()
+        .frame_at(0)
+        .unwrap();
+    let mut converter = Converter::new(gpu.clone()).unwrap();
+    let r = color_of(&mut converter, &red);
+    let b = [0x20, 0x60, 0xE0].map(|v| f64::from(v) / 255.0);
+    let linear = |v: [f64; 3]| {
+        InputTransform::default()
+            .apply(v.map(|c| c as f32))
+            .map(f64::from)
+    };
+    let (lr, lb) = (linear(r), linear(b));
+    let t = 128.0 / 255.0;
+    let half = OutputTransform
+        .apply([0, 1, 2].map(|c| (lr[c] + (lb[c] - lr[c]) * t) as f32))
+        .map(f64::from);
+
+    let mut compositor = Compositor::new(gpu).unwrap();
+    let full = Rect::fit(16.0 / 9.0, 64, 36);
+    compositor.begin(64, 36).unwrap();
+    for frame in [&red, &title] {
+        with_cpu_frame(frame, |cpu| {
+            compositor.add_layer(cpu, full, LayerStyle::default())
+        })
+        .unwrap()
+        .unwrap();
+    }
+    let image = compositor.finish().unwrap();
+    assert_close(pixel(&image, 10, 18), r, "transparent");
+    assert_close(pixel(&image, 50, 18), half, "half transparent");
+}
+
+/// Transformed layers: moved and scaled, rotated, and cropped, sampled
+/// back from the layer (a solid color stays exact under bilinear sampling).
+#[test]
+fn transforms_move_scale_rotate_and_crop() {
+    let Some((_, gpu)) = gpu() else { return };
+    let (Some(red), Some(blue)) = (
+        solid("red-under-transform.nut", "0xC03020", "64x36"),
+        solid("blue-transformed.nut", "0x2060E0", "64x36"),
+    ) else {
+        return;
+    };
+    let mut converter = Converter::new(gpu.clone()).unwrap();
+    let (r, b) = (
+        color_of(&mut converter, &red),
+        color_of(&mut converter, &blue),
+    );
+    let mut compositor = Compositor::new(gpu).unwrap();
+    let full = Rect::fit(16.0 / 9.0, 128, 72);
+    let mut draw = |transform: Transform| {
+        compositor.begin(128, 72).unwrap();
+        with_cpu_frame(&red, |cpu| {
+            compositor.add_layer(cpu, full, LayerStyle::default())
+        })
+        .unwrap()
+        .unwrap();
+        let style = LayerStyle {
+            transform,
+            ..LayerStyle::default()
+        };
+        with_cpu_frame(&blue, |cpu| compositor.add_layer(cpu, full, style))
+            .unwrap()
+            .unwrap();
+        compositor.finish().unwrap()
+    };
+
+    // Half size, moved right by a quarter of the width: x 64–128, y 18–54.
+    let image = draw(Transform {
+        offset: [0.25, 0.0],
+        scale: 0.5,
+        ..Transform::IDENTITY
+    });
+    assert_close(pixel(&image, 100, 36), b, "moved and scaled");
+    assert_close(pixel(&image, 40, 36), r, "left of it");
+    assert_close(pixel(&image, 100, 10), r, "above it");
+
+    // Half size and turned a quarter: 36 wide and 64 tall, centered.
+    let image = draw(Transform {
+        scale: 0.5,
+        rotation: 90.0,
+        ..Transform::IDENTITY
+    });
+    assert_close(pixel(&image, 64, 6), b, "rotated, top");
+    assert_close(pixel(&image, 40, 36), r, "rotated, beside it");
+
+    // The left half cut off; the right half stays where it was.
+    let image = draw(Transform {
+        crop: [0.5, 0.0, 0.0, 0.0],
+        ..Transform::IDENTITY
+    });
+    assert_close(pixel(&image, 20, 36), r, "cropped away");
+    assert_close(pixel(&image, 100, 36), b, "kept");
+
+    // Moved entirely out of the picture: nothing drawn.
+    let image = draw(Transform {
+        offset: [1.5, 0.0],
+        ..Transform::IDENTITY
+    });
+    assert_close(pixel(&image, 64, 36), r, "moved out");
 }
