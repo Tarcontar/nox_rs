@@ -11,7 +11,7 @@
 //!    a CUDA driver, or with `NOX_NVENC_MEMORY=1`).
 //! 3. Software (x264, x265; ProRes is always software).
 //!
-//! Hardware encoders that take frames on the GPU (`hwenc`) are written by
+//! Hardware encoders that take frames on the GPU (`hwaccel`) are written by
 //! the compositor directly (`write_gpu`), no copies; frames in system
 //! memory (`write_video`) are converted with swscale.
 
@@ -19,11 +19,10 @@ use ffmpeg::{ChannelLayout, Dictionary, codec, encoder, ffi, format, frame, soft
 use nox_project::Rational;
 use std::path::{Path, PathBuf};
 
-use crate::hwenc::{self, GpuFrames};
-use crate::{CHANNELS, Error, HwDevice, Image, Result};
+use crate::hwaccel::{self, Accel, GpuSink};
+use crate::{CHANNELS, Error, Image, Result};
 use nox_color::OutputEncoding;
-use nox_gpu::{FrameLight, GpuDevice, GpuTarget};
-use std::sync::Arc;
+use nox_gpu::{FrameLight, GpuTarget};
 
 /// Video codecs Nox can export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +89,9 @@ pub struct OutputSettings {
     /// Use this FFmpeg encoder of `codec` (e.g. `hevc_nvenc`) rather than
     /// the first that works.
     pub encoder: Option<String>,
-    /// The device frames are rendered on, as FFmpeg's and as Nox's
-    /// (the same device); enables hardware encoding without copies.
-    pub device: Option<HwDevice>,
-    pub gpu: Option<Arc<GpuDevice>>,
+    /// The devices frames are rendered on; enables hardware encoding
+    /// without copies.
+    pub accel: Option<Accel>,
     /// Stereo audio at this rate (AAC, or PCM in MOV), or no audio track.
     pub audio_rate: Option<u32>,
     /// SDR, or HDR (PQ or HLG; HEVC and ProRes only). Frames from memory
@@ -122,7 +120,7 @@ enum VideoInput {
         yuv: frame::Video,
     },
     /// Hardware frames on the GPU, written by the compositor.
-    Gpu(Box<dyn GpuFrames>),
+    Gpu(Box<dyn GpuSink>),
 }
 
 struct AudioOutput {
@@ -475,7 +473,7 @@ fn open_video(
                 continue;
             }
         };
-        let gpu_frames = match hwenc::open(name, settings) {
+        let gpu_frames = match hwaccel::open_sink(name, settings) {
             Ok(frames) => frames,
             Err(err) => {
                 failures.push(format!("{name}: {err}"));
@@ -620,8 +618,7 @@ pub struct EncoderProbe {
 pub fn probe_encoders(
     codec: VideoCodec,
     encoding: OutputEncoding,
-    device: Option<HwDevice>,
-    gpu: Option<Arc<GpuDevice>>,
+    accel: Option<Accel>,
 ) -> Vec<EncoderProbe> {
     crate::init();
     if encoding.is_hdr() && codec == VideoCodec::H264 {
@@ -636,8 +633,7 @@ pub fn probe_encoders(
         quality: Quality::High,
         hardware: true,
         encoder: None,
-        device,
-        gpu,
+        accel,
         audio_rate: None,
         encoding,
         peak_nits: 1000.0,
@@ -652,7 +648,7 @@ pub fn probe_encoders(
         .iter()
         .filter_map(|&name| {
             let found = find_encoder(name, &settings).ok()?;
-            let frames = hwenc::open(name, &settings).ok()?;
+            let frames = hwaccel::open_sink(name, &settings).ok()?;
             if let Err(err) = open_video_encoder(found, name, &settings, false, frames.as_deref()) {
                 tracing::debug!("{name} doesn't open: {err}");
                 return None;
@@ -676,7 +672,7 @@ fn open_video_encoder(
     name: &str,
     settings: &OutputSettings,
     global_header: bool,
-    gpu_frames: Option<&dyn GpuFrames>,
+    gpu_frames: Option<&dyn GpuSink>,
 ) -> Result<(encoder::Video, format::Pixel)> {
     let hdr = settings.encoding.is_hdr();
     let pixel_format = match name {

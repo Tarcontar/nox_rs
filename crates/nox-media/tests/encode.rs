@@ -45,8 +45,7 @@ fn round_trip(
         quality: EncodeQuality::High,
         hardware,
         encoder: None,
-        device: None,
-        gpu: None,
+        accel: None,
         audio_rate: Some(RATE),
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
@@ -137,8 +136,7 @@ fn odd_sizes_are_rejected() {
         quality: EncodeQuality::Medium,
         hardware: false,
         encoder: None,
-        device: None,
-        gpu: None,
+        accel: None,
         audio_rate: None,
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
@@ -162,7 +160,7 @@ fn nvenc_encode_from_gpu_memory() {
 /// checks what comes out.
 fn gpu_encode(encoder: &str, name: &str) {
     use nox_gpu::{Compositor, CpuFrame, LayerStyle, Layout, Plane, PlaneFormat, Rect};
-    let Ok((hw, gpu)) = nox_media::HwDevice::vulkan() else {
+    let Ok(accel) = nox_media::Accel::new() else {
         eprintln!("skipping: no Vulkan device");
         return;
     };
@@ -176,8 +174,7 @@ fn gpu_encode(encoder: &str, name: &str) {
         quality: EncodeQuality::High,
         hardware: true,
         encoder: Some(encoder.into()),
-        device: Some(hw),
-        gpu: Some(gpu.clone()),
+        accel: Some(accel.clone()),
         audio_rate: None,
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
@@ -194,7 +191,7 @@ fn gpu_encode(encoder: &str, name: &str) {
         }
     };
     assert_eq!(writer.video_encoder(), encoder);
-    let mut compositor = Compositor::new(gpu).unwrap();
+    let mut compositor = Compositor::new(accel.gpu().clone()).unwrap();
     for index in 0..30 {
         let image = frame(index, 320, 180);
         let cpu = CpuFrame {

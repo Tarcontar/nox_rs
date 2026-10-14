@@ -7,14 +7,13 @@ mod decode;
 mod encode;
 mod frames;
 mod hw;
-mod hwenc;
+mod hwaccel;
 mod probe;
 mod thumbnail;
-mod vulkan_frame;
 pub mod waveform;
 
 pub use audio::{AudioDecoder, CHANNELS};
-pub use decode::VideoDecoder;
+pub use decode::{HwDecode, VideoDecoder};
 pub use encode::{
     EncoderProbe, MediaWriter, OutputSettings, Quality as EncodeQuality, VideoCodec, container_for,
     probe_encoders,
@@ -25,11 +24,11 @@ pub use frames::{
     with_cpu_frame,
 };
 pub use hw::HwDevice;
+pub use hwaccel::{Accel, with_gpu_input};
 pub use nox_color::OutputEncoding;
 pub use nox_gpu::Image;
 pub use probe::{AudioInfo, MediaInfo, VideoInfo, probe};
 pub use thumbnail::thumbnail;
-pub use vulkan_frame::with_gpu_input;
 
 use std::sync::Once;
 

@@ -1,12 +1,16 @@
 //! Frames shared with other GPU APIs on the same device, for hardware
-//! encoders that aren't Vulkan (NVENC through CUDA now; VAAPI, D3D11 and
-//! others later): the compositor writes Y'CbCr 4:2:0 into a buffer whose
-//! memory the other API imports, so frames never leave the GPU.
+//! decoders and encoders that aren't Vulkan (NVDEC and NVENC through CUDA
+//! now; VAAPI, D3D11 and others later), so frames never leave the GPU: a
+//! buffer whose memory the other API imports holds linear Y'CbCr. The
+//! compositor writes 4:2:0 into it for encoders
+//! (`Compositor::finish_to_buffer`); the converter reads 4:2:0 or 4:2:2
+//! from it for decoders (`converter::BufferFrame`).
 //!
-//! The other side of the exchange lives with that API (`nox_media::hwenc`).
-//! Buffers move between the APIs by queue family ownership transfers to
-//! and from `VK_QUEUE_FAMILY_EXTERNAL`; the compositor waits for its work to
-//! finish before returning, so the other API may read right after.
+//! The other side of the exchange lives with that API
+//! (`nox_media::hwaccel`). Buffers move between the APIs by queue family
+//! ownership transfers to and from `VK_QUEUE_FAMILY_EXTERNAL`; the
+//! compositor and the converter wait for their work to finish before
+//! returning, so the other API may use the buffer right after.
 
 use ash::vk;
 use std::sync::Arc;
@@ -17,24 +21,43 @@ use nox_color::Matrix3x4;
 /// Sample layout of a linear 4:2:0 frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinearFormat {
-    /// 8-bit samples.
+    /// 4:2:0, 8-bit samples.
     Nv12,
-    /// 16-bit samples holding 10 bits in the high bits.
+    /// 4:2:0, 16-bit samples holding 10 (or more) bits in the high bits.
     P010,
+    /// 4:2:2, 8-bit samples (decoders only).
+    Nv16,
+    /// 4:2:2, 16-bit samples holding 10 (or more) bits in the high bits
+    /// (decoders only).
+    P210,
 }
 
 impl LinearFormat {
     pub fn bytes_per_sample(self) -> u32 {
         match self {
-            Self::Nv12 => 1,
-            Self::P010 => 2,
+            Self::Nv12 | Self::Nv16 => 1,
+            Self::P010 | Self::P210 => 2,
+        }
+    }
+
+    /// Whether chroma has full height (4:2:2) rather than half (4:2:0).
+    pub fn full_height_chroma(self) -> bool {
+        matches!(self, Self::Nv16 | Self::P210)
+    }
+
+    /// Rows of the chroma plane of a picture `height` rows high.
+    pub fn chroma_rows(self, height: u32) -> u32 {
+        if self.full_height_chroma() {
+            height
+        } else {
+            height.div_ceil(2)
         }
     }
 }
 
 /// Where the planes of a linear frame are: luma rows, then interleaved
 /// chroma rows, as CUDA frames (and NV12/P010 surfaces generally) lay them
-/// out.
+/// out. Chroma has half the width, and half the height for 4:2:0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinearLayout {
     pub format: LinearFormat,
@@ -64,7 +87,7 @@ impl LinearLayout {
 
     /// Bytes the frame takes.
     pub fn size(&self) -> u64 {
-        self.chroma_offset + u64::from(self.pitch) * u64::from(self.height.div_ceil(2))
+        self.chroma_offset + u64::from(self.pitch) * u64::from(self.format.chroma_rows(self.height))
     }
 }
 
@@ -147,7 +170,13 @@ impl SharedBuffer {
             let buffer = device.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
-                    .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+                    // Written by shaders (encoders' frames), copied from
+                    // (decoders' frames).
+                    .usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_SRC
+                            | vk::BufferUsageFlags::TRANSFER_DST,
+                    )
                     .push_next(&mut external),
                 None,
             )?;

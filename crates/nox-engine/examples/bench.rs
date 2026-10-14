@@ -6,7 +6,7 @@
 //! come out of the hardware decoder.
 
 use nox_gpu::{Compositor, LayerStyle, Rect};
-use nox_media::{HwDevice, VideoDecoder, ffmpeg};
+use nox_media::{Accel, VideoDecoder, ffmpeg};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -16,7 +16,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("usage: bench <file> [frames]");
     let frames: i64 = args.next().map_or(90, |n| n.parse().expect("frame count"));
-    let (hw, gpu) = HwDevice::vulkan().expect("Vulkan device");
+    let hw = Accel::new().expect("Vulkan device");
+    let gpu = hw.gpu().clone();
 
     let mut decoder = VideoDecoder::open(path.as_ref(), Some(&hw)).expect("open");
     let fps = decoder.frame_rate().as_f64();
@@ -66,7 +67,7 @@ fn main() {
         compositor.begin(960, 540).unwrap();
         let (w, h) = nox_media::display_size(&frame);
         let rect = Rect::fit(f64::from(w) / f64::from(h), 960, 540);
-        nox_media::with_gpu_input(&frame, |input| {
+        nox_media::with_gpu_input(&frame, Some(&hw), |input| {
             compositor.add_layer(input, rect, LayerStyle::default())
         })
         .unwrap()

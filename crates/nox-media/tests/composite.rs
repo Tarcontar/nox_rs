@@ -5,13 +5,13 @@ mod common;
 use common::fixture;
 use nox_color::{InputTransform, OutputTransform};
 use nox_gpu::{BlendMode, Compositor, Converter, LayerStyle, Rect, Transform};
-use nox_media::{HwDevice, VideoDecoder, ffmpeg, with_cpu_frame};
+use nox_media::{Accel, VideoDecoder, ffmpeg, with_cpu_frame};
 use std::sync::{Arc, OnceLock};
 
-fn gpu() -> Option<(HwDevice, Arc<nox_gpu::GpuDevice>)> {
-    static GPU: OnceLock<Option<(HwDevice, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
-    GPU.get_or_init(|| match HwDevice::vulkan() {
-        Ok(gpu) => Some(gpu),
+fn gpu() -> Option<(Accel, Arc<nox_gpu::GpuDevice>)> {
+    static GPU: OnceLock<Option<(Accel, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
+    GPU.get_or_init(|| match Accel::new() {
+        Ok(accel) => Some((accel.clone(), accel.gpu().clone())),
         Err(err) => {
             eprintln!("skipping GPU tests: {err}");
             None
@@ -205,11 +205,12 @@ fn single_layer_matches_plain_conversion() {
     let (w, h) = (320, 180);
     for index in [0, 7, 3] {
         let frame = decoder.frame_at(index).unwrap();
-        let expected = nox_media::with_gpu_input(&frame, |input| converter.convert(input, w, h))
-            .unwrap()
-            .unwrap();
+        let expected =
+            nox_media::with_gpu_input(&frame, None, |input| converter.convert(input, w, h))
+                .unwrap()
+                .unwrap();
         compositor.begin(w, h).unwrap();
-        nox_media::with_gpu_input(&frame, |input| {
+        nox_media::with_gpu_input(&frame, None, |input| {
             compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), LayerStyle::default())
         })
         .unwrap()
@@ -237,7 +238,7 @@ fn single_layer_matches_plain_conversion() {
         }
         compositor.begin(w, h).unwrap();
         let frame = decoder.frame_at(2).unwrap();
-        nox_media::with_gpu_input(&frame, |input| {
+        nox_media::with_gpu_input(&frame, None, |input| {
             compositor.add_layer(input, Rect::fit(16.0 / 9.0, w, h), LayerStyle::default())
         })
         .unwrap()
@@ -510,4 +511,82 @@ fn transforms_move_scale_rotate_and_crop() {
         ..Transform::IDENTITY
     });
     assert_close(pixel(&image, 64, 36), r, "moved out");
+}
+
+/// Linear 4:2:0 buffers, the frames shared with other APIs (NVENC, NVDEC),
+/// both ways: the compositor writes a picture into a buffer as NV12 or P010
+/// (as for an encoder), and the converter reads it back (as from a decoder)
+/// to the color it came in with.
+#[test]
+fn linear_buffers_round_trip() {
+    use nox_color::ycbcr::{self, Coefficients, Quantization};
+    use nox_gpu::{
+        BufferFrame, BufferTarget, LayerStyle, LinearFormat, LinearLayout, MemoryHandle,
+        SharedBuffer,
+    };
+    let Some((_, gpu)) = gpu() else { return };
+    let Some(handle) = MemoryHandle::native() else {
+        eprintln!("skipping: no memory sharing on this platform");
+        return;
+    };
+    let Some(red) = solid("linear-red.nut", "0xC03020", "64x36") else {
+        return;
+    };
+    let mut converter = Converter::new(gpu.clone()).unwrap();
+    let expected = color_of(&mut converter, &red);
+    let mut compositor = Compositor::new(gpu.clone()).unwrap();
+    for (format, quantization) in [
+        (LinearFormat::Nv12, Quantization::eight_bit(false)),
+        (
+            LinearFormat::P010,
+            Quantization {
+                bit_depth: 10,
+                container_bits: 16,
+                msb_aligned: true,
+                full_range: false,
+            },
+        ),
+    ] {
+        let layout = LinearLayout::packed(format, 64, 36, 256);
+        let buffer = match SharedBuffer::new(&gpu, layout.size(), handle) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return;
+            }
+        };
+        compositor.begin(64, 36).unwrap();
+        with_cpu_frame(&red, |cpu| {
+            compositor.add_layer(cpu, Rect::fit(16.0 / 9.0, 64, 36), LayerStyle::default())
+        })
+        .unwrap()
+        .unwrap();
+        compositor
+            .finish_to_buffer(
+                &BufferTarget {
+                    buffer: &buffer,
+                    layout,
+                    matrix: ycbcr::rgb_to_ycbcr(Coefficients::BT709, quantization),
+                },
+                false,
+            )
+            .unwrap();
+        let image = converter
+            .convert(
+                &BufferFrame {
+                    buffer: &buffer,
+                    layout,
+                    width: 64,
+                    height: 36,
+                    matrix: ycbcr::ycbcr_to_rgb(Coefficients::BT709, quantization),
+                    // The compositor writes left-sited chroma.
+                    chroma_offset: [0.5, 0.0],
+                    color: InputTransform::default(),
+                },
+                64,
+                36,
+            )
+            .unwrap();
+        assert_close(pixel(&image, 32, 18), expected, &format!("{format:?}"));
+    }
 }

@@ -29,16 +29,13 @@ pub fn available_encoders(codec: VideoCodec, encoding: OutputEncoding) -> Vec<En
     type Probes = Vec<(VideoCodec, bool, Vec<EncoderProbe>)>;
     static PROBES: OnceLock<Probes> = OnceLock::new();
     let probes = PROBES.get_or_init(|| {
-        // A device of its own, as exports have, dropped after probing.
-        let (device, gpu) = match nox_media::HwDevice::vulkan() {
-            Ok((device, gpu)) => (Some(device), Some(gpu)),
-            Err(_) => (None, None),
-        };
+        // Devices of their own, as exports have, dropped after probing.
+        let accel = nox_media::Accel::new().ok();
         let mut probes = Vec::new();
         for codec in VideoCodec::ALL {
             // PQ and HLG need the same: 10-bit BT.2020.
             for encoding in [OutputEncoding::Sdr, OutputEncoding::Pq] {
-                let found = nox_media::probe_encoders(codec, encoding, device.clone(), gpu.clone());
+                let found = nox_media::probe_encoders(codec, encoding, accel.clone());
                 probes.push((codec, encoding.is_hdr(), found));
             }
         }
@@ -183,8 +180,8 @@ pub fn export(
     let with_audio = settings.audio && has_audio(timeline, &range);
     let mut renderer = Renderer::new(&[], Arc::new(AtomicBool::new(false)));
     renderer.set_output_encoding(settings.encoding)?;
-    let device = if settings.hardware {
-        renderer.hw_device()
+    let accel = if settings.hardware {
+        renderer.accel()
     } else {
         None
     };
@@ -197,8 +194,7 @@ pub fn export(
         quality: settings.quality,
         hardware: settings.hardware,
         encoder: settings.encoder.clone(),
-        gpu: device.as_ref().and_then(|_| renderer.gpu_device()),
-        device,
+        accel,
         audio_rate: with_audio.then_some(EXPORT_AUDIO_RATE),
         encoding: settings.encoding,
         peak_nits: settings.peak_nits,

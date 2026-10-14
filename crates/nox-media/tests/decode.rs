@@ -4,14 +4,14 @@ mod common;
 
 use common::fixture;
 use nox_gpu::Converter;
-use nox_media::{HwDevice, VideoDecoder, ffmpeg, rgba_cpu, to_software, with_cpu_frame};
+use nox_media::{Accel, HwDecode, VideoDecoder, ffmpeg, rgba_cpu, to_software, with_cpu_frame};
 use std::sync::{Arc, OnceLock};
 
 /// One shared GPU for all tests (device creation is slow); `None` without Vulkan.
-fn gpu() -> Option<(HwDevice, Arc<nox_gpu::GpuDevice>)> {
-    static GPU: OnceLock<Option<(HwDevice, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
-    GPU.get_or_init(|| match HwDevice::vulkan() {
-        Ok(gpu) => Some(gpu),
+fn gpu() -> Option<(Accel, Arc<nox_gpu::GpuDevice>)> {
+    static GPU: OnceLock<Option<(Accel, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
+    GPU.get_or_init(|| match Accel::new() {
+        Ok(accel) => Some((accel.clone(), accel.gpu().clone())),
         Err(err) => {
             eprintln!("skipping GPU tests: {err}");
             None
@@ -447,7 +447,7 @@ fn vulkan_zero_copy_matches_download() {
             return;
         }
         let (w, h) = (frame.width(), frame.height());
-        let zero_copy = nox_media::with_gpu_input(&frame, |input| {
+        let zero_copy = nox_media::with_gpu_input(&frame, None, |input| {
             assert!(
                 matches!(input, nox_gpu::Input::Vulkan(_)),
                 "expected zero-copy input"
@@ -500,10 +500,11 @@ fn vulkan_zero_copy_dmabuf_stress() {
         };
         let frame = decoder.frame_at(index).unwrap();
         let (w, h) = (frame.width(), frame.height());
-        let exported =
-            nox_media::with_gpu_input(&frame, |input| converter.convert_to_dmabuf(input, w, h))
-                .unwrap()
-                .unwrap_or_else(|e| panic!("step {step} (frame {index}): {e}"));
+        let exported = nox_media::with_gpu_input(&frame, None, |input| {
+            converter.convert_to_dmabuf(input, w, h)
+        })
+        .unwrap()
+        .unwrap_or_else(|e| panic!("step {step} (frame {index}): {e}"));
         held.push_back(exported);
         if held.len() > 3 {
             held.pop_front();
@@ -597,4 +598,135 @@ fn far_forward_jumps_in_one_gop_decode_on() {
     // Into the next GOP (keyframe 201): seeking there is cheaper.
     let cost = decoder.decode_cost(260);
     assert!((58..=62).contains(&cost), "{cost}");
+}
+
+/// H.264 4:2:0 of `name` (2 s of a test pattern).
+fn h264_clip(name: &str) -> Option<std::path::PathBuf> {
+    #[rustfmt::skip]
+    let args = [
+        "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-bf", "2", "-g", "10",
+    ];
+    fixture(name, &args)
+}
+
+/// NVDEC output must be bit-exact with software decoding.
+#[test]
+fn nvdec_decode_matches_software() {
+    let Some((accel, _)) = gpu() else { return };
+    let Some(path) = h264_clip("h264-nvdec.mp4") else {
+        return;
+    };
+    let Ok(mut hardware) = VideoDecoder::open_with(&path, Some(&accel), HwDecode::Cuda) else {
+        eprintln!("skipping: no NVDEC");
+        return;
+    };
+    let mut software = VideoDecoder::open(&path, None).unwrap();
+    for index in [0, 7, 23, 4, 49] {
+        let hw_frame = hardware.frame_at(index).unwrap();
+        if hw_frame.format() != ffmpeg::format::Pixel::CUDA {
+            eprintln!("skipping: no NVDEC H.264 decode here");
+            return;
+        }
+        let nv12 = to_software(&hw_frame).unwrap();
+        let yuv = software.frame_at(index).unwrap();
+        let (w, h) = (yuv.width() as usize, yuv.height() as usize);
+        for y in 0..h {
+            assert_eq!(
+                &nv12.data(0)[y * nv12.stride(0)..][..w],
+                &yuv.data(0)[y * yuv.stride(0)..][..w],
+                "frame {index}: luma row {y}"
+            );
+        }
+    }
+}
+
+/// NVDEC frames reach the converter on the GPU (copied into a shared
+/// buffer) and convert exactly like the same frames downloaded.
+#[test]
+fn nvdec_frames_convert_on_the_gpu() {
+    let Some((accel, gpu)) = gpu() else { return };
+    let Some(path) = h264_clip("h264-nvdec-gpu.mp4") else {
+        return;
+    };
+    let Ok(mut decoder) = VideoDecoder::open_with(&path, Some(&accel), HwDecode::Cuda) else {
+        eprintln!("skipping: no NVDEC");
+        return;
+    };
+    let mut converter = Converter::new(gpu).unwrap();
+    for index in [0, 13, 49] {
+        let frame = decoder.frame_at(index).unwrap();
+        if frame.format() != ffmpeg::format::Pixel::CUDA {
+            eprintln!("skipping: no NVDEC H.264 decode here");
+            return;
+        }
+        let on_gpu = nox_media::with_gpu_input(&frame, Some(&accel), |input| {
+            assert!(
+                matches!(input, nox_gpu::Input::Buffer(_)),
+                "NVDEC frames go through a shared buffer"
+            );
+            converter.convert(input, 320, 240)
+        })
+        .unwrap()
+        .unwrap();
+        let downloaded = to_software(&frame).unwrap();
+        let reference = with_cpu_frame(&downloaded, |cpu| converter.convert(cpu, 320, 240))
+            .unwrap()
+            .unwrap();
+        assert_eq!(on_gpu.data, reference.data, "frame {index}");
+    }
+}
+
+/// Automatic decoding takes Vulkan Video for 4:2:0 H.264 and NVDEC for
+/// 4:2:2 10-bit HEVC (which Vulkan Video decoders don't do), where the GPU
+/// has them; the 4:2:2 picture matches software decoding.
+#[test]
+fn automatic_decoding_picks_the_backend() {
+    let Some((accel, gpu)) = gpu() else { return };
+    if let Some(path) = h264_clip("h264-auto.mp4") {
+        let frame = VideoDecoder::open_with(&path, Some(&accel), HwDecode::Auto)
+            .unwrap()
+            .frame_at(3)
+            .unwrap();
+        eprintln!("H.264 4:2:0 decodes to {:?}", frame.format());
+    }
+    #[rustfmt::skip]
+    let args = [
+        "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=1",
+        "-c:v", "libx265", "-pix_fmt", "yuv422p10le", "-x265-params", "log-level=error",
+    ];
+    let Some(path) = fixture("hevc-422.mp4", &args) else {
+        return;
+    };
+    let frame = VideoDecoder::open_with(&path, Some(&accel), HwDecode::Auto)
+        .unwrap()
+        .frame_at(5)
+        .unwrap();
+    eprintln!("HEVC 4:2:2 10-bit decodes to {:?}", frame.format());
+    assert_ne!(
+        frame.format(),
+        ffmpeg::format::Pixel::VULKAN,
+        "Vulkan Video isn't chosen for 4:2:2"
+    );
+    let mut converter = Converter::new(gpu).unwrap();
+    let decoded = nox_media::with_gpu_input(&frame, Some(&accel), |input| {
+        converter.convert(input, 320, 240)
+    })
+    .unwrap()
+    .unwrap();
+    let software = VideoDecoder::open_with(&path, None, HwDecode::Software)
+        .unwrap()
+        .frame_at(5)
+        .unwrap();
+    let reference = with_cpu_frame(&software, |cpu| converter.convert(cpu, 320, 240))
+        .unwrap()
+        .unwrap();
+    let worst = decoded
+        .data
+        .iter()
+        .zip(&reference.data)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(worst <= 1, "4:2:2 picture differs by up to {worst}");
 }

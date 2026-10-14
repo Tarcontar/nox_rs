@@ -897,6 +897,11 @@ impl Compositor {
         measure: bool,
     ) -> Result<Option<FrameLight>> {
         let layout = &target.layout;
+        if layout.format.full_height_chroma() {
+            return Err(Error::Unsupported(
+                "the compositor writes 4:2:0 (NV12, P010) only".into(),
+            ));
+        }
         if (layout.width, layout.height) != (self.width, self.height) {
             return Err(Error::InvalidFrame("target size differs from the picture"));
         }
@@ -948,10 +953,8 @@ impl Compositor {
 
     /// Workgroups of `output_linear` across the picture, in X and Y.
     fn linear_dispatch(&self, format: LinearFormat) -> (u32, u32) {
-        let columns = match format {
-            LinearFormat::Nv12 => 4,
-            LinearFormat::P010 => 2,
-        };
+        // 8-bit formats pack 4 samples per word, 16-bit ones 2.
+        let columns = 4 / format.bytes_per_sample();
         (
             self.width.div_ceil(columns * WORKGROUP_SIZE),
             self.height.div_ceil(2 * WORKGROUP_SIZE),
@@ -1385,7 +1388,7 @@ impl Compositor {
                         rows: target.matrix,
                         size: [width as i32, height as i32],
                         encoding: self.encoding as i32,
-                        deep: i32::from(layout.format == LinearFormat::P010),
+                        deep: i32::from(layout.format.bytes_per_sample() == 2),
                         luma_offset: (layout.luma_offset / 4) as u32,
                         chroma_offset: (layout.chroma_offset / 4) as u32,
                         pitch: layout.pitch / 4,

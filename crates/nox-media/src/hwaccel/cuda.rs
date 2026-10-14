@@ -1,8 +1,13 @@
-//! NVENC fed from GPU memory: frames are Vulkan buffers on the GPU Nox
-//! renders with, exported (opaque file descriptors) and imported into
-//! FFmpeg's CUDA context as device pointers. NVENC registers each pointer
-//! once, so the buffers are a stable pool that grows to however many
-//! frames the encoder holds at once.
+//! CUDA on the GPU Nox renders with, both ways, through Vulkan buffers
+//! exported (opaque file descriptors or NT handles) and imported into
+//! FFmpeg's CUDA context as device pointers (`Slot`):
+//!
+//! - encoding (NVENC): the compositor writes frames into the buffers, which
+//!   go to the encoder as CUDA frames. NVENC registers each pointer once,
+//!   so the buffers are a stable pool that grows to however many frames the
+//!   encoder holds at once (`CudaSink`).
+//! - decoding (NVDEC): each decoded CUDA frame is copied on the GPU into a
+//!   buffer, which the converter reads (`DecodeBuffers`, one copy).
 //!
 //! libcuda is loaded at run time, so Nox runs without it.
 
@@ -16,7 +21,7 @@ use std::ffi::{CString, c_void};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::{GpuFrames, Render, ycbcr_matrix};
+use super::{GpuSink, Render, ycbcr_matrix};
 use crate::{Error, Result};
 
 /// Frames the encoder may hold at once; NVENC registers at most 64
@@ -30,6 +35,32 @@ type CuDevice = i32;
 type CuContext = *mut c_void;
 type CuDevicePtr = u64;
 type CuExternalMemory = *mut c_void;
+type CuStream = *mut c_void;
+
+/// `CU_MEMORYTYPE_DEVICE`.
+const CU_MEMORYTYPE_DEVICE: u32 = 2;
+
+/// `CUDA_MEMCPY2D`.
+#[repr(C)]
+#[derive(Default)]
+struct Memcpy2D {
+    src_x_in_bytes: usize,
+    src_y: usize,
+    src_memory_type: u32,
+    src_host: usize,
+    src_device: CuDevicePtr,
+    src_array: usize,
+    src_pitch: usize,
+    dst_x_in_bytes: usize,
+    dst_y: usize,
+    dst_memory_type: u32,
+    dst_host: usize,
+    dst_device: CuDevicePtr,
+    dst_array: usize,
+    dst_pitch: usize,
+    width_in_bytes: usize,
+    height: usize,
+}
 
 #[cfg(unix)]
 const CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
@@ -86,6 +117,8 @@ struct Cuda {
         *const ExternalMemoryBufferDesc,
     ) -> CuResult,
     mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
+    memcpy_2d_async: unsafe extern "C" fn(*const Memcpy2D, CuStream) -> CuResult,
+    stream_synchronize: unsafe extern "C" fn(CuStream) -> CuResult,
     destroy_external_memory: unsafe extern "C" fn(CuExternalMemory) -> CuResult,
     _library: Library,
 }
@@ -121,6 +154,8 @@ impl Cuda {
                 import_external_memory: symbol!("cuImportExternalMemory"),
                 external_memory_get_mapped_buffer: symbol!("cuExternalMemoryGetMappedBuffer"),
                 mem_free: symbol!("cuMemFree_v2"),
+                memcpy_2d_async: symbol!("cuMemcpy2DAsync_v2"),
+                stream_synchronize: symbol!("cuStreamSynchronize"),
                 destroy_external_memory: symbol!("cuDestroyExternalMemory"),
                 _library: library,
             };
@@ -162,9 +197,11 @@ fn check(result: CuResult, call: &str) -> Result<()> {
 }
 
 /// FFmpeg's CUDA device: a reference to keep its context alive.
-struct CudaDevice {
+pub(crate) struct CudaDevice {
     buffer: *mut ffi::AVBufferRef,
     context: CuContext,
+    /// FFmpeg's stream (NVDEC's), or null for the default one.
+    stream: CuStream,
 }
 
 // SAFETY: AVBufferRef reference counting is atomic; CUDA contexts may be
@@ -173,6 +210,12 @@ unsafe impl Send for CudaDevice {}
 unsafe impl Sync for CudaDevice {}
 
 impl CudaDevice {
+    /// FFmpeg's CUDA device on the same GPU as `gpu` (matched by UUID).
+    pub(crate) fn for_gpu(gpu: &GpuDevice) -> Result<Self> {
+        let cuda = Cuda::get()?;
+        Self::new(cuda.device_with_uuid(gpu.uuid())?)
+    }
+
     fn new(ordinal: i32) -> Result<Self> {
         let name = CString::new(ordinal.to_string()).expect("no NUL");
         let mut buffer = ptr::null_mut();
@@ -190,14 +233,21 @@ impl CudaDevice {
             return Err(ffmpeg::Error::from(ret).into());
         }
         // SAFETY: a CUDA device context.
-        let context = unsafe {
+        let (context, stream) = unsafe {
             let device = (*buffer).data.cast::<ffi::AVHWDeviceContext>();
-            (*(*device).hwctx.cast::<ffi::AVCUDADeviceContext>()).cuda_ctx
+            let cuda = &*(*device).hwctx.cast::<ffi::AVCUDADeviceContext>();
+            (cuda.cuda_ctx, cuda.stream)
         };
         Ok(Self {
             buffer,
             context: context.cast(),
+            stream: stream.cast(),
         })
+    }
+
+    /// FFmpeg's device context (borrowed), for decoders.
+    pub(crate) fn as_ptr(&self) -> *mut ffi::AVBufferRef {
+        self.buffer
     }
 
     /// Runs `f` with the context current on this thread.
@@ -318,6 +368,110 @@ impl Drop for Slot {
     }
 }
 
+/// Buffers that decoded CUDA frames are copied into for the converter,
+/// reused (a decoder's frames all have one size).
+#[derive(Default)]
+pub(crate) struct DecodeBuffers(Mutex<Vec<Slot>>);
+
+/// Free buffers kept for reuse.
+const KEPT_DECODE_BUFFERS: usize = 4;
+
+/// A decoded CUDA frame copied into a shared buffer; the buffer goes back
+/// to the pool when this drops.
+pub(crate) struct CopiedFrame<'a> {
+    pool: &'a DecodeBuffers,
+    slot: Option<Slot>,
+    pub layout: LinearLayout,
+}
+
+impl CopiedFrame<'_> {
+    pub fn buffer(&self) -> &SharedBuffer {
+        &self.slot.as_ref().expect("slot").buffer
+    }
+}
+
+impl Drop for CopiedFrame<'_> {
+    fn drop(&mut self) {
+        let mut free = self.pool.0.lock().expect("pool lock");
+        if free.len() < KEPT_DECODE_BUFFERS {
+            free.push(self.slot.take().expect("slot"));
+        }
+    }
+}
+
+impl DecodeBuffers {
+    /// Copies the planes of the decoded CUDA `frame` (2 planes, `format`)
+    /// into a buffer of the pool, on the GPU, and waits for the copy.
+    ///
+    /// # Safety
+    /// `frame` must be a CUDA frame of `device` with two planes in `format`.
+    pub(crate) unsafe fn copy<'a>(
+        &'a self,
+        gpu: &Arc<GpuDevice>,
+        device: &Arc<CudaDevice>,
+        frame: &frame::Video,
+        format: LinearFormat,
+    ) -> Result<CopiedFrame<'a>> {
+        let cuda = Cuda::get()?;
+        let (width, height) = (frame.width(), frame.height());
+        let layout = LinearLayout::packed(format, width, height, PITCH_ALIGNMENT);
+        let reused = {
+            let mut free = self.0.lock().expect("pool lock");
+            free.iter()
+                .position(|slot| slot.buffer.size() >= layout.size())
+                .map(|i| free.swap_remove(i))
+        };
+        let slot = match reused {
+            Some(slot) => slot,
+            None => Slot::new(gpu, device, layout.size())?,
+        };
+        let copied = CopiedFrame {
+            pool: self,
+            slot: Some(slot),
+            layout,
+        };
+        let pointer = copied.slot.as_ref().expect("slot").pointer;
+        let bytes = format.bytes_per_sample() as usize;
+        // Chroma rows hold Cb and Cr for every other column.
+        let row_bytes = width.next_multiple_of(2) as usize * bytes;
+        device.with(cuda, || {
+            for (plane, rows, offset) in [
+                (0, height, layout.luma_offset),
+                (1, format.chroma_rows(height), layout.chroma_offset),
+            ] {
+                // SAFETY: guaranteed by the caller.
+                let (source, pitch) = unsafe {
+                    let av = frame.as_ptr();
+                    ((*av).data[plane] as CuDevicePtr, (*av).linesize[plane])
+                };
+                let copy = Memcpy2D {
+                    src_memory_type: CU_MEMORYTYPE_DEVICE,
+                    src_device: source,
+                    src_pitch: pitch.max(0) as usize,
+                    dst_memory_type: CU_MEMORYTYPE_DEVICE,
+                    dst_device: pointer + offset,
+                    dst_pitch: layout.pitch as usize,
+                    width_in_bytes: row_bytes.min(layout.pitch as usize),
+                    height: rows as usize,
+                    ..Memcpy2D::default()
+                };
+                // SAFETY: both regions lie in live device memory; FFmpeg's
+                // stream orders the copy after NVDEC's output.
+                check(
+                    unsafe { (cuda.memcpy_2d_async)(&copy, device.stream) },
+                    "cuMemcpy2DAsync",
+                )?;
+            }
+            // SAFETY: a valid stream of the current context.
+            check(
+                unsafe { (cuda.stream_synchronize)(device.stream) },
+                "cuStreamSynchronize",
+            )
+        })?;
+        Ok(copied)
+    }
+}
+
 /// Frames' memory, shared with the frames FFmpeg holds.
 struct Pool {
     slots: Mutex<Vec<Arc<Slot>>>,
@@ -332,7 +486,7 @@ struct Release {
 }
 
 unsafe extern "C" fn release(opaque: *mut c_void, _data: *mut u8) {
-    // SAFETY: created by `CudaFrames::next` for this buffer, freed once.
+    // SAFETY: created by `CudaSink::next` for this buffer, freed once.
     let release = unsafe { Box::from_raw(opaque.cast::<Release>()) };
     release
         .pool
@@ -343,7 +497,7 @@ unsafe extern "C" fn release(opaque: *mut c_void, _data: *mut u8) {
 }
 
 /// NV12 (P010 with `deep`) CUDA frames whose memory the compositor writes.
-pub(crate) struct CudaFrames {
+pub(crate) struct CudaSink {
     gpu: Arc<GpuDevice>,
     device: Arc<CudaDevice>,
     frames: *mut ffi::AVBufferRef,
@@ -352,11 +506,14 @@ pub(crate) struct CudaFrames {
     pool: Arc<Pool>,
 }
 
-impl CudaFrames {
-    pub fn new(gpu: &Arc<GpuDevice>, width: u32, height: u32, deep: bool) -> Result<Self> {
-        let cuda = Cuda::get()?;
-        let ordinal = cuda.device_with_uuid(gpu.uuid())?;
-        let device = Arc::new(CudaDevice::new(ordinal)?);
+impl CudaSink {
+    pub fn new(
+        gpu: &Arc<GpuDevice>,
+        device: Arc<CudaDevice>,
+        width: u32,
+        height: u32,
+        deep: bool,
+    ) -> Result<Self> {
         // SAFETY: a valid CUDA device context; fields are set before init.
         let frames = unsafe {
             let mut frames = ffi::av_hwframe_ctx_alloc(device.buffer);
@@ -425,7 +582,7 @@ impl CudaFrames {
     }
 }
 
-impl Drop for CudaFrames {
+impl Drop for CudaSink {
     fn drop(&mut self) {
         // SAFETY: we own one reference. Frames FFmpeg still holds keep the
         // pool (and the CUDA device) alive.
@@ -433,7 +590,7 @@ impl Drop for CudaFrames {
     }
 }
 
-impl GpuFrames for CudaFrames {
+impl GpuSink for CudaSink {
     fn api(&self) -> &'static str {
         "CUDA"
     }

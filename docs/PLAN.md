@@ -223,14 +223,32 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
     - **Not zero copy:** writing P010 straight into Vulkan Video encoder images gave wrong pictures on NVIDIA 580 (chroma near zero, striped luma). Spec-correct 16-bit plane views, the planes' own 10-bit formats and staging copies all came out the same, while only an invalid 8-bit view happened to look right. The driver and the spec disagree about those planes, so HDR goes to NVENC through CUDA instead (decision 28). `NOX_HDR_VULKAN_ENCODE=1` tries Vulkan Video anyway (16-bit views, `output_yuv_deep`).
     - **Tested:** gray clips exported as PQ and HLG with NVENC and x265 land within 3 code values of the levels the SDR export's light implies. A PQ source passes through an HDR10 export unchanged. Tags and mastering data were checked with ffprobe and under the validation layer, and an export was made from the dialog with real input.
 
-28. **Hardware encoders take frames on the GPU, whatever their API** (`nox_media::hwenc`, `nox_gpu::interop`).
-    - **Shape:** each encoder API wants frames in its own memory. A backend (`GpuFrames`) owns the encoder's FFmpeg frames pool and lends each frame to the renderer as a `nox_gpu::GpuTarget`. The compositor writes Y'CbCr 4:2:0 into it (`Compositor::finish_to_gpu`), and the frame goes to FFmpeg as a hardware frame. `MediaWriter::write_gpu` and `Renderer::render_to_gpu` don't know which API it is.
+28. **Hardware decoders and encoders keep frames on the GPU, whatever their API** (`nox_media::hwaccel`, `nox_gpu::interop`).
+    - **Shape:** each API wants frames in its own memory. A backend moves them between that API and the device Nox renders with, both ways. Decoding turns a decoded hardware frame into a `nox_gpu::Input` for the converter (`with_gpu_input`). Encoding uses a sink (`GpuSink`), which owns the encoder's FFmpeg frames pool and lends each frame to the renderer as a `nox_gpu::GpuTarget`. The compositor writes Y'CbCr 4:2:0 into it (`Compositor::finish_to_gpu`), and the frame goes to FFmpeg as a hardware frame. `MediaWriter::write_gpu` and `Renderer::render_to_gpu` don't know which API it is.
+    - **One place for devices:** `Accel` holds FFmpeg's Vulkan device (shared with nox-gpu), and opens other APIs' devices on the same GPU when first needed and keeps them (CUDA, matched by UUID). Decoders, encoders, exports and encoder probing all take their devices from it; before, every export opened a CUDA device of its own. FFmpeg's `AVVkFrame` protocol (lock, semaphores, state write-back, the 64-bit access flags of FFmpeg 9) is one helper (`LockedFrame`) for both directions, and so are the plane views.
     - **Targets:** `Images` are another user's Vulkan images, synchronized by FFmpeg's semaphore protocol (Vulkan Video, decision 15). `Buffer` is a `SharedBuffer`, a dedicated device-local buffer whose memory is exported (`MemoryHandle::OpaqueFd`). `output_linear.comp` writes NV12 or P010 into it, pitch-linear (rows aligned to 256 bytes, chroma after luma), as whole 32-bit words. Ownership moves from and to `VK_QUEUE_FAMILY_EXTERNAL`, and the compositor waits for its work before returning.
     - **CUDA (NVENC):** libcuda is loaded at run time (libloading), so Nox runs without it. The CUDA device is the one whose UUID matches the Vulkan device's. FFmpeg creates the CUDA device and frames context, and the buffers are imported into its context (`cuImportExternalMemory`, dedicated) and mapped as device pointers. Each frame is an `AV_PIX_FMT_CUDA` frame over a buffer, and the `AVBufferRef` free callback returns the buffer to the pool once NVENC is done with it. NVENC registers each pointer once, so the pool is stable: it grows to as many frames as the encoder holds (32 at most). Without a CUDA driver or a matching device, NVENC falls back to frames from memory. `NOX_NVENC_MEMORY=1` forces that path.
-    - **Next APIs** fit the same shape, each with a `MemoryHandle` kind, a backend and its encoders in `hwenc::open`: VAAPI via DMA-BUF (`DRM_PRIME` frames, for AMD and Intel on Linux), D3D11 via shared NT handles (AMF, QSV and NVENC on Windows), and VideoToolbox via IOSurface. Decoders could share frames the same way in reverse.
+    - **Decoding** (`HwDecode`, chosen per file when it opens):
+      - Vulkan Video, if the device's Vulkan decoder handles the codec (`HwDevice::decode_operations`) and the format is 4:2:0. Frames are used in place.
+      - Otherwise NVDEC, if FFmpeg has it for the codec and a CUDA device matches. NVDEC fills Vulkan Video's gaps: 4:2:2 from cameras on recent GPUs, and codecs Vulkan Video lacks. Each decoded CUDA frame is copied once on the GPU (`cuMemcpy2DAsync` on FFmpeg's CUDA stream) into a pooled `SharedBuffer`. The converter reads it as `Input::Buffer`: it acquires the buffer from the external queue family, copies both planes into its own plane images, and releases the buffer again. NV12, P010, NV16 and P210 (4:2:2) are supported.
+      - Otherwise FFmpeg's choice, which falls back to software.
+      - `NOX_DECODE=auto|software|vulkan|cuda` forces a choice, and `VideoDecoder::open_with` takes one.
+    - **Decoding speed:** on 4K60 H.264, decoding, conversion and compositing take 1.8 ms per frame with NVDEC, the same as Vulkan Video and less than software decoding with a CPU upload (2.7 ms). The copy into the shared buffer takes 0.2 ms.
+    - **4:2:2:** NVDEC on the RTX 5060 with driver 580 decodes 4:2:2 10-bit HEVC with FFmpeg 9 (P210 frames), which the packages ship; the system's FFmpeg 8.0 refuses it. Tested against FFmpeg 9: the picture matches software decoding within 1 code value.
+    - **Next APIs** fit the same shape, each with a `MemoryHandle` kind, a backend, its device in `Accel`, and its encoders in `open_sink`:
+      - VAAPI via DMA-BUF (`DRM_PRIME` frames, for AMD and Intel on Linux). The viewer's DRM-modifier code would need an import direction.
+      - D3D11 via shared NT handles (D3D11VA decoding; AMF, QSV and NVENC on Windows).
+      - VideoToolbox via IOSurface.
     - **Speed:** 4K60 HDR10 to `hevc_nvenc` went from 17 fps (readback and swscale) to 108 fps (RTX 5060, release). The output matches the memory path (PSNR 56 dB, the same MaxCLL/MaxFALL). It's also faster than Vulkan Video's SDR zero-copy path at 57 fps.
     - **Choosing an encoder** (asked for): the export dialog's Encoder list offers "Automatic" (the first that works, best first) and every encoder that works on this system for the chosen format and dynamic range. A short note under the list says what the chosen encoder is good at. Encoders can be compiled into FFmpeg without the hardware or driver they need, so `nox_media::probe_encoders` opens each one at 1080p. `nox_engine::available_encoders` probes every codec × SDR/HDR once (about 1.7 s, on a thread while the dialog says it's checking) and caches the result. The choice goes to `OutputSettings::encoder`. `nox-cli encoders` lists them, and `nox-cli render --encoder NAME` uses one. On the development machine: H.264 Vulkan Video, NVENC and x264; HEVC Vulkan Video, NVENC and x265 (HDR: NVENC and x265); ProRes ffmpeg's `prores_ks`.
-    - **Tested:** NV12 through CUDA (`nvenc_encode_from_gpu_memory`) and HDR10/HLG through CUDA (`hdr_exports_encode_pq_and_hlg`, levels within 3 codes, MaxCLL/MaxFALL within 2 nits), with no validation layer messages.
+    - **Tested:**
+      - Encoding: NV12 through CUDA (`nvenc_encode_from_gpu_memory`), and HDR10/HLG through CUDA (`hdr_exports_encode_pq_and_hlg`: levels within 3 codes, MaxCLL/MaxFALL within 2 nits).
+      - Decoding:
+        - `nvdec_decode_matches_software`: NVDEC output is bit-exact.
+        - `nvdec_frames_convert_on_the_gpu`: frames through the shared buffer convert exactly like downloaded ones.
+        - `automatic_decoding_picks_the_backend`: Vulkan Video for 4:2:0, never for 4:2:2.
+        - `linear_buffers_round_trip`: compositor → NV12/P010 buffer → converter, on the GPU.
+      - None of these produce validation layer messages beyond the allowlisted FFmpeg ones.
 
 29. **Packages: Flatpak, self-contained ZIPs, a Windows installer** (asked for; `xtask`, `packaging/`, `.github/workflows`).
     - **App identity:** the app ID is `io.github.feliwir.Nox` (a GitHub ID the project owns, as Flathub requires). `data/` has the desktop entry, AppStream metainfo with a screenshot, a MIME type for `.otio` projects, and the icon: a crescent moon over a timeline, as SVG, as a symbolic SVG and as a Windows `.ico`. The GResource bundle carries the icon too, for running uninstalled.
@@ -304,6 +322,7 @@ Windows installers and the macOS app are built by `.github/workflows/release.yml
 | `NOX_GPU` | Vulkan device: index or name substring |
 | `NOX_PRESENT=readback` | turn off DMA-BUF presentation |
 | `NOX_NVENC_MEMORY=1` | NVENC takes frames from memory instead of through CUDA |
+| `NOX_DECODE` | `auto` (default), `software`, `vulkan` or `cuda` (NVDEC): which hardware decodes video |
 | `NOX_HDR_VULKAN_ENCODE=1` | allow Vulkan Video encoders for HDR (wrong output on NVIDIA 580) |
 | `NOX_AUDIO_DEVICE` | output device by name substring; `none` plays without audio (wall clock). For tests, `Discard all samples` is ALSA's null device |
 | `NOX_CACHE_MB` | frame cache size (default 768) |
@@ -417,6 +436,7 @@ Closing the window during playback crashed: a SIGSEGV in the NVIDIA driver on th
 - Variable-frame-rate sources (GNOME screencasts) map frame indices approximately.
 - Uncached backward jumps in long-GOP footage still take 20–100 ms (1 s when a 4K decoder first opens and seeks).
 - FFmpeg's own log lines go to stderr instead of the tracing log.
+- `scrubbing_previews_and_interrupts` (nox-engine) fails about one run in seven. It requests frame 150 and then frame 3 at once, and sometimes 150 is still delivered exactly instead of being abandoned. The interruption isn't checked somewhere on the way to the first decoded frame.
 - Dropping folders onto the media pool isn't supported.
 - Not built or tested on Windows or macOS yet. The planned Vulkan→OpenGL interop path (for Windows) doesn't exist yet.
 - Thumbnails (`Converter::convert`) stay display-referred. They tone-map HDR but don't convert the primaries of wide-gamut SDR sources, so a BT.2020 SDR clip's thumbnail is more saturated than the viewer shows it.

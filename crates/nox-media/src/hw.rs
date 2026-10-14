@@ -99,6 +99,17 @@ impl HwDevice {
         }
     }
 
+    /// The codecs Vulkan Video decodes on this device.
+    pub fn decode_operations(&self) -> vk::VideoCodecOperationFlagsKHR {
+        let ctx = self.vulkan_context();
+        ctx.qf[..ctx.nb_qf.max(0) as usize]
+            .iter()
+            .filter(|qf| qf.flags & vk::QueueFlags::VIDEO_DECODE_KHR.as_raw() != 0)
+            .fold(vk::VideoCodecOperationFlagsKHR::empty(), |all, qf| {
+                all | vk::VideoCodecOperationFlagsKHR::from_raw(qf.video_caps as u32)
+            })
+    }
+
     fn gpu_device(&self) -> Result<GpuDevice> {
         let ctx = self.vulkan_context();
         let families = &ctx.qf[..ctx.nb_qf.max(0) as usize];

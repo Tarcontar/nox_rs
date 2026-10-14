@@ -27,6 +27,10 @@ case "$(uname -s)" in
         options="$options --enable-vulkan --enable-vaapi"
         with_nvenc=yes ;;
     MINGW*|MSYS*|CYGWIN*)
+        # MSYS2's CLANG environments have no gcc, which configure defaults
+        # to; another one on PATH (CI's runner has MinGW's) can't link
+        # against MSYS2's libraries.
+        options="$options --cc=clang --cxx=clang++"
         options="$options --enable-vulkan --enable-d3d11va --enable-d3d12va"
         # NVENC exists for x86-64 only.
         [ "$(uname -m)" = x86_64 ] && with_nvenc=yes || with_nvenc=no ;;

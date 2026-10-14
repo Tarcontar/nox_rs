@@ -174,7 +174,8 @@ pub fn dist(dist: &Path) -> Result<PathBuf> {
     }
 
     // Sign every binary (relinking invalidated their signatures), then the
-    // app.
+    // app. codesign counts everything in MacOS but the main executable as
+    // nested code, so the nox-cli launcher script needs its own signature.
     let mut binaries: Vec<PathBuf> = std::fs::read_dir(&frameworks)
         .map_err(|e| e.to_string())?
         .filter_map(|e| Some(e.ok()?.path()))
@@ -185,6 +186,7 @@ pub fn dist(dist: &Path) -> Result<PathBuf> {
             .filter(|o| !o.starts_with(&frameworks))
             .cloned(),
     );
+    binaries.push(contents.join("MacOS/nox-cli"));
     for binary in &binaries {
         run(Command::new("codesign")
             .args(["--force", "--sign", "-"])

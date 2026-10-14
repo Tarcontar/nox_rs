@@ -6,13 +6,13 @@ mod common;
 use common::fixture;
 use nox_color::hdr::{Gamut, HdrTransfer};
 use nox_gpu::Converter;
-use nox_media::{HwDevice, VideoDecoder, ffmpeg, tone_mapping, with_cpu_frame};
+use nox_media::{Accel, VideoDecoder, ffmpeg, tone_mapping, with_cpu_frame};
 use std::sync::{Arc, OnceLock};
 
-fn gpu() -> Option<(HwDevice, Arc<nox_gpu::GpuDevice>)> {
-    static GPU: OnceLock<Option<(HwDevice, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
-    GPU.get_or_init(|| match HwDevice::vulkan() {
-        Ok(gpu) => Some(gpu),
+fn gpu() -> Option<(Accel, Arc<nox_gpu::GpuDevice>)> {
+    static GPU: OnceLock<Option<(Accel, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
+    GPU.get_or_init(|| match Accel::new() {
+        Ok(accel) => Some((accel.clone(), accel.gpu().clone())),
         Err(err) => {
             eprintln!("skipping GPU tests: {err}");
             None

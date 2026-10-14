@@ -15,6 +15,7 @@ use nox_color::{InputTransform, Matrix3x4};
 use std::sync::Arc;
 
 use crate::export::{DmabufFormat, DmabufFrame, ExportPool};
+use crate::interop::{LinearLayout, SharedBuffer};
 use crate::{Error, GpuDevice, Image, Result};
 
 const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ycbcr_to_rgb.comp.spv"));
@@ -153,15 +154,59 @@ pub struct VkFrame {
     pub images: Vec<ImageSync>,
 }
 
+/// A 4:2:0 or 4:2:2 frame in a buffer shared with another API (e.g.
+/// decoded by NVDEC and copied there), read on the GPU. The converter
+/// copies its planes into images of its own, acquiring the buffer from and
+/// releasing it to the external queue family; the copy has completed when
+/// `convert` returns, so the other API may reuse the buffer.
+pub struct BufferFrame<'b> {
+    pub buffer: &'b SharedBuffer,
+    /// Where the planes are; `layout.width` and `height` are the coded size.
+    pub layout: LinearLayout,
+    /// Picture size (at most the coded size).
+    pub width: u32,
+    pub height: u32,
+    /// Maps normalized texel values to R'G'B'; see `nox_color::ycbcr`.
+    pub matrix: Matrix3x4,
+    /// See `CpuFrame::chroma_offset`.
+    pub chroma_offset: [f32; 2],
+    pub color: InputTransform,
+}
+
+impl BufferFrame<'_> {
+    /// Texel formats of the luma and chroma planes.
+    fn plane_formats(&self) -> [PlaneFormat; 2] {
+        match self.layout.format.bytes_per_sample() {
+            1 => [PlaneFormat::R8, PlaneFormat::Rg8],
+            _ => [PlaneFormat::R16, PlaneFormat::Rg16],
+        }
+    }
+
+    /// (format, width, height) of the planes.
+    fn shape(&self) -> Vec<(PlaneFormat, u32, u32)> {
+        let [luma, chroma] = self.plane_formats();
+        let (w, h) = (self.layout.width, self.layout.height);
+        let chroma_rows = self.layout.format.chroma_rows(h);
+        vec![(luma, w, h), (chroma, w.div_ceil(2), chroma_rows)]
+    }
+}
+
 /// What `Converter` converts.
 pub enum Input<'f, 'a> {
     Cpu(&'f CpuFrame<'a>),
     Vulkan(&'f mut VkFrame),
+    Buffer(&'f BufferFrame<'a>),
 }
 
 impl<'f, 'a> From<&'f CpuFrame<'a>> for Input<'f, 'a> {
     fn from(frame: &'f CpuFrame<'a>) -> Self {
         Self::Cpu(frame)
+    }
+}
+
+impl<'f, 'a> From<&'f BufferFrame<'a>> for Input<'f, 'a> {
+    fn from(frame: &'f BufferFrame<'a>) -> Self {
+        Self::Buffer(frame)
     }
 }
 
@@ -207,6 +252,16 @@ impl Input<'_, '_> {
                 chroma_offset: f.chroma_offset,
                 color: f.color,
             },
+            Input::Buffer(f) => Params {
+                width: f.width,
+                height: f.height,
+                extent: (f.layout.width, f.layout.height),
+                layout: Layout::TwoPlane,
+                swap_chroma: false,
+                matrix: f.matrix,
+                chroma_offset: f.chroma_offset,
+                color: f.color,
+            },
         }
     }
 }
@@ -243,6 +298,7 @@ pub(crate) struct GpuBuffer {
 struct Inputs {
     shape: Vec<(PlaneFormat, u32, u32)>,
     planes: Vec<GpuImage>,
+    /// For CPU frames; empty for buffer frames, copied on the GPU.
     staging: Vec<GpuBuffer>,
 }
 
@@ -542,6 +598,18 @@ impl Converter {
                 let views = self.plane_views(frame)?;
                 (views.clone(), views)
             }
+            Input::Buffer(frame) => {
+                self.ensure_inputs(frame.shape(), false)?;
+                let views = self
+                    .inputs
+                    .as_ref()
+                    .expect("inputs")
+                    .planes
+                    .iter()
+                    .map(|p| p.view)
+                    .collect();
+                (views, Vec::new())
+            }
         };
         let result = self.record_and_submit(input, &params, &plane_views, width, height, &target);
         for view in temporary_views {
@@ -558,10 +626,7 @@ impl Converter {
             .iter()
             .map(|p| (p.format, p.width, p.height))
             .collect();
-        if self.inputs.as_ref().is_none_or(|i| i.shape != shape) {
-            self.destroy_inputs();
-            self.inputs = Some(self.create_inputs(shape)?);
-        }
+        self.ensure_inputs(shape, true)?;
         let inputs = self.inputs.as_mut().expect("inputs");
         for (plane, staging) in frame.planes.iter().zip(&mut inputs.staging) {
             let dst = staging
@@ -577,6 +642,19 @@ impl Converter {
             {
                 dst_row.copy_from_slice(&plane.data[y * plane.stride..][..row]);
             }
+        }
+        Ok(())
+    }
+
+    /// Plane images of this shape (and staging buffers, for CPU frames).
+    fn ensure_inputs(&mut self, shape: Vec<(PlaneFormat, u32, u32)>, staging: bool) -> Result<()> {
+        if self
+            .inputs
+            .as_ref()
+            .is_none_or(|i| i.shape != shape || (staging && i.staging.is_empty()))
+        {
+            self.destroy_inputs();
+            self.inputs = Some(self.create_inputs(shape, staging)?);
         }
         Ok(())
     }
@@ -724,6 +802,87 @@ impl Converter {
                         .dst_queue_family_index(dst_family)
                     }));
                 }
+                Input::Buffer(frame) => {
+                    let inputs = self.inputs.as_ref().expect("inputs");
+                    // Acquire the buffer from the other API (which finished
+                    // writing before handing it over); planes become copy
+                    // destinations.
+                    let acquire = vk::BufferMemoryBarrier2::default()
+                        .buffer(frame.buffer.buffer)
+                        .size(vk::WHOLE_SIZE)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+                        .dst_queue_family_index(own_family)
+                        .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ);
+                    let to_transfer: Vec<_> = inputs
+                        .planes
+                        .iter()
+                        .map(|p| {
+                            image_barrier(
+                                p.image,
+                                vk::ImageLayout::UNDEFINED,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            )
+                            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        })
+                        .collect();
+                    device.cmd_pipeline_barrier2(
+                        cmd,
+                        &vk::DependencyInfo::default()
+                            .buffer_memory_barriers(std::slice::from_ref(&acquire))
+                            .image_memory_barriers(&to_transfer),
+                    );
+                    let layout = &frame.layout;
+                    for ((image, &(format, width, height)), offset) in inputs
+                        .planes
+                        .iter()
+                        .zip(&inputs.shape)
+                        .zip([layout.luma_offset, layout.chroma_offset])
+                    {
+                        let region = vk::BufferImageCopy::default()
+                            .buffer_offset(offset)
+                            // In texels of the plane's format.
+                            .buffer_row_length(layout.pitch / format.bytes_per_texel() as u32)
+                            .image_subresource(color_layers())
+                            .image_extent(vk::Extent3D {
+                                width,
+                                height,
+                                depth: 1,
+                            });
+                        device.cmd_copy_buffer_to_image(
+                            cmd,
+                            frame.buffer.buffer,
+                            image.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &[region],
+                        );
+                    }
+                    // Back to the other API once copied.
+                    let release = vk::BufferMemoryBarrier2::default()
+                        .buffer(frame.buffer.buffer)
+                        .size(vk::WHOLE_SIZE)
+                        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                        .src_queue_family_index(own_family)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL);
+                    device.cmd_pipeline_barrier2(
+                        cmd,
+                        &vk::DependencyInfo::default()
+                            .buffer_memory_barriers(std::slice::from_ref(&release)),
+                    );
+                    barriers.extend(inputs.planes.iter().map(|p| {
+                        image_barrier(
+                            p.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        )
+                        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                        .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                    }));
+                }
             }
             device.cmd_pipeline_barrier2(
                 cmd,
@@ -801,7 +960,7 @@ impl Converter {
 
             // External images: wait for the decoder, then signal the next value.
             let (waits, signals): (Vec<_>, Vec<_>) = match &*input {
-                Input::Cpu(_) => (Vec::new(), Vec::new()),
+                Input::Cpu(_) | Input::Buffer(_) => (Vec::new(), Vec::new()),
                 Input::Vulkan(frame) => frame
                     .images
                     .iter()
@@ -848,7 +1007,11 @@ impl Converter {
         Ok(())
     }
 
-    fn create_inputs(&self, shape: Vec<(PlaneFormat, u32, u32)>) -> Result<Inputs> {
+    fn create_inputs(
+        &self,
+        shape: Vec<(PlaneFormat, u32, u32)>,
+        with_staging: bool,
+    ) -> Result<Inputs> {
         let mut planes = Vec::new();
         let mut staging = Vec::new();
         for &(format, width, height) in &shape {
@@ -858,6 +1021,9 @@ impl Converter {
                 height,
                 vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             )?);
+            if !with_staging {
+                continue;
+            }
             let size = width as u64 * height as u64 * format.bytes_per_texel() as u64;
             staging.push(self.create_buffer(
                 size,
@@ -1137,9 +1303,21 @@ fn validate(input: &Input<'_, '_>, width: u32, height: u32) -> Result<()> {
     let plane_count = match input {
         Input::Cpu(frame) => frame.planes.len(),
         Input::Vulkan(frame) => frame.planes.len(),
+        Input::Buffer(_) => 2,
     };
     if plane_count != params.layout.plane_count() {
         return Err(Error::InvalidFrame("plane count does not match layout"));
+    }
+    if let Input::Buffer(frame) = input {
+        let layout = &frame.layout;
+        if frame.width > layout.width
+            || frame.height > layout.height
+            || layout.size() > frame.buffer.size()
+            || !layout.pitch.is_multiple_of(4)
+        {
+            return Err(Error::InvalidFrame("buffer frame doesn't fit its buffer"));
+        }
+        return Ok(());
     }
     let Input::Cpu(frame) = input else {
         return Ok(());

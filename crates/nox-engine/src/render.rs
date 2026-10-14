@@ -4,7 +4,7 @@
 use nox_gpu::{
     BlendMode, Compositor, FrameLight, GpuTarget, Image, LayerStyle, Placement, Rect, Transform,
 };
-use nox_media::{HwDevice, VideoDecoder};
+use nox_media::{Accel, VideoDecoder};
 use nox_project::{Time, Timeline};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,7 +62,7 @@ impl DecoderPool {
         &mut self,
         path: &Path,
         time: Time,
-        hw: Option<&HwDevice>,
+        accel: Option<&Accel>,
     ) -> nox_media::Result<(&mut VideoDecoder, i64)> {
         self.clock += 1;
         let frame_start = self.frame_start;
@@ -98,7 +98,7 @@ impl DecoderPool {
                 tracing::debug!("opening decoder for {}", path.display());
                 self.decoders.push(PooledDecoder {
                     path: path.to_owned(),
-                    decoder: VideoDecoder::open(path, hw)?,
+                    decoder: VideoDecoder::open(path, accel)?,
                     used: 0,
                 });
                 self.decoders.len() - 1
@@ -123,7 +123,7 @@ enum PresentPath {
 }
 
 pub(crate) struct Renderer {
-    gpu: Option<(HwDevice, Compositor)>,
+    gpu: Option<(Accel, Compositor)>,
     decoders: DecoderPool,
     dmabuf_allowed: Arc<AtomicBool>,
     /// Why DMA-BUF is not used, if it isn't.
@@ -139,14 +139,16 @@ impl Renderer {
     pub fn new(dmabuf_formats: &[(u32, u64)], dmabuf_allowed: Arc<AtomicBool>) -> Self {
         let mut readback_reason =
             "viewer offered no DMA-BUF formats (NOX_PRESENT=readback or unsupported)".to_owned();
-        let gpu = match HwDevice::vulkan().and_then(|(hw, gpu)| Ok((hw, Compositor::new(gpu)?))) {
-            Ok((hw, mut compositor)) => {
+        let gpu = match Accel::new()
+            .and_then(|accel| Ok((accel.clone(), Compositor::new(accel.gpu().clone())?)))
+        {
+            Ok((accel, mut compositor)) => {
                 if !dmabuf_formats.is_empty()
                     && let Err(err) = compositor.enable_dmabuf(dmabuf_formats)
                 {
                     readback_reason = format!("DMA-BUF export unavailable: {err}");
                 }
-                Some((hw, compositor))
+                Some((accel, compositor))
             }
             Err(err) => {
                 tracing::warn!("no Vulkan device: {err}");
@@ -206,13 +208,13 @@ impl Renderer {
     /// exactly.
     pub fn decode_cost(&mut self, timeline: &Timeline, frame: i64) -> i64 {
         self.decoders.begin_frame();
-        let hw = self.gpu.as_ref().map(|(hw, _)| hw.clone());
+        let accel = self.gpu.as_ref().map(|(accel, _)| accel.clone());
         let mut cost = 0;
         for (path, time, ..) in Self::layers(timeline, frame) {
             if self.failed.contains(&path) {
                 continue;
             }
-            if let Ok((decoder, index)) = self.decoders.get(&path, time, hw.as_ref()) {
+            if let Ok((decoder, index)) = self.decoders.get(&path, time, accel.as_ref()) {
                 cost = cost.max(decoder.decode_cost(index));
             }
         }
@@ -281,8 +283,9 @@ impl Renderer {
         }
     }
 
-    pub fn hw_device(&self) -> Option<HwDevice> {
-        self.gpu.as_ref().map(|(hw, _)| hw.clone())
+    /// The GPU devices decoders and encoders use, if there's a GPU.
+    pub fn accel(&self) -> Option<Accel> {
+        self.gpu.as_ref().map(|(accel, _)| accel.clone())
     }
 
     /// Renders sequence frame `frame` exactly into `target`, a hardware
@@ -310,13 +313,6 @@ impl Renderer {
         Ok(compositor.finish_to_gpu(target, measure)?)
     }
 
-    /// The GPU frames are rendered on, if any.
-    pub fn gpu_device(&self) -> Option<Arc<nox_gpu::GpuDevice>> {
-        self.gpu
-            .as_ref()
-            .map(|(_, compositor)| compositor.gpu().clone())
-    }
-
     /// Decodes and places every layer on the GPU (output pending).
     fn compose(
         &mut self,
@@ -327,7 +323,7 @@ impl Renderer {
         quality: Quality,
         stop: &dyn Fn() -> bool,
     ) -> nox_media::Result<()> {
-        let (hw, compositor) = self.gpu.as_mut().expect("gpu");
+        let (accel, compositor) = self.gpu.as_mut().expect("gpu");
         compositor.begin(width, height)?;
         for (path, time, opacity, mode, grade, transform, dip) in layers {
             // A dip's color goes below the picture or above it.
@@ -340,7 +336,7 @@ impl Renderer {
                 }
                 let decoded =
                     self.decoders
-                        .get(path, *time, Some(hw))
+                        .get(path, *time, Some(accel))
                         .and_then(|(decoder, index)| {
                             let still = decoder.is_still();
                             decode(decoder, index, quality, stop).map(|frame| (frame, still))
@@ -367,12 +363,12 @@ impl Renderer {
                     // Stills are converted once and kept on the GPU.
                     let key = still_key(path);
                     if !compositor.try_cached_layer(key, rect, style) {
-                        nox_media::with_gpu_input(&decoded, |input| {
+                        nox_media::with_gpu_input(&decoded, Some(&*accel), |input| {
                             compositor.add_cached_layer(key, input, rect, style)
                         })??;
                     }
                 } else {
-                    nox_media::with_gpu_input(&decoded, |input| {
+                    nox_media::with_gpu_input(&decoded, Some(&*accel), |input| {
                         compositor.add_layer(input, rect, style)
                     })??;
                 }
@@ -525,7 +521,7 @@ fn add_color(
     let style = LayerStyle::blend(dip.opacity as f32, BlendMode::Normal);
     if !compositor.try_cached_layer(key, rect, style) {
         let frame = nox_media::solid_frame(rgb);
-        nox_media::with_gpu_input(&frame, |input| {
+        nox_media::with_gpu_input(&frame, None, |input| {
             compositor.add_cached_layer(key, input, rect, style)
         })??;
     }

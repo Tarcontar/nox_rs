@@ -2,15 +2,61 @@
 //!
 //! `VideoDecoder::frame_at` returns the frame shown at a given frame index:
 //! it decodes forward for nearby requests (playback, scrubbing forward) and
-//! seeks to the preceding keyframe otherwise. With a `HwDevice`, codecs that
-//! FFmpeg can decode with Vulkan Video produce `AV_PIX_FMT_VULKAN` frames;
-//! if hardware initialization fails FFmpeg falls back to software decoding.
+//! seeks to the preceding keyframe otherwise.
+//!
+//! With an `Accel`, video is decoded on the GPU where possible (`HwDecode`):
+//! with Vulkan Video (`AV_PIX_FMT_VULKAN` frames, used in place) when the
+//! device's Vulkan decoder handles the codec and the format is 4:2:0, else
+//! with NVDEC (`AV_PIX_FMT_CUDA` frames, copied once on the GPU; it also
+//! decodes 4:2:2 on recent GPUs, and codecs Vulkan Video lacks). If
+//! hardware initialization fails, FFmpeg falls back to software decoding.
 
 use ffmpeg::{codec, ffi, format, frame, media};
 use nox_project::{Rational, Time};
 use std::path::{Path, PathBuf};
 
-use crate::{Error, HwDevice, Result, rational};
+use crate::{Accel, Error, Result, rational};
+use nox_gpu::vk;
+
+/// Which hardware decodes video (`VideoDecoder::open_with`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HwDecode {
+    /// The best that handles the stream: Vulkan Video, NVDEC, software.
+    #[default]
+    Auto,
+    Software,
+    Vulkan,
+    /// NVDEC, through CUDA.
+    Cuda,
+}
+
+impl HwDecode {
+    /// `NOX_DECODE` (`auto`, `software`, `vulkan`, `cuda`), else `Auto`.
+    pub fn from_env() -> Self {
+        match std::env::var("NOX_DECODE").as_deref() {
+            Ok("software") => Self::Software,
+            Ok("vulkan") => Self::Vulkan,
+            Ok("cuda") => Self::Cuda,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// The hardware a decoder was opened with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Vulkan,
+    Cuda,
+}
+
+impl Backend {
+    fn pixel_format(self) -> ffi::AVPixelFormat {
+        match self {
+            Self::Vulkan => ffi::AVPixelFormat::AV_PIX_FMT_VULKAN,
+            Self::Cuda => ffi::AVPixelFormat::AV_PIX_FMT_CUDA,
+        }
+    }
+}
 
 /// Requests at most this many seconds ahead decode forward instead of seeking.
 const FORWARD_DECODE_SECONDS: f64 = 2.0;
@@ -37,7 +83,14 @@ pub struct VideoDecoder {
 }
 
 impl VideoDecoder {
-    pub fn open(path: &Path, hw: Option<&HwDevice>) -> Result<Self> {
+    /// Opens `path`, decoding on the GPU of `accel` as `NOX_DECODE` says
+    /// (by default the best way available).
+    pub fn open(path: &Path, accel: Option<&Accel>) -> Result<Self> {
+        Self::open_with(path, accel, HwDecode::from_env())
+    }
+
+    /// Opens `path`, decoding as `hw` says (where `accel` and FFmpeg can).
+    pub fn open_with(path: &Path, accel: Option<&Accel>, hw: HwDecode) -> Result<Self> {
         crate::init();
         let input = format::input(path)?;
         let still = crate::probe::is_image_demuxer(input.format().name());
@@ -57,15 +110,27 @@ impl VideoDecoder {
 
         let mut context = codec::Context::from_parameters(stream.parameters())?;
         let codec = codec::decoder::find(context.id()).ok_or(ffmpeg::Error::DecoderNotFound)?;
-        match hw.filter(|_| supports_vulkan(&codec)) {
+        // SAFETY: a valid context, filled from the stream's parameters.
+        let coded = format::Pixel::from(unsafe { (*context.as_ptr()).pix_fmt });
+        let backend = accel.and_then(|accel| choose_backend(accel, &codec, coded, hw));
+        match (accel, backend) {
             // SAFETY: the context is not opened yet; FFmpeg takes its own
-            // reference to the device.
-            Some(hw) => unsafe {
+            // reference to the device. `opaque` carries the pixel format
+            // `prefer_hardware` picks.
+            (Some(accel), Some(backend)) => unsafe {
+                let device = match backend {
+                    Backend::Vulkan => accel.vulkan().as_ptr(),
+                    Backend::Cuda => accel.cuda()?.as_ptr(),
+                };
                 let ctx = context.as_mut_ptr();
-                (*ctx).hw_device_ctx = ffi::av_buffer_ref(hw.as_ptr());
-                (*ctx).get_format = Some(prefer_vulkan);
+                (*ctx).hw_device_ctx = ffi::av_buffer_ref(device);
+                (*ctx).opaque = backend.pixel_format() as isize as *mut std::ffi::c_void;
+                (*ctx).get_format = Some(prefer_hardware);
+                // Frames Nox holds on to (the last and the next one) on
+                // top of what the decoder needs.
+                (*ctx).extra_hw_frames = 4;
             },
-            None => context.set_threading(codec::threading::Config::kind(
+            _ => context.set_threading(codec::threading::Config::kind(
                 codec::threading::Type::Frame,
             )),
         }
@@ -377,10 +442,10 @@ impl VideoDecoder {
     fn log_decode_path(&mut self, frame: &frame::Video) {
         if !self.logged_path {
             self.logged_path = true;
-            let path = if frame.format() == format::Pixel::VULKAN {
-                "Vulkan Video"
-            } else {
-                "software"
+            let path = match frame.format() {
+                format::Pixel::VULKAN => "Vulkan Video",
+                format::Pixel::CUDA => "NVDEC (CUDA)",
+                _ => "software",
             };
             tracing::info!("decoding {} with {path}", self.decoder.id().name());
         }
@@ -397,7 +462,57 @@ pub(crate) fn reference(frame: &frame::Video) -> frame::Video {
     }
 }
 
-fn supports_vulkan(codec: &ffmpeg::Codec) -> bool {
+/// The hardware to decode `codec` (coded as `format`) with, if any.
+fn choose_backend(
+    accel: &Accel,
+    codec: &ffmpeg::Codec,
+    format: format::Pixel,
+    hw: HwDecode,
+) -> Option<Backend> {
+    let vulkan = supports(codec, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN);
+    let cuda = || {
+        supports(codec, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA)
+            && accel
+                .cuda()
+                .inspect_err(|err| tracing::debug!("no NVDEC: {err}"))
+                .is_ok()
+    };
+    match hw {
+        HwDecode::Software => None,
+        HwDecode::Vulkan => vulkan.then_some(Backend::Vulkan),
+        HwDecode::Cuda => cuda().then_some(Backend::Cuda),
+        HwDecode::Auto => {
+            if vulkan && vulkan_decodes(accel, codec.id(), format) {
+                Some(Backend::Vulkan)
+            } else if cuda() {
+                Some(Backend::Cuda)
+            } else {
+                // Let FFmpeg try (it falls back to software).
+                vulkan.then_some(Backend::Vulkan)
+            }
+        }
+    }
+}
+
+/// Whether the device's Vulkan decoder handles the codec and format (as far
+/// as we can tell before decoding: Vulkan Video decoders do 4:2:0).
+fn vulkan_decodes(accel: &Accel, id: codec::Id, format: format::Pixel) -> bool {
+    let operations = accel.vulkan().decode_operations();
+    let codec = match id {
+        codec::Id::H264 => operations.contains(vk::VideoCodecOperationFlagsKHR::DECODE_H264),
+        codec::Id::HEVC => operations.contains(vk::VideoCodecOperationFlagsKHR::DECODE_H265),
+        codec::Id::AV1 => operations.contains(vk::VideoCodecOperationFlagsKHR::DECODE_AV1),
+        // Others (VP9) as FFmpeg says.
+        _ => true,
+    };
+    let subsampled_420 = format
+        .descriptor()
+        .is_none_or(|d| d.log2_chroma_w() == 1 && d.log2_chroma_h() == 1);
+    codec && (format == format::Pixel::None || subsampled_420)
+}
+
+/// Whether FFmpeg can decode `codec` with a device of this type.
+fn supports(codec: &ffmpeg::Codec, device_type: ffi::AVHWDeviceType) -> bool {
     (0..)
         .map_while(|i| {
             // SAFETY: returns null past the last config.
@@ -406,22 +521,24 @@ fn supports_vulkan(codec: &ffmpeg::Codec) -> bool {
             (!config.is_null()).then(|| unsafe { &*config })
         })
         .any(|config| {
-            config.device_type == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN
+            config.device_type == device_type
                 && config.methods & ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0
         })
 }
 
-/// `get_format` callback: Vulkan if offered, otherwise FFmpeg's default
-/// (software) choice.
-unsafe extern "C" fn prefer_vulkan(
+/// `get_format` callback: the hardware format in the context's `opaque` if
+/// offered, otherwise FFmpeg's default (software) choice.
+unsafe extern "C" fn prefer_hardware(
     ctx: *mut ffi::AVCodecContext,
     formats: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
-    // SAFETY: FFmpeg passes a list terminated by AV_PIX_FMT_NONE.
+    // SAFETY: FFmpeg passes a list terminated by AV_PIX_FMT_NONE; `opaque`
+    // holds a pixel format (set in `open_with`).
     unsafe {
+        let wanted = (*ctx).opaque as isize as i32;
         let mut format = formats;
         while *format != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
-            if *format == ffi::AVPixelFormat::AV_PIX_FMT_VULKAN {
+            if *format as i32 == wanted {
                 return *format;
             }
             format = format.add(1);
