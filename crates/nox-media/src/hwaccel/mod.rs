@@ -342,3 +342,45 @@ fn ycbcr_matrix(deep: bool) -> nox_color::Matrix3x4 {
         ycbcr::rgb_to_ycbcr(Coefficients::BT709, Quantization::eight_bit(false))
     }
 }
+
+/// A frames context for `format` frames on `device`, holding NV12 (P010
+/// when `deep`) at `width` × `height`; `configure` sets the API's own
+/// fields before it's initialized.
+///
+/// # Safety
+/// `device` must be a device context of `format`'s API.
+pub(super) unsafe fn frames_context(
+    device: *mut ffi::AVBufferRef,
+    format: ffi::AVPixelFormat,
+    width: u32,
+    height: u32,
+    deep: bool,
+    configure: impl FnOnce(*mut ffi::AVHWFramesContext),
+) -> crate::Result<*mut ffi::AVBufferRef> {
+    // SAFETY: guaranteed by the caller; fields are set before init, and the
+    // reference is released on error.
+    unsafe {
+        let mut frames = ffi::av_hwframe_ctx_alloc(device);
+        if frames.is_null() {
+            return Err(crate::Error::Encode(
+                "cannot allocate hardware frames".into(),
+            ));
+        }
+        let ctx = (*frames).data.cast::<ffi::AVHWFramesContext>();
+        (*ctx).format = format;
+        (*ctx).sw_format = if deep {
+            ffi::AVPixelFormat::AV_PIX_FMT_P010LE
+        } else {
+            ffi::AVPixelFormat::AV_PIX_FMT_NV12
+        };
+        (*ctx).width = width as i32;
+        (*ctx).height = height as i32;
+        configure(ctx);
+        let ret = ffi::av_hwframe_ctx_init(frames);
+        if ret < 0 {
+            ffi::av_buffer_unref(&mut frames);
+            return Err(ffmpeg::Error::from(ret).into());
+        }
+        Ok(frames)
+    }
+}

@@ -269,6 +269,51 @@ fn host_triple() -> Result<String> {
 
 /// Copies a file, creating the directories it goes in, keeping its
 /// permissions.
+/// GTK's data a package needs, from `share` (GTK's installation) into
+/// `dest` (the package's `share`): its settings schemas (file chooser and
+/// others), compiled with `compile_schemas`, and its icons (Adwaita and
+/// hicolor's index).
+pub fn bundle_gtk_data(share: &Path, dest: &Path, compile_schemas: &Path) -> Result {
+    let schemas = dest.join("glib-2.0/schemas");
+    for entry in std::fs::read_dir(share.join("glib-2.0/schemas")).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let file = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if file.starts_with("org.gtk.gtk4.") && file.ends_with(".gschema.xml") {
+            copy(&path, &schemas.join(&file))?;
+        }
+    }
+    run(Command::new(compile_schemas).arg(&schemas))?;
+    copy_tree(&share.join("icons/Adwaita"), &dest.join("icons/Adwaita"))?;
+    copy(
+        &share.join("icons/hicolor/index.theme"),
+        &dest.join("icons/hicolor/index.theme"),
+    )
+}
+
+/// Removes `dir` with its contents, if it exists (a fresh stage).
+pub fn remove_dir(dir: &Path) -> Result {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Writes a script and makes it executable (on Unix).
+pub fn write_executable(path: &Path, script: &str) -> Result {
+    std::fs::write(path, script).map_err(|err| format!("{}: {err}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|err| format!("{}: {err}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub fn copy(from: &Path, to: &Path) -> Result {
     if let Some(dir) = to.parent() {
         std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;

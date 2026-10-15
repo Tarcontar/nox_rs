@@ -3,9 +3,9 @@
 
 mod common;
 
-use common::fixture;
+use common::{fixture, gpu};
 use nox_gpu::Converter;
-use nox_media::{Accel, Orientation, VideoDecoder, display_size, probe, rgba_cpu, with_cpu_frame};
+use nox_media::{Orientation, VideoDecoder, display_size, probe, rgba_cpu, with_cpu_frame};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -95,16 +95,7 @@ fn turned_videos_show_upright() {
             turns(1, true),
         ),
     ];
-    let gpu = match Accel::new() {
-        Ok(accel) => Some(accel.gpu().clone()),
-        Err(err) if std::env::var_os("NOX_REQUIRE_GPU").is_some() => {
-            panic!("no Vulkan GPU ({err}), but NOX_REQUIRE_GPU is set")
-        }
-        Err(err) => {
-            eprintln!("skipping the GPU half: {err}");
-            None
-        }
-    };
+    let gpu = gpu().map(|(_, gpu)| gpu);
     for &(name, args, expected) in cases {
         let Some(path) = turned(name, args) else {
             return;

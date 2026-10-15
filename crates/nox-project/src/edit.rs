@@ -971,12 +971,16 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn remove_item(&mut self, item: ItemRef) -> Result<(), EditError> {
-        let ranges = self
-            .linked(item)
+    /// `item` and the items linked to it, with their ranges.
+    fn linked_ranges(&self, item: ItemRef) -> Result<Vec<(ItemRef, TimeRange)>, EditError> {
+        self.linked(item)
             .into_iter()
             .map(|r| Ok((r, self.item_range(r)?)))
-            .collect::<Result<Vec<_>, EditError>>()?;
+            .collect()
+    }
+
+    pub fn remove_item(&mut self, item: ItemRef) -> Result<(), EditError> {
+        let ranges = self.linked_ranges(item)?;
         for (r, range) in ranges {
             if matches!(self.item(r)?, Composable::Transition(_)) {
                 self.track_checked_mut(r.track)?.remove(r.index);
@@ -1021,11 +1025,7 @@ impl Timeline {
         if self.tracks().any(|(_, t)| t.item.sync_locked()) {
             return self.ripple_remove_synced(&[item]);
         }
-        let mut ranges = self
-            .linked(item)
-            .into_iter()
-            .map(|r| Ok((r, self.item_range(r)?)))
-            .collect::<Result<Vec<_>, EditError>>()?;
+        let mut ranges = self.linked_ranges(item)?;
         // From the back, so earlier ranges on the same track stay valid.
         ranges.sort_by_key(|(r, range)| std::cmp::Reverse((range.start, r.index)));
         for (r, range) in ranges {
@@ -1189,14 +1189,10 @@ impl Timeline {
         let mut limits: (Option<Time>, Option<Time>) = (None, None);
         for r in self.linked(item) {
             let (min, max) = self.track_checked(r.track)?.slip_limits(r.index)?;
-            limits.0 = match (limits.0, min) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            };
-            limits.1 = match (limits.1, max) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            limits = (
+                tighter(limits.0, min, Time::max),
+                tighter(limits.1, max, Time::min),
+            );
         }
         Ok(limits)
     }
@@ -1221,13 +1217,7 @@ impl Timeline {
         for r in self.linked(item) {
             let (min, max) = self.track_checked(r.track)?.slide_limits(r.index, frame)?;
             limits = Some(match limits {
-                Some((a, b)) => (
-                    a.max(min),
-                    match (b, max) {
-                        (Some(x), Some(y)) => Some(x.min(y)),
-                        (x, y) => x.or(y),
-                    },
-                ),
+                Some((a, b)) => (a.max(min), tighter(b, max, Time::min)),
                 None => (min, max),
             });
         }
@@ -1516,6 +1506,15 @@ impl Timeline {
             Composable::Track(track) => Ok(track),
             _ => unreachable!("checked above"),
         }
+    }
+}
+
+/// The tighter of two optional limits (`pick` is `max` for lower limits,
+/// `min` for upper ones); a missing limit doesn't constrain.
+fn tighter(a: Option<Time>, b: Option<Time>, pick: fn(Time, Time) -> Time) -> Option<Time> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(pick(a, b)),
+        (a, b) => a.or(b),
     }
 }
 

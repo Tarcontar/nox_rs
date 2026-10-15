@@ -27,18 +27,19 @@ pub fn display_size(frame: &frame::Video) -> (u32, u32) {
 /// takes from the container (the rotation phones record instead of turning
 /// the picture) or from a photo's EXIF orientation.
 pub fn orientation(frame: &frame::Video) -> Orientation {
-    // SAFETY: a valid frame; side data, if any, is the frame's own, and a
-    // display matrix is nine 32-bit values.
-    unsafe {
+    // SAFETY: a valid frame; side data, if any, is the frame's own.
+    let matrix = unsafe {
         let data = ffi::av_frame_get_side_data(
             frame.as_ptr(),
             ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX,
         );
-        if data.is_null() || (*data).size < 36 {
-            return Orientation::UPRIGHT;
+        if data.is_null() {
+            None
+        } else {
+            crate::stream::display_matrix((*data).data, (*data).size)
         }
-        orientation_of_matrix(&*(*data).data.cast::<[i32; 9]>())
-    }
+    };
+    matrix.map_or(Orientation::UPRIGHT, orientation_of_matrix)
 }
 
 /// The orientation a display matrix describes, read as the `ffmpeg` tool
@@ -260,7 +261,7 @@ fn rgba_cpu_stored(frame: &frame::Video, width: u32, height: u32) -> Result<Imag
     // swscale leaves HDR signals as they are; map them for SDR like the GPU.
     let tone = tone_mapping(frame);
     if tone.is_hdr() {
-        for pixel in data.chunks_exact_mut(4) {
+        for pixel in data.as_chunks_mut::<4>().0 {
             let rgb = [0, 1, 2].map(|c| f32::from(pixel[c]) / 255.0);
             let mapped = tone.apply(rgb);
             for c in 0..3 {

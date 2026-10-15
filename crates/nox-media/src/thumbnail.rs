@@ -61,7 +61,7 @@ pub fn thumbnail(path: &Path, max_width: u32, max_height: u32) -> Result<Image> 
 }
 
 /// Decodes the first frame of stream `index` from the current position.
-fn first_frame(
+pub(crate) fn first_frame(
     input: &mut format::context::Input,
     decoder: &mut codec::decoder::Video,
     index: usize,
@@ -113,10 +113,7 @@ impl ThumbnailReader {
             .ok_or(Error::NoVideoStream)?;
         let stream_index = stream.index();
         let time_base = f64::from(stream.time_base());
-        let start = match stream.start_time() {
-            ffi::AV_NOPTS_VALUE => 0,
-            start => start,
-        };
+        let start = crate::stream::start_time(&stream);
         let still = tiled
             || stream
                 .disposition()
@@ -128,11 +125,7 @@ impl ThumbnailReader {
             count: 0,
         });
         let decoder = context.decoder().video()?;
-        // Only the video is read.
-        for mut other in input.streams_mut().filter(|s| s.index() != stream_index) {
-            // SAFETY: the stream's own field, before reading packets.
-            unsafe { (*other.as_mut_ptr()).discard = ffi::AVDiscard::AVDISCARD_ALL };
-        }
+        crate::stream::discard_other_streams(&mut input, stream_index);
         let still = if still {
             Some(thumbnail(path, max_width, max_height)?)
         } else {
@@ -156,27 +149,14 @@ impl ThumbnailReader {
             return Ok(still.clone());
         }
         let target = self.start + (seconds.max(0.0) / self.time_base) as i64;
-        // SAFETY: valid context; seeks to the last keyframe at or before
-        // `target` in the stream's time base.
-        let ret = unsafe {
-            ffi::avformat_seek_file(
-                self.input.as_mut_ptr(),
-                self.stream_index as i32,
-                i64::MIN,
-                target,
-                target,
-                0,
-            )
-        };
-        if ret < 0 {
-            tracing::debug!("thumbnail seek failed: {}", ffmpeg::Error::from(ret));
+        if let Err(err) = crate::stream::seek_stream(&mut self.input, self.stream_index, target) {
+            tracing::debug!("thumbnail seek failed: {err}");
         }
         self.decoder.flush();
         let mut best: Option<frame::Video> = None;
         let mut decoded = 0;
         let mut eof = false;
         let mut frame = frame::Video::empty();
-        let mut packet = ffmpeg::Packet::empty();
         'decode: loop {
             while self.decoder.receive_frame(&mut frame).is_ok() {
                 let pts = frame.timestamp().or(frame.pts()).unwrap_or(self.start);
@@ -189,23 +169,11 @@ impl ThumbnailReader {
             if eof {
                 break;
             }
-            // The next packet of the stream, or the end.
-            loop {
-                match packet.read(&mut self.input) {
-                    Ok(()) if packet.stream() == self.stream_index => {
-                        // Corrupt packets are skipped; a later one may decode.
-                        let _ = self.decoder.send_packet(&packet);
-                        break;
-                    }
-                    Ok(()) => {}
-                    Err(ffmpeg::Error::Eof) => {
-                        let _ = self.decoder.send_eof();
-                        eof = true;
-                        break;
-                    }
-                    Err(err) => return Err(err.into()),
-                }
-            }
+            eof = crate::stream::send_next_packet(
+                &mut self.input,
+                &mut self.decoder,
+                self.stream_index,
+            )?;
         }
         let frame = best.ok_or(Error::NoFrame)?;
         scale(&frame, self.max_width, self.max_height)

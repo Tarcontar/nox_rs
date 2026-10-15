@@ -38,11 +38,7 @@ layout(push_constant) uniform Params {
 } p;
 
 #include "light.glsl"
-
-vec4 rgb_at(ivec2 pos) {
-    pos = clamp(pos, ivec2(0), p.size - 1);
-    return vec4(encode_output(imageLoad(accum, pos).rgb, p.encoding), 1.0);
-}
+#include "yuv_output.glsl"
 
 void main() {
     ivec2 block = ivec2(gl_GlobalInvocationID.xy);
@@ -60,13 +56,7 @@ void main() {
                 }
             }
         }
-        vec4 rgb = vec4(0.0);
-        for (int dy = 0; dy < 2; dy++) {
-            ivec2 row = base + ivec2(0, dy);
-            rgb += 0.25 * rgb_at(row - ivec2(1, 0)) + 0.5 * rgb_at(row) + 0.25 * rgb_at(row + ivec2(1, 0));
-        }
-        rgb *= 0.5;
-        imageStore(chroma, block, vec4(dot(p.row1, rgb), dot(p.row2, rgb), 0.0, 0.0));
+        imageStore(chroma, block, vec4(chroma_at(base.x, base.y), 0.0, 0.0));
     }
     if (p.measure != 0) {
         store_light(measured);

@@ -1,13 +1,12 @@
 //! Frame-accurate time. All positions are integer ticks in a rational
 //! timebase; floating point seconds are only used for display.
 
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 /// A reduced fraction `num / den` with `den > 0`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rational {
     pub num: i64,
     pub den: i64,
@@ -94,7 +93,7 @@ fn gcd128(mut a: i128, mut b: i128) -> i128 {
 /// Equality, ordering and hashing compare the value, so the same instant in
 /// different timebases is equal. Addition and subtraction are exact: the
 /// result uses the coarsest timebase both operands are multiples of.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct Time {
     pub ticks: i64,
     pub timebase: Rational,

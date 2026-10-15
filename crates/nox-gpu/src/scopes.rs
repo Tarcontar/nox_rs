@@ -15,9 +15,9 @@
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 
-use crate::compositor::{Pipeline, create_pipeline, push};
 use crate::converter::{GpuBuffer, GpuImage, color_layers, image_barrier};
 use crate::scope_layout::*;
+use crate::vk_util::{Pipeline, alloc_set, buffer_write, create_pipeline, image_write, push};
 use crate::{Converter, Image, Result};
 
 const COUNT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scope_count.comp.spv"));
@@ -63,13 +63,13 @@ const MODES: [(u32, u32); 4] = [
 ];
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CountParams {
     size: [i32; 2],
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ResolveParams {
     mode: i32,
     full: f32,
@@ -127,11 +127,7 @@ impl Scopes {
                     .pool_sizes(&pool_sizes),
                 None,
             )?;
-            let count_set = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(descriptor_pool)
-                    .set_layouts(std::slice::from_ref(&count.set_layout)),
-            )?[0];
+            let count_set = alloc_set(device, descriptor_pool, count.set_layout)?;
             let layouts = vec![resolve.set_layout; MODES.len()];
             let resolve_sets = device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
@@ -174,28 +170,15 @@ impl Scopes {
                         .image_layout(vk::ImageLayout::GENERAL)
                 })
                 .collect();
-            let mut writes = vec![
-                vk::WriteDescriptorSet::default()
-                    .dst_set(count_set)
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(std::slice::from_ref(&counts_info)),
-            ];
+            let mut writes = vec![buffer_write(count_set, 1, &counts_info)];
             for (set, info) in resolve_sets.iter().zip(&image_infos) {
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(*set)
-                        .dst_binding(0)
-                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                        .image_info(std::slice::from_ref(info)),
-                );
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(*set)
-                        .dst_binding(1)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(std::slice::from_ref(&counts_info)),
-                );
+                writes.push(image_write(
+                    *set,
+                    0,
+                    vk::DescriptorType::STORAGE_IMAGE,
+                    info,
+                ));
+                writes.push(buffer_write(*set, 1, &counts_info));
             }
             device.update_descriptor_sets(&writes, &[]);
 
@@ -236,11 +219,12 @@ impl Scopes {
         // any pending command buffer.
         unsafe {
             device.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::default()
-                    .dst_set(self.count_set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                    .image_info(std::slice::from_ref(&accum_info))],
+                &[image_write(
+                    self.count_set,
+                    0,
+                    vk::DescriptorType::STORAGE_IMAGE,
+                    &accum_info,
+                )],
                 &[],
             );
 
@@ -415,11 +399,8 @@ impl Scopes {
         // SAFETY: no submission is pending (every call waits for completion).
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
-            for pipeline in [&self.count, &self.resolve] {
-                device.destroy_pipeline(pipeline.pipeline, None);
-                device.destroy_pipeline_layout(pipeline.layout, None);
-                device.destroy_descriptor_set_layout(pipeline.set_layout, None);
-            }
+            self.count.destroy(device);
+            self.resolve.destroy(device);
         }
         for image in self.images {
             converter.destroy_image(image);

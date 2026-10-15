@@ -3,7 +3,7 @@
 //! project and implements the window's actions.
 
 use gtk::{CompositeTemplate, gdk, gio, glib, prelude::*, subclass::prelude::*};
-use nox_project::{BlendMode, Edge, EditError, Rational, Time, TrackKind, supports_drop_frame};
+use nox_project::{BlendMode, Edge, Rational, Time, TrackKind, supports_drop_frame};
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -526,9 +526,8 @@ impl Ui {
     }
 
     fn add_track(&self, kind: TrackKind) {
-        let _ = self.project.edit(&gettext("Add Track"), |t| {
+        self.project.change(&gettext("Add Track"), |t| {
             t.add_track(kind);
-            Ok::<_, EditError>(())
         });
     }
 
@@ -567,10 +566,8 @@ impl Ui {
     fn mark(&self, label: &str, change: impl FnOnce(&mut nox_project::Settings, Time)) {
         let fps = self.project.frame_rate();
         let playhead = Time::from_frames(self.timeline.playhead(), fps);
-        let _ = self.project.edit(label, |t| {
-            change(&mut t.settings, playhead);
-            Ok::<_, EditError>(())
-        });
+        self.project
+            .change(label, |t| change(&mut t.settings, playhead));
     }
 
     /// Edits the media pool's selection into the sequence at the playhead,
@@ -932,9 +929,8 @@ fn add_project_actions(ui: &Rc<Ui>) {
             else {
                 return;
             };
-            let _ = ui.project.edit(&gettext("Change Resolution"), |t| {
+            ui.project.change(&gettext("Change Resolution"), |t| {
                 (t.settings.width, t.settings.height) = size;
-                Ok::<_, EditError>(())
             });
         }
     ));
@@ -956,9 +952,8 @@ fn add_project_actions(ui: &Rc<Ui>) {
                 return;
             };
             if rate != ui.project.frame_rate() {
-                let _ = ui.project.edit(&gettext("Change Frame Rate"), |t| {
+                ui.project.change(&gettext("Change Frame Rate"), |t| {
                     t.set_frame_rate(rate);
-                    Ok::<_, EditError>(())
                 });
             }
         }
@@ -981,9 +976,8 @@ fn add_project_actions(ui: &Rc<Ui>) {
                 return;
             };
             // The state itself follows the project in `Ui::update`.
-            let _ = ui.project.edit(&gettext("Change Timecode"), |t| {
+            ui.project.change(&gettext("Change Timecode"), |t| {
                 t.settings.drop_frame = enabled;
-                Ok::<_, EditError>(())
             });
         }
     ));

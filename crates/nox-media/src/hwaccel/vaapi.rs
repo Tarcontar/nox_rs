@@ -45,20 +45,16 @@ impl VaapiDevice {
         let mut buffer = ptr::null_mut();
         // GPUs without a VA driver are an answer here, not an error for
         // FFmpeg's log.
-        // SAFETY: valid out-pointer and arguments; plain global log level.
-        let ret = unsafe {
-            let level = ffi::av_log_get_level();
-            ffi::av_log_set_level(ffi::AV_LOG_QUIET);
-            let ret = ffi::av_hwdevice_ctx_create(
+        // SAFETY: valid out-pointer and arguments.
+        let ret = crate::stream::with_quiet_log(|| unsafe {
+            ffi::av_hwdevice_ctx_create(
                 &mut buffer,
                 ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
                 name.as_ptr(),
                 ptr::null_mut(),
                 0,
-            );
-            ffi::av_log_set_level(level);
-            ret
-        };
+            )
+        });
         if ret < 0 {
             return Err(Error::Encode(format!(
                 "no VAAPI on {}: {}",
@@ -206,26 +202,15 @@ impl VaapiSink {
         // every reference made here is owned by the sink (or released on
         // error).
         unsafe {
-            let mut frames = ffi::av_hwframe_ctx_alloc(device.as_ptr());
-            if frames.is_null() {
-                return Err(Error::Encode("cannot allocate VAAPI frames".into()));
-            }
-            let ctx = (*frames).data.cast::<ffi::AVHWFramesContext>();
-            (*ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
-            (*ctx).sw_format = if deep {
-                ffi::AVPixelFormat::AV_PIX_FMT_P010LE
-            } else {
-                ffi::AVPixelFormat::AV_PIX_FMT_NV12
-            };
-            (*ctx).width = width as i32;
-            (*ctx).height = height as i32;
-            // A pool that grows as the encoder needs surfaces.
-            (*ctx).initial_pool_size = 0;
-            let ret = ffi::av_hwframe_ctx_init(frames);
-            if ret < 0 {
-                ffi::av_buffer_unref(&mut frames);
-                return Err(ffmpeg::Error::from(ret).into());
-            }
+            let mut frames = super::frames_context(
+                device.as_ptr(),
+                ffi::AVPixelFormat::AV_PIX_FMT_VAAPI,
+                width,
+                height,
+                deep,
+                // A pool that grows as the encoder needs surfaces.
+                |ctx| (*ctx).initial_pool_size = 0,
+            )?;
             let mut mapped = ptr::null_mut();
             let ret = ffi::av_hwframe_ctx_create_derived(
                 &mut mapped,

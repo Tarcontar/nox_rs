@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{APP_ID, Layout, Result, VERSION, copy, copy_tree, install, output, run};
+use crate::{APP_ID, Layout, Result, VERSION, copy, install, output, run};
 
 /// Builds `Nox.app` and its archive in `dist`; returns the archive.
 pub fn dist(dist: &Path) -> Result<PathBuf> {
@@ -42,9 +42,7 @@ pub fn dist(dist: &Path) -> Result<PathBuf> {
         other => other,
     };
     let stage = dist.join(format!("nox-{VERSION}-macos-{arch}"));
-    if stage.exists() {
-        std::fs::remove_dir_all(&stage).map_err(|err| format!("{}: {err}", stage.display()))?;
-    }
+    crate::remove_dir(&stage)?;
     let app = stage.join("Nox.app");
     let contents = app.join("Contents");
     let resources = contents.join("Resources");
@@ -147,23 +145,10 @@ pub fn dist(dist: &Path) -> Result<PathBuf> {
     }
 
     // GTK's schemas and icons.
-    let share = brew.join("share");
-    let schemas = resources.join("share/glib-2.0/schemas");
-    for entry in std::fs::read_dir(share.join("glib-2.0/schemas")).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        let file = file_name(&path);
-        if file.starts_with("org.gtk.gtk4.") && file.ends_with(".gschema.xml") {
-            copy(&path, &schemas.join(&file))?;
-        }
-    }
-    run(Command::new(brew.join("bin/glib-compile-schemas")).arg(&schemas))?;
-    copy_tree(
-        &share.join("icons/Adwaita"),
-        &resources.join("share/icons/Adwaita"),
-    )?;
-    copy(
-        &share.join("icons/hicolor/index.theme"),
-        &resources.join("share/icons/hicolor/index.theme"),
+    crate::bundle_gtk_data(
+        &brew.join("share"),
+        &resources.join("share"),
+        &brew.join("bin/glib-compile-schemas"),
     )?;
 
     // The app: icon, Info.plist, launchers.
@@ -378,10 +363,7 @@ exec "$res/bin/{program}" "$@"
 "#
     );
     std::fs::create_dir_all(path.parent().expect("dir")).map_err(|e| e.to_string())?;
-    std::fs::write(path, script).map_err(|err| format!("{}: {err}", path.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .map_err(|err| format!("{}: {err}", path.display()))
+    crate::write_executable(path, &script)
 }
 
 const README: &str = "\

@@ -289,6 +289,25 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
       - The converter turns the picture while it samples (`ycbcr_to_rgb.comp` maps each output point back into the stored picture), so everything after it sees it upright, at no cost. The clip's own transform stays at 0°.
       - `display_size`, `rgba_cpu` (thumbnails, filmstrips, the no-GPU path) and `probe` (width and height are the displayed size, plus `orientation`) all work upright. Probing a photo decodes its first frame for the EXIF orientation.
       - `tests/orientation.rs` checks every turn and mirror against the `ffmpeg` tool's own upright picture, on the CPU and the GPU, plus a JPEG with EXIF orientation 6. The iPhone files' "clean aperture" crop (`clap`) isn't applied yet, and neither does FFmpeg.
+    - **Code cleanup** (asked for, after a review of the 33k lines):
+      - **Shared helpers instead of copies:**
+        - nox-gpu `vk_util`: pipelines, descriptor writes, `OneShot` submit-and-wait, timeline-semaphore infos, exportable memory.
+        - nox-media `stream`: seeking, feeding decoders, start times, discarding other streams, quiet logging, display matrices. Also one hardware frames-context setup and one encoder drain.
+        - nox-gui `ui_util`: drop-down lists and textures. Also `Project::change` and `edit_track` for edits.
+        - xtask `bundle_gtk_data`.
+        - Shaders: `yuv_output.glsl`, and PQ in `color.glsl`.
+        - Tests: `gpu()` and `fixture()` in nox-media's test helpers, which nox-engine's tests include.
+      - **Crates:**
+        - Push constants are `bytemuck::Pod`, so a layout mistake fails to compile.
+        - nox-cli parses its arguments with clap (derive), so `--help` comes from the code.
+        - serde is gone from nox-project, where nothing used it.
+        - The waveform cache key is a stable FNV-1a hash.
+      - **`timeline.rs` split** (3,250 lines) into `timeline/`:
+        - `mod.rs`: the widget and its public API.
+        - `draw.rs`, `geometry.rs` (coordinates, hit testing, snapping, scrolling) and `drag.rs`.
+        - `input.rs` (gestures, keys, drops) and `selection.rs` (with the context menus).
+        - `tracks.rs`.
+      - **Kept:** custom code where crates don't fit, such as OTIO's JSON (NaN and Infinity, key order, exact layout), rational time and timecode, snapshot undo, the frame cache and the color science.
     - **Tiled photos** (HEIC from phones, AVIF): FFmpeg demuxes each tile as a stream and describes the layout in a tile grid stream group. Nox's decoder, probe and thumbnails decode the tiles once in software, assemble them in their own planar format (any depth and subsampling), and crop to the grid's picture (`nox_media::tiles`). `tests/data/tiled.heic` (640×480 in 3×2 tiles of 256, made with libheif) checks the result against the pattern it was made from.
     - **Tested:**
       - Encoding: NV12 through CUDA (`nvenc_encode_from_gpu_memory`), and HDR10/HLG through CUDA (`hdr_exports_encode_pq_and_hlg`: levels within 3 codes, MaxCLL/MaxFALL within 2 nits).

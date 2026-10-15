@@ -5,7 +5,7 @@ use crate::i18n::{fill, gettext};
 use nox_media::MediaInfo;
 use nox_project::{
     Clip, Composable, Document, EditError, MediaReference, Rational, Time, TimeRange, Timeline,
-    TrackKind, format_timecode, nominal_fps,
+    Track, TrackKind, format_timecode, nominal_fps,
 };
 use std::cell::{Ref, RefCell};
 use std::path::{Path, PathBuf};
@@ -128,6 +128,26 @@ impl Project {
             Err(err) => tracing::info!("{label} not possible: {err}"),
         }
         result
+    }
+
+    /// Applies an undoable edit that can't fail and notifies listeners.
+    pub fn change(&self, label: &str, change: impl FnOnce(&mut Timeline)) {
+        let _ = self.edit(label, |timeline| {
+            change(timeline);
+            Ok::<_, std::convert::Infallible>(())
+        });
+    }
+
+    /// Applies an undoable edit to track `index` (if there is one) and
+    /// notifies listeners.
+    pub fn edit_track(&self, index: usize, label: &str, change: impl FnOnce(&mut Track)) {
+        let _ = self.edit(label, |timeline| {
+            let track = timeline
+                .track_mut(index)
+                .ok_or(nox_project::EditError::NoTrack(index))?;
+            change(track);
+            Ok::<_, nox_project::EditError>(())
+        });
     }
 
     /// Like `edit`, but consecutive edits with the same `merge_key` make

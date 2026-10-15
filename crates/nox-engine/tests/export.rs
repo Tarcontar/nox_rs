@@ -2,34 +2,13 @@
 
 mod common;
 
-use common::fixture;
+use common::{FPS, clip, f, fixture, solid};
 use nox_engine::{EncodeQuality, ExportError, ExportSettings, VideoCodec, export};
 use nox_media::{AudioDecoder, VideoDecoder, probe};
 use nox_project::{
-    Clip, Composable, Edge, ItemRef, MediaReference, Rational, ScalingMode, Time, TimeRange,
-    Timeline,
+    Clip, Composable, Edge, ItemRef, MediaReference, ScalingMode, TimeRange, Timeline,
 };
 use std::path::{Path, PathBuf};
-
-const FPS: Rational = Rational::new(25, 1);
-
-fn f(n: i64) -> Time {
-    Time::from_frames(n, FPS)
-}
-
-fn solid(name: &str, color: &str, size: &str) -> Option<PathBuf> {
-    let input = format!("color=c={color}:size={size}:rate=25:duration=4,format=yuv444p");
-    fixture(name, &["-f", "lavfi", "-i", &input, "-c:v", "ffv1"])
-}
-
-fn clip(path: &Path, start: i64, length: i64) -> Composable {
-    let reference = MediaReference::from_path(path, Some(TimeRange::new(f(0), f(100))));
-    Composable::Clip(Clip::new(
-        "c",
-        reference,
-        TimeRange::new(f(start), f(length)),
-    ))
-}
 
 /// Red for 2 s, a 0.4 s dissolve to blue, blue for 1 s; a 0.5 tone on A1
 /// for the first 2 s.

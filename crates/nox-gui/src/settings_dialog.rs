@@ -3,11 +3,12 @@
 //! right, Cancel and Save. Saving applies everything as one undoable edit.
 
 use gtk::{CompositeTemplate, glib, prelude::*, subclass::prelude::*};
-use nox_project::{EditError, Rational, ScalingMode, supports_drop_frame};
+use nox_project::{Rational, ScalingMode, supports_drop_frame};
 use std::rc::Rc;
 
 use crate::i18n::{fill, gettext, n_, scaling_mode_name};
 use crate::project::Project;
+use crate::ui_util::string_list;
 
 /// Timeline resolutions offered (name translated when shown); anything
 /// else is "Custom".
@@ -122,9 +123,7 @@ impl ProjectSettings {
             .map(|&(w, h, name)| format!("{w} × {h} {}", gettext(name)))
             .collect();
         resolutions.push(gettext("Custom"));
-        let names: Vec<&str> = resolutions.iter().map(String::as_str).collect();
-        imp.resolution
-            .set_model(Some(&gtk::StringList::new(&names)));
+        imp.resolution.set_model(Some(&string_list(&resolutions)));
         let preset = RESOLUTIONS
             .iter()
             .position(|&(w, h, _)| (w, h) == (settings.width, settings.height));
@@ -139,9 +138,8 @@ impl ProjectSettings {
             move |_| dialog.sync_size()
         ));
 
-        let rates: Vec<&str> = FRAME_RATES.iter().map(|(n, _, _)| *n).collect();
         imp.frame_rate
-            .set_model(Some(&gtk::StringList::new(&rates)));
+            .set_model(Some(&string_list(FRAME_RATES.iter().map(|(n, _, _)| *n))));
         let fps = timeline.frame_rate();
         // An imported timeline at another rate keeps it unless changed.
         let rate = FRAME_RATES
@@ -157,12 +155,9 @@ impl ProjectSettings {
             move |_| dialog.sync_drop_frame()
         ));
 
-        let modes: Vec<String> = ScalingMode::ALL
-            .iter()
-            .map(|&m| scaling_mode_name(m))
-            .collect();
-        let modes: Vec<&str> = modes.iter().map(String::as_str).collect();
-        imp.scaling.set_model(Some(&gtk::StringList::new(&modes)));
+        imp.scaling.set_model(Some(&string_list(
+            ScalingMode::ALL.iter().map(|&m| scaling_mode_name(m)),
+        )));
         let mode = ScalingMode::ALL.iter().position(|&m| m == settings.scaling);
         imp.scaling.set_selected(mode.unwrap_or(0) as u32);
 
@@ -210,7 +205,7 @@ impl ProjectSettings {
         let mode = ScalingMode::ALL[imp.scaling.selected() as usize % ScalingMode::ALL.len()];
         let drop = imp.drop_frame.is_active() && rate.is_some_and(supports_drop_frame);
         let name = imp.name.text().trim().to_owned();
-        let _ = project.edit(&gettext("Change Project Settings"), |t| {
+        project.change(&gettext("Change Project Settings"), |t| {
             if !name.is_empty() {
                 t.name = name;
             }
@@ -222,7 +217,6 @@ impl ProjectSettings {
             (t.settings.width, t.settings.height) = size;
             t.settings.scaling = mode;
             t.settings.drop_frame = drop;
-            Ok::<_, EditError>(())
         });
         self.close();
     }

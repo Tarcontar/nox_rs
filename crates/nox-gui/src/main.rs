@@ -20,6 +20,7 @@ mod thumbnails;
 mod timeline;
 mod track_header;
 mod transform_overlay;
+mod ui_util;
 mod viewer;
 mod waveforms;
 mod window;

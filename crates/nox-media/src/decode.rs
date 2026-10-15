@@ -171,13 +171,8 @@ impl VideoDecoder {
             .ok_or(Error::NoVideoStream)?;
         let stream_index = stream.index();
         let time_base = rational(stream.time_base()).ok_or(Error::NoVideoStream)?;
-        let frame_rate = rational(stream.avg_frame_rate())
-            .or_else(|| rational(stream.rate()))
-            .unwrap_or(Rational::new(25, 1));
-        let start = match stream.start_time() {
-            ffi::AV_NOPTS_VALUE => 0,
-            start => start,
-        };
+        let frame_rate = crate::stream::frame_rate(&stream).unwrap_or(Rational::new(25, 1));
+        let start = crate::stream::start_time(&stream);
 
         let mut context = codec::Context::from_parameters(stream.parameters())?;
         let codec = codec::decoder::find(context.id()).ok_or(ffmpeg::Error::DecoderNotFound)?;
@@ -421,25 +416,9 @@ impl VideoDecoder {
 
     fn seek(&mut self, index: i64) -> Result<()> {
         let target = self.pts_of(index);
-        // SAFETY: valid context; seeks to the last keyframe at or before
-        // `target` in the stream's time base.
-        let ret = unsafe {
-            ffi::avformat_seek_file(
-                self.input.as_mut_ptr(),
-                self.stream_index as i32,
-                i64::MIN,
-                target,
-                target,
-                0,
-            )
-        };
-        if ret < 0 {
+        if let Err(err) = crate::stream::seek_stream(&mut self.input, self.stream_index, target) {
             // Some demuxers (e.g. image2) can't seek; start over instead.
-            tracing::debug!(
-                "{}: seek failed ({}), rewinding",
-                self.path.display(),
-                ffmpeg::Error::from(ret)
-            );
+            tracing::debug!("{}: seek failed ({err}), rewinding", self.path.display());
             return self.rewind();
         }
         self.decoder.flush();
@@ -486,26 +465,10 @@ impl VideoDecoder {
 
     /// Sends the next packet of our stream, or EOF.
     fn feed(&mut self) -> Result<()> {
-        let mut packet = ffmpeg::Packet::empty();
-        loop {
-            match packet.read(&mut self.input) {
-                Ok(()) if packet.stream() == self.stream_index => {
-                    self.at_start = false;
-                    if let Err(err) = self.decoder.send_packet(&packet) {
-                        // Corrupt packets are skipped; the decoder recovers.
-                        tracing::debug!("decoder rejected packet: {err}");
-                    }
-                    return Ok(());
-                }
-                Ok(()) => {}
-                Err(ffmpeg::Error::Eof) => {
-                    self.decoder.send_eof()?;
-                    self.eof = true;
-                    return Ok(());
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
+        self.eof =
+            crate::stream::send_next_packet(&mut self.input, &mut self.decoder, self.stream_index)?;
+        self.at_start = false;
+        Ok(())
     }
 
     fn pts_of(&self, index: i64) -> i64 {

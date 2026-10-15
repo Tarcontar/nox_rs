@@ -119,36 +119,27 @@ fn first_frame_orientation(path: &Path, index: usize) -> Option<Orientation> {
         .decoder()
         .video()
         .ok()?;
-    let mut frame = ffmpeg::frame::Video::empty();
-    for (stream, packet) in input.packets() {
-        if stream.index() == index
-            && decoder.send_packet(&packet).is_ok()
-            && decoder.receive_frame(&mut frame).is_ok()
-        {
-            return Some(crate::frames::orientation(&frame));
-        }
-    }
-    decoder.send_eof().ok()?;
-    decoder.receive_frame(&mut frame).ok()?;
+    let frame = crate::thumbnail::first_frame(&mut input, &mut decoder, index).ok()??;
     Some(crate::frames::orientation(&frame))
 }
 
 /// The orientation the container gives the stream (its display matrix).
 fn stream_orientation(parameters: &codec::Parameters) -> Orientation {
-    // SAFETY: the stream's live parameters; a display matrix is nine
-    // 32-bit values.
-    unsafe {
+    // SAFETY: the stream's live parameters and their side data.
+    let matrix = unsafe {
         let par = parameters.as_ptr();
         let data = ffi::av_packet_side_data_get(
             (*par).coded_side_data,
             (*par).nb_coded_side_data,
             ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
         );
-        if data.is_null() || (*data).size < 36 {
-            return Orientation::UPRIGHT;
+        if data.is_null() {
+            None
+        } else {
+            crate::stream::display_matrix((*data).data, (*data).size)
         }
-        crate::frames::orientation_of_matrix(&*(*data).data.cast::<[i32; 9]>())
-    }
+    };
+    matrix.map_or(Orientation::UPRIGHT, crate::frames::orientation_of_matrix)
 }
 
 fn video_info(stream: &format::stream::Stream) -> Result<VideoInfo> {
@@ -159,7 +150,7 @@ fn video_info(stream: &format::stream::Stream) -> Result<VideoInfo> {
     let decoder = codec::Context::from_parameters(parameters)?
         .decoder()
         .video()?;
-    let frame_rate = rational(stream.avg_frame_rate()).or_else(|| rational(stream.rate()));
+    let frame_rate = crate::stream::frame_rate(stream);
 
     Ok(VideoInfo {
         stream_index: stream.index(),

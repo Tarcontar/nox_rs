@@ -9,6 +9,7 @@ mod export;
 mod interop;
 mod scope_layout;
 mod scopes;
+mod vk_util;
 
 pub use ash::vk;
 pub use compositor::{

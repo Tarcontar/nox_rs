@@ -2,26 +2,10 @@
 
 mod common;
 
-use common::fixture;
+use common::{fixture, gpu};
 use nox_color::{InputTransform, OutputTransform};
 use nox_gpu::{BlendMode, Compositor, Converter, LayerStyle, Rect, Transform};
-use nox_media::{Accel, VideoDecoder, ffmpeg, with_cpu_frame};
-use std::sync::{Arc, OnceLock};
-
-fn gpu() -> Option<(Accel, Arc<nox_gpu::GpuDevice>)> {
-    static GPU: OnceLock<Option<(Accel, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
-    GPU.get_or_init(|| match Accel::new() {
-        Ok(accel) => Some((accel.clone(), accel.gpu().clone())),
-        Err(err) if std::env::var_os("NOX_REQUIRE_GPU").is_some() => {
-            panic!("no Vulkan GPU ({err}), but NOX_REQUIRE_GPU is set")
-        }
-        Err(err) => {
-            eprintln!("skipping GPU tests: {err}");
-            None
-        }
-    })
-    .clone()
-}
+use nox_media::{VideoDecoder, ffmpeg, with_cpu_frame};
 
 /// A frame of a solid-color clip (4:4:4, so there are no chroma edges).
 fn solid(name: &str, color: &str, size: &str) -> Option<ffmpeg::frame::Video> {

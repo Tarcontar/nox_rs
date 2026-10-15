@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Layout, Result, VERSION, copy, copy_tree, install, output, zip_dir};
+use crate::{Layout, Result, VERSION, copy, install, output, zip_dir};
 
 /// DLLs that come from the system even if MSYS2 has a copy.
 const SYSTEM_DLLS: &[&str] = &["vulkan-1.dll", "nvcuda.dll"];
@@ -40,9 +40,7 @@ pub fn dist(dist: &Path) -> Result<(PathBuf, PathBuf)> {
     };
     let name = format!("nox-{VERSION}-windows-{arch}");
     let stage = dist.join(&name);
-    if stage.exists() {
-        std::fs::remove_dir_all(&stage).map_err(|err| format!("{}: {err}", stage.display()))?;
-    }
+    crate::remove_dir(&stage)?;
     install(&stage, Layout::Portable)?;
     let bin = stage.join("bin");
     let prefix_bin = prefix.join("bin");
@@ -120,26 +118,10 @@ pub fn dist(dist: &Path) -> Result<(PathBuf, PathBuf)> {
 
     // GTK's schemas, icons and translations.
     let share = prefix.join("share");
-    let schemas = stage.join("share/glib-2.0/schemas");
-    for entry in std::fs::read_dir(share.join("glib-2.0/schemas")).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        let file = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        if file.starts_with("org.gtk.gtk4.") && file.ends_with(".gschema.xml") {
-            copy(&path, &schemas.join(&file))?;
-        }
-    }
-    crate::run(Command::new(prefix_bin.join("glib-compile-schemas.exe")).arg(&schemas))?;
-    copy_tree(
-        &share.join("icons/Adwaita"),
-        &stage.join("share/icons/Adwaita"),
-    )?;
-    copy(
-        &share.join("icons/hicolor/index.theme"),
-        &stage.join("share/icons/hicolor/index.theme"),
+    crate::bundle_gtk_data(
+        &share,
+        &stage.join("share"),
+        &prefix_bin.join("glib-compile-schemas.exe"),
     )?;
     copy_system_translations(&share.join("locale"), &stage.join("share/locale"))?;
 

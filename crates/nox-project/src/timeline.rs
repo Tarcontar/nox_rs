@@ -2054,20 +2054,20 @@ mod tests {
     #[test]
     fn relative_media_paths_follow_the_project_folder() {
         let mut timeline = Timeline::new("t", Rational::new(24, 1));
-        let range = Some(TimeRange::new(frames(0), frames(10)));
+        let range = TimeRange::new(frames(0), frames(10));
         let relative = |url: &str| {
             MediaReference::new(
                 ReferenceKind::External {
                     target_url: url.into(),
                 },
-                range,
+                Some(range),
             )
         };
         let media = absolute("/media/b.mov");
         let media = media.to_str().unwrap();
         timeline.track_mut(0).unwrap().children = vec![
-            Composable::Clip(Clip::new("rel", relative("clips/a.mov"), range.unwrap())),
-            Composable::Clip(Clip::new("abs", relative(media), range.unwrap())),
+            Composable::Clip(Clip::new("rel", relative("clips/a.mov"), range)),
+            Composable::Clip(Clip::new("abs", relative(media), range)),
         ];
         let paths = |t: &Timeline| -> Vec<_> {
             t.clips()

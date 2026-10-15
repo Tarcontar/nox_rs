@@ -10,6 +10,8 @@ license = "GPL-3.0-or-later"
 authors = ["Stephan Vedder <stephan.vedder@gmail.com>"]
 
 [workspace.dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
 nox-media = { path = "crates/nox-media" }
 nox-gpu = { path = "crates/nox-gpu" }
 nox-color = { path = "crates/nox-color" }
@@ -26,7 +28,6 @@ ffmpeg = { package = "ffmpeg-next", version = "9" }
 gettext-rs = { version = "0.8", features = ["gettext-system"] }
 glib-build-tools = "0.22"
 ringbuf = "0.5"
-serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

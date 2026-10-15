@@ -250,21 +250,27 @@ unsafe fn encoder_frames(
     height: u32,
     deep: bool,
 ) -> Result<*mut ffi::AVBufferRef> {
-    // SAFETY: guaranteed by the caller; fields are set before init.
+    // SAFETY: guaranteed by the caller; the Vulkan fields are set before
+    // init.
     unsafe {
-        let mut frames = ffi::av_hwframe_ctx_alloc(device.as_ptr());
-        if frames.is_null() {
-            return Err(Error::Encode("cannot allocate Vulkan frames".into()));
-        }
-        let ctx = (*frames).data.cast::<ffi::AVHWFramesContext>();
-        (*ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_VULKAN;
-        (*ctx).sw_format = if deep {
-            ffi::AVPixelFormat::AV_PIX_FMT_P010LE
-        } else {
-            ffi::AVPixelFormat::AV_PIX_FMT_NV12
-        };
-        (*ctx).width = width as i32;
-        (*ctx).height = height as i32;
+        super::frames_context(
+            device.as_ptr(),
+            ffi::AVPixelFormat::AV_PIX_FMT_VULKAN,
+            width,
+            height,
+            deep,
+            |ctx| configure_vulkan_frames(ctx),
+        )
+    }
+}
+
+/// Vulkan frames for the compositor to write.
+///
+/// # Safety
+/// `ctx` must be an uninitialized Vulkan frames context.
+unsafe fn configure_vulkan_frames(ctx: *mut ffi::AVHWFramesContext) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
         let vk_ctx = (*ctx).hwctx.cast::<ffi::AVVulkanFramesContext>();
         // FFmpeg's defaults plus storage, for the compositor's plane views
         // (with extended usage, as NV12 itself isn't a storage format).
@@ -278,12 +284,6 @@ unsafe fn encoder_frames(
             | vk::ImageCreateFlags::EXTENDED_USAGE
             | vk::ImageCreateFlags::VIDEO_PROFILE_INDEPENDENT_KHR)
             .as_raw() as _;
-        let ret = ffi::av_hwframe_ctx_init(frames);
-        if ret < 0 {
-            ffi::av_buffer_unref(&mut frames);
-            return Err(ffmpeg::Error::from(ret).into());
-        }
-        Ok(frames)
     }
 }
 

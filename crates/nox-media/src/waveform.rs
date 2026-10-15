@@ -1,7 +1,6 @@
 //! Audio waveforms for the timeline: the peak level of a file's audio in
 //! short windows, computed once per file and cached on disk.
 
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -96,9 +95,23 @@ fn cache_entry(path: &Path, cache_dir: &Path) -> Result<PathBuf> {
         path: path.to_owned(),
         source,
     })?;
-    let mut hasher = std::hash::DefaultHasher::new();
-    path.hash(&mut hasher);
-    metadata.len().hash(&mut hasher);
-    metadata.modified().ok().hash(&mut hasher);
-    Ok(cache_dir.join(format!("{:016x}.wave", hasher.finish())))
+    // FNV-1a over the path, size and modification time: unlike std's
+    // hasher, the same in every Rust release, so caches stay valid.
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    let hash = [
+        path.as_os_str().as_encoded_bytes(),
+        &metadata.len().to_le_bytes(),
+        &modified.as_secs().to_le_bytes(),
+        &modified.subsec_nanos().to_le_bytes(),
+    ]
+    .concat()
+    .iter()
+    .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    Ok(cache_dir.join(format!("{hash:016x}.wave")))
 }

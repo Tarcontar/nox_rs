@@ -119,8 +119,10 @@ impl Mixer {
                 }
             }
             for (i, (dst, src)) in out
-                .chunks_exact_mut(CHANNELS)
-                .zip(self.scratch.chunks_exact(CHANNELS))
+                .as_chunks_mut::<CHANNELS>()
+                .0
+                .iter_mut()
+                .zip(self.scratch.as_chunks::<CHANNELS>().0)
                 .enumerate()
             {
                 let t = (start + i as i64) as f64 / f64::from(self.rate);
@@ -241,7 +243,7 @@ impl AudioOutput {
             }
             for (out, frame) in data
                 .chunks_exact_mut(channels)
-                .zip(stereo.chunks_exact(CHANNELS))
+                .zip(stereo.as_chunks::<CHANNELS>().0)
             {
                 match channels {
                     1 => out[0] = 0.5 * (frame[0] + frame[1]),

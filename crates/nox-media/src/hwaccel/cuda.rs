@@ -514,27 +514,16 @@ impl CudaSink {
         height: u32,
         deep: bool,
     ) -> Result<Self> {
-        // SAFETY: a valid CUDA device context; fields are set before init.
+        // SAFETY: a valid CUDA device context.
         let frames = unsafe {
-            let mut frames = ffi::av_hwframe_ctx_alloc(device.buffer);
-            if frames.is_null() {
-                return Err(Error::Encode("cannot allocate CUDA frames".into()));
-            }
-            let ctx = (*frames).data.cast::<ffi::AVHWFramesContext>();
-            (*ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_CUDA;
-            (*ctx).sw_format = if deep {
-                ffi::AVPixelFormat::AV_PIX_FMT_P010LE
-            } else {
-                ffi::AVPixelFormat::AV_PIX_FMT_NV12
-            };
-            (*ctx).width = width as i32;
-            (*ctx).height = height as i32;
-            let ret = ffi::av_hwframe_ctx_init(frames);
-            if ret < 0 {
-                ffi::av_buffer_unref(&mut frames);
-                return Err(ffmpeg::Error::from(ret).into());
-            }
-            frames
+            super::frames_context(
+                device.buffer,
+                ffi::AVPixelFormat::AV_PIX_FMT_CUDA,
+                width,
+                height,
+                deep,
+                |_| {},
+            )?
         };
         let format = if deep {
             LinearFormat::P010

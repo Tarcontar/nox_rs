@@ -249,9 +249,8 @@ impl PreferencesWindow {
                 _ => gettext(name),
             })
             .collect();
-        imp.decoding.set_model(Some(&gtk::StringList::new(
-            &names.iter().map(String::as_str).collect::<Vec<_>>(),
-        )));
+        imp.decoding
+            .set_model(Some(&crate::ui_util::string_list(&names)));
         let current = HwDecode::from_key(&preferences.video_decoding()).unwrap_or_default();
         let index = choices.iter().position(|c| c.0 == current).unwrap_or(0);
         imp.choices.replace(choices);

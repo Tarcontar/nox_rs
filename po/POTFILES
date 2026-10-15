@@ -24,7 +24,12 @@ crates/nox-gui/src/preferences.rs
 crates/nox-gui/src/project.rs
 crates/nox-gui/src/scopes.rs
 crates/nox-gui/src/settings_dialog.rs
-crates/nox-gui/src/timeline.rs
+crates/nox-gui/src/timeline/drag.rs
+crates/nox-gui/src/timeline/draw.rs
+crates/nox-gui/src/timeline/input.rs
+crates/nox-gui/src/timeline/mod.rs
+crates/nox-gui/src/timeline/selection.rs
+crates/nox-gui/src/timeline/tracks.rs
 crates/nox-gui/src/track_header.rs
 crates/nox-gui/src/transform_overlay.rs
 crates/nox-gui/src/viewer.rs

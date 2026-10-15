@@ -241,31 +241,17 @@ impl ExportPool {
                     .push_next(&mut external),
                 None,
             )?;
-            let requirements = device.get_image_memory_requirements(image);
-            let Some(memory_type) = self.gpu.memory_type(
-                requirements.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            ) else {
-                device.destroy_image(image, None);
-                return Err(Error::Unsupported(
-                    "no device-local memory for export".into(),
-                ));
-            };
-            let mut export = vk::ExportMemoryAllocateInfo::default()
-                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-            let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
-            let memory = match device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(memory_type)
-                    .push_next(&mut export)
-                    .push_next(&mut dedicated),
-                None,
+            let memory = match crate::vk_util::alloc_exportable(
+                &self.gpu,
+                device.get_image_memory_requirements(image),
+                vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                vk::MemoryDedicatedAllocateInfo::default().image(image),
+                "for export",
             ) {
                 Ok(memory) => memory,
                 Err(err) => {
                     device.destroy_image(image, None);
-                    return Err(err.into());
+                    return Err(err);
                 }
             };
             // From here on ExportImage's Drop cleans up.

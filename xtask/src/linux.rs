@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Layout, Result, VERSION, copy, copy_tree, install, output, run, zip_dir};
+use crate::{Layout, Result, VERSION, copy, install, output, run, zip_dir};
 
 /// Library name prefixes (sonames) not bundled.
 const SYSTEM_LIBRARIES: &[&str] = &[
@@ -78,9 +78,7 @@ pub fn dist(dist: &Path) -> Result<PathBuf> {
     let arch = std::env::consts::ARCH;
     let name = format!("nox-{VERSION}-linux-{arch}");
     let stage = dist.join(&name);
-    if stage.exists() {
-        std::fs::remove_dir_all(&stage).map_err(|err| format!("{}: {err}", stage.display()))?;
-    }
+    crate::remove_dir(&stage)?;
     install(&stage, Layout::Desktop)?;
     let lib = stage.join("lib");
 
@@ -128,28 +126,12 @@ pub fn dist(dist: &Path) -> Result<PathBuf> {
     }
     set_rpath(&bundled_query, "$ORIGIN/..")?;
 
-    // GTK's settings schemas (file chooser and others), compiled.
+    // GTK's settings schemas and icons.
     let gtk_share = PathBuf::from(pkg_config("gtk4", "prefix")?).join("share");
-    let schemas = stage.join("share/glib-2.0/schemas");
-    for entry in std::fs::read_dir(gtk_share.join("glib-2.0/schemas")).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        let file = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        if file.starts_with("org.gtk.gtk4.") && file.ends_with(".gschema.xml") {
-            copy(&path, &schemas.join(&file))?;
-        }
-    }
-    run(Command::new("glib-compile-schemas").arg(&schemas))?;
-
-    // Icons: Adwaita (GTK's own) and hicolor's index.
-    let icons = gtk_share.join("icons");
-    copy_tree(&icons.join("Adwaita"), &stage.join("share/icons/Adwaita"))?;
-    copy(
-        &icons.join("hicolor/index.theme"),
-        &stage.join("share/icons/hicolor/index.theme"),
+    crate::bundle_gtk_data(
+        &gtk_share,
+        &stage.join("share"),
+        Path::new("glib-compile-schemas"),
     )?;
 
     for program in crate::PROGRAMS {
@@ -258,14 +240,7 @@ fi
 exec "$here/bin/{program}" "$@"
 "#
     );
-    std::fs::write(path, script).map_err(|err| format!("{}: {err}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|err| format!("{}: {err}", path.display()))?;
-    }
-    Ok(())
+    crate::write_executable(path, &script)
 }
 
 const README: &str = "\

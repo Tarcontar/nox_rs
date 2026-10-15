@@ -19,6 +19,9 @@ use crate::converter::{
 use crate::export::{DmabufFormat, ExportPool};
 use crate::interop::{BufferTarget, FrameLight, GpuTarget, LinearFormat};
 use crate::scopes::{ScopeImages, Scopes};
+use crate::vk_util::{
+    OneShot, Pipeline, alloc_set, buffer_write, create_pipeline, image_write, push, semaphore_infos,
+};
 use crate::{
     Converter, DmabufFrame, Error, GpuDevice, Image, ImageSync, Input, PlaneFormat, Result, VkPlane,
 };
@@ -132,7 +135,7 @@ impl Rect {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BlendParams {
     offset: [i32; 2],
     size: [i32; 2],
@@ -269,17 +272,11 @@ impl LayerStyle {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct OutputParams {
     size: [i32; 2],
     /// `nox_color::OutputEncoding`.
     encoding: i32,
-}
-
-pub(crate) struct Pipeline {
-    pub set_layout: vk::DescriptorSetLayout,
-    pub layout: vk::PipelineLayout,
-    pub pipeline: vk::Pipeline,
 }
 
 /// A converted layer waiting to be blended.
@@ -321,7 +318,7 @@ struct LayerImage {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct YuvParams {
     rows: Matrix3x4,
     size: [i32; 2],
@@ -331,7 +328,7 @@ struct YuvParams {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct LinearParams {
     rows: Matrix3x4,
     size: [i32; 2],
@@ -404,9 +401,7 @@ pub struct Compositor {
     /// and how many it holds.
     light: Option<(GpuBuffer, u64)>,
     sampler: vk::Sampler,
-    command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    fence: vk::Fence,
+    one_shot: OneShot,
     width: u32,
     height: u32,
     accum: Option<(GpuImage, u32, u32)>,
@@ -517,21 +512,9 @@ impl Compositor {
                     .descriptor_pool(descriptor_pool)
                     .set_layouts(&blend_layouts),
             )?;
-            let output_set = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(descriptor_pool)
-                    .set_layouts(std::slice::from_ref(&output.set_layout)),
-            )?[0];
-            let output_yuv_set = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(descriptor_pool)
-                    .set_layouts(std::slice::from_ref(&output_yuv.set_layout)),
-            )?[0];
-            let output_linear_set = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(descriptor_pool)
-                    .set_layouts(std::slice::from_ref(&output_linear.set_layout)),
-            )?[0];
+            let output_set = alloc_set(device, descriptor_pool, output.set_layout)?;
+            let output_yuv_set = alloc_set(device, descriptor_pool, output_yuv.set_layout)?;
+            let output_linear_set = alloc_set(device, descriptor_pool, output_linear.set_layout)?;
             // Layers are blended 1:1, texel by texel.
             let sampler = device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -541,19 +524,7 @@ impl Compositor {
                     .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE),
                 None,
             )?;
-            let command_pool = device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(gpu.queue_family)
-                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                None,
-            )?;
-            let command_buffer = device.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(command_pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )?[0];
-            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+            let one_shot = OneShot::new(device, gpu.queue_family)?;
             Ok(Self {
                 converter,
                 blend,
@@ -571,9 +542,7 @@ impl Compositor {
                 output_linear_set,
                 light: None,
                 sampler,
-                command_pool,
-                command_buffer,
-                fence,
+                one_shot,
                 width: 0,
                 height: 0,
                 accum: None,
@@ -885,8 +854,8 @@ impl Compositor {
         );
         let groups = u64::from(groups_x) * u64::from(groups_y);
         self.ensure_light(groups)?;
-        let luma = self.plane_view(&target.luma, target.luma.format.vk())?;
-        let chroma = match self.plane_view(&target.chroma, target.chroma.format.vk()) {
+        let luma = self.plane_view(&target.luma)?;
+        let chroma = match self.plane_view(&target.chroma) {
             Ok(view) => view,
             Err(err) => {
                 // SAFETY: just created, unused.
@@ -1009,26 +978,9 @@ impl Compositor {
     }
 
     /// A storage view of one plane of another user's image.
-    fn plane_view(&self, plane: &VkPlane, format: vk::Format) -> Result<vk::ImageView> {
-        let mut usage = vk::ImageViewUsageCreateInfo::default().usage(vk::ImageUsageFlags::STORAGE);
+    fn plane_view(&self, plane: &VkPlane) -> Result<vk::ImageView> {
         // SAFETY: valid image of this device; destroyed by the caller.
-        let view = unsafe {
-            self.gpu().device.create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .image(plane.image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(plane.aspect)
-                            .level_count(1)
-                            .layer_count(1),
-                    )
-                    .push_next(&mut usage),
-                None,
-            )?
-        };
-        Ok(view)
+        Ok(unsafe { plane.view(&self.gpu().device, vk::ImageUsageFlags::STORAGE)? })
     }
 
     fn ensure_accum(&mut self) -> Result<()> {
@@ -1104,37 +1056,28 @@ impl Compositor {
             .collect();
         let mut writes = Vec::new();
         for (i, layer_info) in layer_infos.iter().enumerate() {
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.blend_sets[i])
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                    .image_info(std::slice::from_ref(&accum_info)),
-            );
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.blend_sets[i])
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(layer_info)),
-            );
+            writes.push(image_write(
+                self.blend_sets[i],
+                0,
+                vk::DescriptorType::STORAGE_IMAGE,
+                &accum_info,
+            ));
+            writes.push(image_write(
+                self.blend_sets[i],
+                1,
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                layer_info,
+            ));
         }
         if let Some(infos) = &buffer_infos {
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.output_linear_set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                    .image_info(std::slice::from_ref(&accum_info)),
-            );
+            writes.push(image_write(
+                self.output_linear_set,
+                0,
+                vk::DescriptorType::STORAGE_IMAGE,
+                &accum_info,
+            ));
             for (i, info) in infos.iter().enumerate() {
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.output_linear_set)
-                        .dst_binding(1 + i as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(std::slice::from_ref(info)),
-                );
+                writes.push(buffer_write(self.output_linear_set, 1 + i as u32, info));
             }
         }
         let outputs = if buffer_infos.is_some() {
@@ -1144,23 +1087,16 @@ impl Compositor {
         };
         for (binding, info) in outputs.into_iter().enumerate() {
             if let Some(info) = info {
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(output_set)
-                        .dst_binding(binding as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                        .image_info(std::slice::from_ref(info)),
-                );
+                writes.push(image_write(
+                    output_set,
+                    binding as u32,
+                    vk::DescriptorType::STORAGE_IMAGE,
+                    info,
+                ));
             }
         }
         if let Some(info) = &yuv_light {
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.output_yuv_set)
-                    .dst_binding(3)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(std::slice::from_ref(info)),
-            );
+            writes.push(buffer_write(self.output_yuv_set, 3, info));
         }
         // SAFETY: no submission using the sets is pending.
         unsafe { self.gpu().device.update_descriptor_sets(&writes, &[]) };
@@ -1191,17 +1127,13 @@ impl Compositor {
         self.write_descriptors(&views);
         let gpu = self.gpu().clone();
         let device = &gpu.device;
-        let cmd = self.command_buffer;
+        let cmd = self.one_shot.cmd;
         let accum = self.accum.as_ref().expect("accum").0.image;
         let (width, height) = (self.width, self.height);
         // SAFETY: all handles are valid; the previous submission has
         // completed (we wait on the fence at the end of every call).
         unsafe {
-            device.begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
+            self.one_shot.begin(device)?;
             // Layers converted by earlier submissions on this queue become
             // readable; cached stills blended before already are.
             let mut converted: Vec<vk::Image> = Vec::new();
@@ -1570,51 +1502,24 @@ impl Compositor {
                 let view = self.accum.as_ref().expect("accum").0.view;
                 scopes.record(device, cmd, view, width, height);
             }
-            device.end_command_buffer(cmd)?;
-            let (waits, signals): (Vec<_>, Vec<_>) = match &output {
-                Output::Yuv(target, ..) => target
-                    .images
-                    .iter()
-                    .map(|sync| {
-                        (
-                            vk::SemaphoreSubmitInfo::default()
-                                .semaphore(sync.semaphore)
-                                .value(sync.value)
-                                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-                            vk::SemaphoreSubmitInfo::default()
-                                .semaphore(sync.semaphore)
-                                .value(sync.value + 1)
-                                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-                        )
-                    })
-                    .unzip(),
+            let (waits, signals) = match &output {
+                Output::Yuv(target, ..) => {
+                    semaphore_infos(&target.images, vk::PipelineStageFlags2::ALL_COMMANDS)
+                }
                 _ => (Vec::new(), Vec::new()),
             };
-            let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
-            gpu.submit(
-                &vk::SubmitInfo2::default()
-                    .command_buffer_infos(std::slice::from_ref(&cmd_info))
-                    .wait_semaphore_infos(&waits)
-                    .signal_semaphore_infos(&signals),
-                self.fence,
-            )?;
+            self.one_shot.submit_and_wait(&gpu, &waits, &signals)?;
             for layer in &self.layers {
                 if let Source::Cached(i) = layer.source {
                     self.cache[i].layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
                 }
             }
-            // Submitted: record the state the images will be in.
+            // Done: record the state the images are in for their next user.
             if let Output::Yuv(target, ..) = &mut output {
                 for sync in &mut target.images {
-                    let (_, dst) = queue_transfer(sync.queue_family, gpu.queue_family);
-                    sync.layout = vk::ImageLayout::GENERAL;
-                    sync.access = vk::AccessFlags2::NONE;
-                    sync.queue_family = dst;
-                    sync.value += 1;
+                    sync.advance(vk::ImageLayout::GENERAL, gpu.queue_family);
                 }
             }
-            device.wait_for_fences(&[self.fence], true, u64::MAX)?;
-            device.reset_fences(&[self.fence])?;
             if let Some(scopes) = self.scopes.as_ref().filter(|_| measure) {
                 self.scope_images = Some(scopes.read());
             }
@@ -1649,8 +1554,7 @@ impl Drop for Compositor {
         let device = &gpu.device;
         // SAFETY: no submission is pending (every call waits for completion).
         unsafe {
-            device.destroy_fence(self.fence, None);
-            device.destroy_command_pool(self.command_pool, None);
+            self.one_shot.destroy(device);
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             for pipeline in [
@@ -1662,79 +1566,9 @@ impl Drop for Compositor {
                 &self.output_yuv_deep,
                 &self.output_linear,
             ] {
-                device.destroy_pipeline(pipeline.pipeline, None);
-                device.destroy_pipeline_layout(pipeline.layout, None);
-                device.destroy_descriptor_set_layout(pipeline.set_layout, None);
+                pipeline.destroy(device);
             }
         }
-    }
-}
-
-/// # Safety
-/// `device` must be valid.
-pub(crate) unsafe fn create_pipeline(
-    device: &ash::Device,
-    spirv: &[u8],
-    bindings: &[vk::DescriptorSetLayoutBinding<'_>],
-    push_size: usize,
-) -> Result<Pipeline> {
-    // SAFETY: guaranteed by the caller; objects are returned to the owner.
-    unsafe {
-        let set_layout = device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(bindings),
-            None,
-        )?;
-        let push_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .size(push_size as u32);
-        let layout = device.create_pipeline_layout(
-            &vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(std::slice::from_ref(&set_layout))
-                .push_constant_ranges(std::slice::from_ref(&push_range)),
-            None,
-        )?;
-        let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv)).expect("valid SPIR-V");
-        let module = device
-            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)?;
-        let stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::COMPUTE)
-            .module(module)
-            .name(c"main");
-        let pipeline = device
-            .create_compute_pipelines(
-                vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::default()
-                    .stage(stage)
-                    .layout(layout)],
-                None,
-            )
-            .map_err(|(_, err)| err)?[0];
-        device.destroy_shader_module(module, None);
-        Ok(Pipeline {
-            set_layout,
-            layout,
-            pipeline,
-        })
-    }
-}
-
-/// # Safety
-/// `cmd` must be recording with a pipeline using `layout` bound.
-pub(crate) unsafe fn push<T: Copy>(
-    device: &ash::Device,
-    cmd: vk::CommandBuffer,
-    layout: vk::PipelineLayout,
-    value: &T,
-) {
-    // SAFETY: guaranteed by the caller; `T` is plain data.
-    unsafe {
-        device.cmd_push_constants(
-            cmd,
-            layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            std::slice::from_raw_parts((value as *const T).cast(), size_of::<T>()),
-        );
     }
 }
 

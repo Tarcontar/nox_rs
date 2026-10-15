@@ -16,6 +16,9 @@ use std::sync::Arc;
 
 use crate::export::{DmabufFormat, DmabufFrame, ExportPool};
 use crate::interop::{LinearLayout, SharedBuffer};
+use crate::vk_util::{
+    OneShot, Pipeline, alloc_set, compute_pipeline, create_pipeline, image_write, semaphore_infos,
+};
 use crate::{Error, GpuDevice, Image, Result};
 
 const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ycbcr_to_rgb.comp.spv"));
@@ -180,6 +183,38 @@ pub struct VkPlane {
     pub height: u32,
 }
 
+impl VkPlane {
+    /// A view of the plane in its `format`, for `usage` (which the
+    /// plane's format may not support for the whole image).
+    ///
+    /// # Safety
+    /// `device` must own the image; the caller destroys the view.
+    pub(crate) unsafe fn view(
+        &self,
+        device: &ash::Device,
+        usage: vk::ImageUsageFlags,
+    ) -> ash::prelude::VkResult<vk::ImageView> {
+        let mut usage = vk::ImageViewUsageCreateInfo::default().usage(usage);
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(self.image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(self.format.vk())
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(self.aspect)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .push_next(&mut usage),
+                None,
+            )
+        }
+    }
+}
+
 /// Synchronization state of an image shared with another user (FFmpeg).
 /// The converter waits on `semaphore` reaching `value`, signals `value + 1`
 /// and updates the other fields to the state it leaves the image in.
@@ -192,6 +227,20 @@ pub struct ImageSync {
     /// Timeline semaphore.
     pub semaphore: vk::Semaphore,
     pub value: u64,
+}
+
+impl ImageSync {
+    /// Records the state a submission on `own_family` that waited for and
+    /// signalled the semaphore (`vk_util::semaphore_infos`) left the image
+    /// in: `layout`, no pending access, owned by `own_family` (unless it
+    /// stays shared), and the next semaphore value.
+    pub(crate) fn advance(&mut self, layout: vk::ImageLayout, own_family: u32) {
+        let (_, dst_family) = queue_transfer(self.queue_family, own_family);
+        self.layout = layout;
+        self.access = vk::AccessFlags2::NONE;
+        self.queue_family = dst_family;
+        self.value += 1;
+    }
 }
 
 /// A frame whose planes are Vulkan images, converted without copies.
@@ -330,7 +379,7 @@ impl Input<'_, '_> {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PushConstants {
     rows: Matrix3x4,
     chroma_offset: [f32; 2],
@@ -408,18 +457,14 @@ enum Target<'a> {
 
 pub struct Converter {
     gpu: Arc<GpuDevice>,
-    set_layout: vk::DescriptorSetLayout,
-    pipeline_layout: vk::PipelineLayout,
     /// To display R'G'B' (RGBA8).
-    pipeline: vk::Pipeline,
-    /// To the working space (RGBA32F).
+    pipeline: Pipeline,
+    /// To the working space (RGBA32F), with `pipeline`'s layout.
     working_pipeline: vk::Pipeline,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
     sampler: vk::Sampler,
-    command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    fence: vk::Fence,
+    one_shot: OneShot,
     inputs: Option<Inputs>,
     readback: Option<Readback>,
     export: Option<ExportPool>,
@@ -443,43 +488,8 @@ impl Converter {
                 plane_binding(2),
                 plane_binding(3),
             ];
-            let set_layout = device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                None,
-            )?;
-            let push_range = vk::PushConstantRange::default()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(size_of::<PushConstants>() as u32);
-            let pipeline_layout = device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(std::slice::from_ref(&set_layout))
-                    .push_constant_ranges(std::slice::from_ref(&push_range)),
-                None,
-            )?;
-
-            let create = |spirv: &[u8]| -> Result<vk::Pipeline> {
-                let code =
-                    ash::util::read_spv(&mut std::io::Cursor::new(spirv)).expect("valid SPIR-V");
-                let module = device.create_shader_module(
-                    &vk::ShaderModuleCreateInfo::default().code(&code),
-                    None,
-                )?;
-                let stage = vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::COMPUTE)
-                    .module(module)
-                    .name(c"main");
-                let pipeline = device.create_compute_pipelines(
-                    vk::PipelineCache::null(),
-                    &[vk::ComputePipelineCreateInfo::default()
-                        .stage(stage)
-                        .layout(pipeline_layout)],
-                    None,
-                );
-                device.destroy_shader_module(module, None);
-                Ok(pipeline.map_err(|(_, err)| err)?[0])
-            };
-            let pipeline = create(SHADER)?;
-            let working_pipeline = create(WORKING_SHADER)?;
+            let pipeline = create_pipeline(device, SHADER, &bindings, size_of::<PushConstants>())?;
+            let working_pipeline = compute_pipeline(device, WORKING_SHADER, pipeline.layout)?;
 
             let pool_sizes = [
                 vk::DescriptorPoolSize {
@@ -497,11 +507,7 @@ impl Converter {
                     .pool_sizes(&pool_sizes),
                 None,
             )?;
-            let descriptor_set = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(descriptor_pool)
-                    .set_layouts(std::slice::from_ref(&set_layout)),
-            )?[0];
+            let descriptor_set = alloc_set(device, descriptor_pool, pipeline.set_layout)?;
 
             let sampler = device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -513,32 +519,16 @@ impl Converter {
                 None,
             )?;
 
-            let command_pool = device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(gpu.queue_family)
-                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                None,
-            )?;
-            let command_buffer = device.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(command_pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )?[0];
-            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+            let one_shot = OneShot::new(device, gpu.queue_family)?;
 
             Ok(Self {
                 gpu,
-                set_layout,
-                pipeline_layout,
                 pipeline,
                 working_pipeline,
                 descriptor_pool,
                 descriptor_set,
                 sampler,
-                command_pool,
-                command_buffer,
-                fence,
+                one_shot,
                 inputs: None,
                 readback: None,
                 export: None,
@@ -726,25 +716,8 @@ impl Converter {
     fn plane_views(&self, frame: &VkFrame) -> Result<Vec<vk::ImageView>> {
         let mut views = Vec::new();
         for plane in &frame.planes {
-            let mut usage =
-                vk::ImageViewUsageCreateInfo::default().usage(vk::ImageUsageFlags::SAMPLED);
             // SAFETY: valid image of this device; destroyed after use by `run`.
-            let view = unsafe {
-                self.gpu.device.create_image_view(
-                    &vk::ImageViewCreateInfo::default()
-                        .image(plane.image)
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(plane.format.vk())
-                        .subresource_range(
-                            vk::ImageSubresourceRange::default()
-                                .aspect_mask(plane.aspect)
-                                .level_count(1)
-                                .layer_count(1),
-                        )
-                        .push_next(&mut usage),
-                    None,
-                )
-            };
+            let view = unsafe { plane.view(&self.gpu.device, vk::ImageUsageFlags::SAMPLED) };
             match view {
                 Ok(view) => views.push(view),
                 Err(err) => {
@@ -775,16 +748,12 @@ impl Converter {
         self.write_descriptors(plane_views, out_view);
 
         let device = &self.gpu.device;
-        let cmd = self.command_buffer;
+        let cmd = self.one_shot.cmd;
         let own_family = self.gpu.queue_family;
         // SAFETY: all handles are valid; the previous submission has completed
         // (we wait on the fence at the end of every call).
         unsafe {
-            device.begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
+            self.one_shot.begin(device)?;
 
             // The output is fully overwritten, so its old contents (and, for
             // exported images, the consumer's last use) don't matter.
@@ -955,13 +924,13 @@ impl Converter {
 
             let pipeline = match target {
                 Target::Image(..) => self.working_pipeline,
-                Target::Readback(_) | Target::Export(..) => self.pipeline,
+                Target::Readback(_) | Target::Export(..) => self.pipeline.pipeline,
             };
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
-                self.pipeline_layout,
+                self.pipeline.layout,
                 0,
                 &[self.descriptor_set],
                 &[],
@@ -990,10 +959,10 @@ impl Converter {
             };
             device.cmd_push_constants(
                 cmd,
-                self.pipeline_layout,
+                self.pipeline.layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                std::slice::from_raw_parts((&raw const push).cast(), size_of::<PushConstants>()),
+                bytemuck::bytes_of(&push),
             );
             device.cmd_dispatch(
                 cmd,
@@ -1021,53 +990,24 @@ impl Converter {
                     );
                 }
             }
-            device.end_command_buffer(cmd)?;
-
             // External images: wait for the decoder, then signal the next value.
-            let (waits, signals): (Vec<_>, Vec<_>) = match &*input {
+            let (waits, signals) = match &*input {
                 Input::Cpu(_) | Input::Buffer(_) => (Vec::new(), Vec::new()),
-                Input::Vulkan(frame) => frame
-                    .images
-                    .iter()
-                    .map(|sync| {
-                        (
-                            vk::SemaphoreSubmitInfo::default()
-                                .semaphore(sync.semaphore)
-                                .value(sync.value)
-                                .stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER),
-                            vk::SemaphoreSubmitInfo::default()
-                                .semaphore(sync.semaphore)
-                                .value(sync.value + 1)
-                                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-                        )
-                    })
-                    .unzip(),
+                Input::Vulkan(frame) => {
+                    semaphore_infos(&frame.images, vk::PipelineStageFlags2::COMPUTE_SHADER)
+                }
             };
-            let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
-            self.gpu.submit(
-                &vk::SubmitInfo2::default()
-                    .command_buffer_infos(std::slice::from_ref(&cmd_info))
-                    .wait_semaphore_infos(&waits)
-                    .signal_semaphore_infos(&signals),
-                self.fence,
-            )?;
-            // Submitted: the images will be in our state; record it for the
-            // next user.
+            self.one_shot.submit_and_wait(&self.gpu, &waits, &signals)?;
+            // Done: record the state the images are in for their next user.
+            // Reads need no availability operation; the semaphore orders the
+            // next user. (SHADER_READ as the access would end up as the
+            // source access of FFmpeg's next barrier, which is invalid on its
+            // transfer queue.)
             if let Input::Vulkan(frame) = input {
                 for sync in &mut frame.images {
-                    let (_, dst_family) = queue_transfer(sync.queue_family, own_family);
-                    sync.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-                    // Reads need no availability operation; the semaphore
-                    // orders the next user. (SHADER_READ here would end up
-                    // as the source access of FFmpeg's next barrier, which
-                    // is invalid on its transfer queue.)
-                    sync.access = vk::AccessFlags2::NONE;
-                    sync.queue_family = dst_family;
-                    sync.value += 1;
+                    sync.advance(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, own_family);
                 }
             }
-            device.wait_for_fences(&[self.fence], true, u64::MAX)?;
-            device.reset_fences(&[self.fence])?;
         }
         Ok(())
     }
@@ -1227,21 +1167,19 @@ impl Converter {
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             })
             .collect();
-        let mut writes = vec![
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(std::slice::from_ref(&output)),
-        ];
+        let mut writes = vec![image_write(
+            self.descriptor_set,
+            0,
+            vk::DescriptorType::STORAGE_IMAGE,
+            &output,
+        )];
         for (i, info) in planes.iter().enumerate() {
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.descriptor_set)
-                    .dst_binding(i as u32 + 1)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(info)),
-            );
+            writes.push(image_write(
+                self.descriptor_set,
+                i as u32 + 1,
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                info,
+            ));
         }
         // SAFETY: the set is not in use (no pending submission).
         unsafe { self.gpu.device.update_descriptor_sets(&writes, &[]) };
@@ -1296,14 +1234,11 @@ impl Drop for Converter {
         let device = &self.gpu.device;
         // SAFETY: no submission is pending (every call waits for completion).
         unsafe {
-            device.destroy_fence(self.fence, None);
-            device.destroy_command_pool(self.command_pool, None);
+            self.one_shot.destroy(device);
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline(self.working_pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_set_layout(self.set_layout, None);
+            self.pipeline.destroy(device);
         }
     }
 }

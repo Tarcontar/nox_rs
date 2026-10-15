@@ -128,16 +128,7 @@ impl MediaObject {
         self.set_icon_name(icon);
         self.set_summary(summary);
         self.set_details(details);
-        self.set_thumbnail(thumbnail.map(|image| {
-            gdk::MemoryTexture::new(
-                image.width as i32,
-                image.height as i32,
-                gdk::MemoryFormat::R8g8b8a8,
-                &glib::Bytes::from_owned(image.data),
-                image.stride,
-            )
-            .upcast::<gdk::Texture>()
-        }));
+        self.set_thumbnail(thumbnail.map(crate::ui_util::texture));
     }
 
     fn set_failed(&self, error: &str) {

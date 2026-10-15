@@ -651,37 +651,42 @@ impl MediaWriter {
 
     fn drain_video(&mut self) -> Result<()> {
         let video = &mut self.video;
-        let stream_tb = self
-            .output
-            .stream(video.stream)
-            .expect("stream")
-            .time_base();
-        let mut packet = ffmpeg::Packet::empty();
-        while video.encoder.receive_packet(&mut packet).is_ok() {
-            packet.set_stream(video.stream);
-            packet.rescale_ts(video.time_base, stream_tb);
-            packet.write_interleaved(&mut self.output)?;
-        }
-        Ok(())
+        drain(
+            &mut video.encoder,
+            video.stream,
+            video.time_base,
+            &mut self.output,
+        )
     }
 
     fn drain_audio(&mut self) -> Result<()> {
-        let Some(audio) = &mut self.audio else {
-            return Ok(());
-        };
-        let stream_tb = self
-            .output
-            .stream(audio.stream)
-            .expect("stream")
-            .time_base();
-        let mut packet = ffmpeg::Packet::empty();
-        while audio.encoder.receive_packet(&mut packet).is_ok() {
-            packet.set_stream(audio.stream);
-            packet.rescale_ts(audio.time_base, stream_tb);
-            packet.write_interleaved(&mut self.output)?;
+        match &mut self.audio {
+            Some(audio) => drain(
+                &mut audio.encoder,
+                audio.stream,
+                audio.time_base,
+                &mut self.output,
+            ),
+            None => Ok(()),
         }
-        Ok(())
     }
+}
+
+/// Writes the packets `encoder` has ready to `stream` of `output`.
+fn drain(
+    encoder: &mut encoder::Encoder,
+    stream: usize,
+    time_base: ffmpeg::Rational,
+    output: &mut format::context::Output,
+) -> Result<()> {
+    let stream_tb = output.stream(stream).expect("stream").time_base();
+    let mut packet = ffmpeg::Packet::empty();
+    while encoder.receive_packet(&mut packet).is_ok() {
+        packet.set_stream(stream);
+        packet.rescale_ts(time_base, stream_tb);
+        packet.write_interleaved(output)?;
+    }
+    Ok(())
 }
 
 /// Opens the first encoder of `settings.codec` that works.
@@ -905,29 +910,27 @@ pub fn probe_encoders(
     };
     // Encoders that don't open say why on FFmpeg's log; here that's an
     // answer, not an error.
-    // SAFETY: plain global setters.
-    let level = unsafe { ffi::av_log_get_level() };
-    unsafe { ffi::av_log_set_level(ffi::AV_LOG_QUIET) };
-    let found = codec
-        .encoders(true)
-        .iter()
-        .filter_map(|&name| {
-            let found = find_encoder(name, &settings).ok()?;
-            let frames = hwaccel::open_sink(name, &settings).ok()?;
-            if let Err(err) = open_video_encoder(found, name, &settings, false, frames.as_deref()) {
-                tracing::debug!("{name} doesn't open: {err}");
-                return None;
-            }
-            Some(EncoderProbe {
-                name,
-                hardware: !matches!(name, "libx264" | "libx265" | "prores_ks"),
-                gpu_frames: frames.map(|f| f.api()),
+    crate::stream::with_quiet_log(|| {
+        codec
+            .encoders(true)
+            .iter()
+            .filter_map(|&name| {
+                let found = find_encoder(name, &settings).ok()?;
+                let frames = hwaccel::open_sink(name, &settings).ok()?;
+                if let Err(err) =
+                    open_video_encoder(found, name, &settings, false, frames.as_deref())
+                {
+                    tracing::debug!("{name} doesn't open: {err}");
+                    return None;
+                }
+                Some(EncoderProbe {
+                    name,
+                    hardware: !matches!(name, "libx264" | "libx265" | "prores_ks"),
+                    gpu_frames: frames.map(|f| f.api()),
+                })
             })
-        })
-        .collect();
-    // SAFETY: as above.
-    unsafe { ffi::av_log_set_level(level) };
-    found
+            .collect()
+    })
 }
 
 /// Opens encoder `name`, taking frames from `gpu_frames` if given, and
@@ -1266,24 +1269,17 @@ struct ContentLight {
 /// `par` must be the stream's codec parameters, before the trailer is
 /// written.
 unsafe fn add_content_light(par: *mut ffi::AVCodecParameters, max_cll: f32, max_fall: f32) {
-    // SAFETY: guaranteed by the caller; FFmpeg allocates and owns the data.
+    let light = ContentLight {
+        max_cll: max_cll.round().clamp(0.0, 65535.0) as u32,
+        max_fall: max_fall.round().clamp(0.0, 65535.0) as u32,
+    };
+    // SAFETY: guaranteed by the caller.
     unsafe {
-        let data = ffi::av_packet_side_data_new(
-            &mut (*par).coded_side_data,
-            &mut (*par).nb_coded_side_data,
+        add_coded_side_data(
+            par,
             ffi::AVPacketSideDataType::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
-            size_of::<ContentLight>(),
-            0,
+            light,
         );
-        if !data.is_null() {
-            (*data)
-                .data
-                .cast::<ContentLight>()
-                .write_unaligned(ContentLight {
-                    max_cll: max_cll.round().clamp(0.0, 65535.0) as u32,
-                    max_fall: max_fall.round().clamp(0.0, 65535.0) as u32,
-                });
-        }
     }
 }
 
@@ -1294,20 +1290,38 @@ unsafe fn add_content_light(par: *mut ffi::AVCodecParameters, max_cll: f32, max_
 /// `par` must be the stream's codec parameters, before the header is
 /// written.
 unsafe fn add_hdr10_stream_data(par: *mut ffi::AVCodecParameters, peak: f32) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        add_coded_side_data(
+            par,
+            ffi::AVPacketSideDataType::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+            mastering_display(peak),
+        );
+    }
+}
+
+/// Adds `value` (the C struct FFmpeg expects for `kind`) to the stream's
+/// side data.
+///
+/// # Safety
+/// `par` must be valid stream parameters, and `T` must be the layout of
+/// `kind`'s data.
+unsafe fn add_coded_side_data<T>(
+    par: *mut ffi::AVCodecParameters,
+    kind: ffi::AVPacketSideDataType,
+    value: T,
+) {
     // SAFETY: guaranteed by the caller; FFmpeg allocates and owns the data.
     unsafe {
         let data = ffi::av_packet_side_data_new(
             &mut (*par).coded_side_data,
             &mut (*par).nb_coded_side_data,
-            ffi::AVPacketSideDataType::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
-            size_of::<MasteringDisplay>(),
+            kind,
+            size_of::<T>(),
             0,
         );
         if !data.is_null() {
-            (*data)
-                .data
-                .cast::<MasteringDisplay>()
-                .write_unaligned(mastering_display(peak));
+            (*data).data.cast::<T>().write_unaligned(value);
         }
     }
 }

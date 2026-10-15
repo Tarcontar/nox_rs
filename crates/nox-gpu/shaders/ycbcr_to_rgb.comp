@@ -55,22 +55,6 @@ const int HDR_PQ = 1;
 const int HDR_HLG = 2;
 const float SDR_WHITE = 203.0;
 
-const float PQ_M1 = 2610.0 / 16384.0;
-const float PQ_M2 = 2523.0 / 4096.0 * 128.0;
-const float PQ_C1 = 3424.0 / 4096.0;
-const float PQ_C2 = 2413.0 / 4096.0 * 32.0;
-const float PQ_C3 = 2392.0 / 4096.0 * 32.0;
-
-// PQ signal to light relative to 10000 nits, and back.
-float pq_eotf(float e) {
-    float p = pow(clamp(e, 0.0, 1.0), 1.0 / PQ_M2);
-    return pow(max(p - PQ_C1, 0.0) / (PQ_C2 - PQ_C3 * p), 1.0 / PQ_M1);
-}
-float pq_inverse(float l) {
-    float y = pow(clamp(l, 0.0, 1.0), PQ_M1);
-    return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), PQ_M2);
-}
-
 // BT.2390 EETF in PQ space: source peak onto target peak.
 float eetf(float nits, float source_peak, float target_peak) {
     if (source_peak <= target_peak) {

@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use crate::i18n::{fill, gettext, n_, ngettext};
 use crate::project::Project;
+use crate::ui_util::string_list;
 
 /// How the codec list names a codec.
 fn codec_label(codec: VideoCodec) -> &'static str {
@@ -132,13 +133,6 @@ fn encoder_text(name: &'static str) -> (&'static str, &'static str) {
         ),
         _ => (name, ""),
     }
-}
-
-fn string_list<'a>(names: impl Iterator<Item = &'a str>, translate: bool) -> gtk::StringList {
-    let names: Vec<String> = names
-        .map(|n| if translate { gettext(n) } else { n.to_owned() })
-        .collect();
-    gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 mod imp {
@@ -278,16 +272,15 @@ impl ExportDialog {
     fn setup(&self) {
         let imp = self.imp();
         imp.preset
-            .set_model(Some(&string_list(PRESETS.iter().map(|p| p.0), true)));
+            .set_model(Some(&string_list(PRESETS.iter().map(|p| p.0).map(gettext))));
         // Container and codec names are technical and stay as they are.
-        imp.container.set_model(Some(&string_list(
-            Container::ALL.iter().map(|c| c.name()),
-            false,
+        imp.container
+            .set_model(Some(&string_list(Container::ALL.iter().map(|c| c.name()))));
+        imp.quality.set_model(Some(&string_list(
+            QUALITIES.iter().map(|q| q.0).map(gettext),
         )));
-        imp.quality
-            .set_model(Some(&string_list(QUALITIES.iter().map(|q| q.0), true)));
         imp.dynamic_range
-            .set_model(Some(&string_list(RANGES.iter().map(|r| r.0), true)));
+            .set_model(Some(&string_list(RANGES.iter().map(|r| r.0).map(gettext))));
         self.list_codecs();
         self.list_audio_codecs(true);
         self.show_peak();
@@ -501,7 +494,7 @@ impl ExportDialog {
         imp.refilling.set(true);
         imp.audio_codecs.replace(codecs.to_vec());
         imp.audio_codec
-            .set_model(Some(&string_list(labels.iter().map(String::as_str), false)));
+            .set_model(Some(&string_list(labels.iter().map(String::as_str))));
         let index = codecs.iter().position(|&c| c == wanted).unwrap_or(0);
         imp.audio_codec.set_selected(index as u32);
         imp.refilling.set(false);
@@ -522,10 +515,8 @@ impl ExportDialog {
             .unwrap_or(0);
         imp.refilling.set(true);
         imp.codecs.replace(codecs.to_vec());
-        imp.codec.set_model(Some(&string_list(
-            codecs.iter().map(|&c| codec_label(c)),
-            false,
-        )));
+        imp.codec
+            .set_model(Some(&string_list(codecs.iter().map(|&c| codec_label(c)))));
         imp.codec.set_selected(selected as u32);
         imp.refilling.set(false);
         // AVI holds H.264 only, which is SDR.
@@ -557,7 +548,7 @@ impl ExportDialog {
         imp.listing.set(true);
         imp.encoders.replace(probed.then_some(found));
         imp.encoder
-            .set_model(Some(&string_list(names.iter().map(String::as_str), false)));
+            .set_model(Some(&string_list(names.iter().map(String::as_str))));
         imp.encoder.set_selected(selected);
         imp.listing.set(false);
         self.explain_encoder();
@@ -637,10 +628,8 @@ impl ExportDialog {
                 ],
             ));
         }
-        imp.range.set_model(Some(&string_list(
-            choices.iter().map(String::as_str),
-            false,
-        )));
+        imp.range
+            .set_model(Some(&string_list(choices.iter().map(String::as_str))));
         imp.range.set_sensitive(marked.is_some());
         imp.range.set_selected(if marked.is_some() { 1 } else { 0 });
         imp.ranges.set((full, marked)).expect("loaded once");

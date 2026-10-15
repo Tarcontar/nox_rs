@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+clap.workspace = true
 nox-engine.workspace = true
 nox-media.workspace = true
 nox-otio.workspace = true

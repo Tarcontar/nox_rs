@@ -9,6 +9,7 @@ mod frames;
 mod hw;
 mod hwaccel;
 mod probe;
+mod stream;
 mod thumbnail;
 mod tiles;
 pub mod waveform;

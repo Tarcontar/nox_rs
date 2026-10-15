@@ -181,27 +181,17 @@ impl SharedBuffer {
                 None,
             )?;
             let requirements = device.get_buffer_memory_requirements(buffer);
-            let Some(memory_type) = gpu.memory_type(
-                requirements.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            ) else {
-                device.destroy_buffer(buffer, None);
-                return Err(Error::Unsupported("no device-local memory to share".into()));
-            };
-            let mut export = vk::ExportMemoryAllocateInfo::default().handle_types(handle.vk());
-            let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().buffer(buffer);
-            let memory = match device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(memory_type)
-                    .push_next(&mut export)
-                    .push_next(&mut dedicated),
-                None,
+            let memory = match crate::vk_util::alloc_exportable(
+                gpu,
+                requirements,
+                handle.vk(),
+                vk::MemoryDedicatedAllocateInfo::default().buffer(buffer),
+                "to share",
             ) {
                 Ok(memory) => memory,
                 Err(err) => {
                     device.destroy_buffer(buffer, None);
-                    return Err(err.into());
+                    return Err(err);
                 }
             };
             if let Err(err) = device.bind_buffer_memory(buffer, memory, 0) {

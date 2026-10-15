@@ -2,26 +2,9 @@
 
 mod common;
 
-use common::fixture;
+use common::{fixture, gpu};
 use nox_gpu::Converter;
-use nox_media::{Accel, HwDecode, VideoDecoder, ffmpeg, rgba_cpu, to_software, with_cpu_frame};
-use std::sync::{Arc, OnceLock};
-
-/// One shared GPU for all tests (device creation is slow); `None` without Vulkan.
-fn gpu() -> Option<(Accel, Arc<nox_gpu::GpuDevice>)> {
-    static GPU: OnceLock<Option<(Accel, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
-    GPU.get_or_init(|| match Accel::new() {
-        Ok(accel) => Some((accel.clone(), accel.gpu().clone())),
-        Err(err) if std::env::var_os("NOX_REQUIRE_GPU").is_some() => {
-            panic!("no Vulkan GPU ({err}), but NOX_REQUIRE_GPU is set")
-        }
-        Err(err) => {
-            eprintln!("skipping GPU tests: {err}");
-            None
-        }
-    })
-    .clone()
-}
+use nox_media::{HwDecode, VideoDecoder, ffmpeg, rgba_cpu, to_software, with_cpu_frame};
 
 /// A clip whose luma is `16 + 3 * frame index`, so decoded frames identify
 /// themselves. MPEG-4 with B-frames and short GOPs exercises reordering and
@@ -54,6 +37,50 @@ fn frame_accurate_random_access() {
             "frame {index}: luma {actual}, expected {expected}"
         );
     }
+}
+
+/// Variable frame rate, as phones record (iPhone Live Photos: 30 fps,
+/// then 15 fps): every frame shows at its time, none is skipped or
+/// repeated out of turn, and gaps hold the frame before. The average rate
+/// (here 17.5 fps) put frames on a grid where some collided, so motion
+/// jumped.
+#[test]
+fn variable_frame_rate_shows_every_frame() {
+    // 30 fps counting frames; after the first 10 only the even ones,
+    // keeping their timestamps.
+    #[rustfmt::skip]
+    let args = [
+        "-f", "lavfi", "-i", "color=c=black:size=64x64:rate=30:duration=2,format=yuv420p",
+        "-vf", "geq=lum='16+N*3':cb=128:cr=128,select='lt(n\\,10)+not(mod(n\\,2))'",
+        "-fps_mode", "passthrough",
+        "-c:v", "mpeg4", "-q:v", "1", "-g", "12", "-bf", "2",
+    ];
+    let Some(path) = fixture("vfr.mp4", &args) else {
+        return;
+    };
+    let mut decoder = VideoDecoder::open(&path, None).unwrap();
+    assert_eq!(decoder.frame_rate(), nox_project::Rational::new(30, 1));
+    let shown = |n: i64| if n < 10 { n } else { n - n % 2 };
+    let check = |decoder: &mut VideoDecoder, index: i64| {
+        let frame = decoder.frame_at(index).unwrap();
+        let expected = (16 + shown(index) * 3) as i32;
+        let actual = i32::from(luma_of(&frame));
+        assert!(
+            (actual - expected).abs() <= 1,
+            "frame {index}: luma {actual}, expected {expected}"
+        );
+    };
+    // Played through, then seeking around.
+    for index in 0..59 {
+        check(&mut decoder, index);
+    }
+    for index in [41, 7, 12, 13, 30, 3] {
+        check(&mut decoder, index);
+    }
+    assert_eq!(
+        nox_media::probe(&path).unwrap().video.unwrap().frame_rate,
+        Some(nox_project::Rational::new(30, 1))
+    );
 }
 
 /// swscale ignores the chroma location and assumes center-sited chroma,

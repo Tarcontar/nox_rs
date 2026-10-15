@@ -11,6 +11,7 @@ use crate::i18n::{blend_mode_name, fill, gettext};
 use crate::playback::Playback;
 use crate::project::Project;
 use crate::timeline::TimelineView;
+use crate::ui_util::string_list;
 
 mod imp {
     use super::*;
@@ -136,28 +137,23 @@ mod imp {
     impl ObjectImpl for Inspector {
         fn constructed(&self) {
             self.parent_constructed();
-            let names: Vec<String> = BlendMode::ALL.into_iter().map(blend_mode_name).collect();
-            let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            self.blend_dropdown
-                .set_model(Some(&gtk::StringList::new(&names)));
-            let colors: Vec<String> = nox_project::MARKER_COLORS
-                .iter()
-                .map(|c| marker_color_name(c))
-                .collect();
-            let colors: Vec<&str> = colors.iter().map(String::as_str).collect();
+            self.blend_dropdown.set_model(Some(&string_list(
+                BlendMode::ALL.into_iter().map(blend_mode_name),
+            )));
             self.updating.set(true);
-            self.marker_color
-                .set_model(Some(&gtk::StringList::new(&colors)));
+            self.marker_color.set_model(Some(&string_list(
+                nox_project::MARKER_COLORS
+                    .iter()
+                    .map(|c| marker_color_name(c)),
+            )));
             self.updating.set(false);
 
-            let kinds: Vec<String> = TransitionKind::ALL
-                .into_iter()
-                .map(crate::i18n::transition_name)
-                .collect();
-            let kinds: Vec<&str> = kinds.iter().map(String::as_str).collect();
             self.updating.set(true);
-            self.transition_type
-                .set_model(Some(&gtk::StringList::new(&kinds)));
+            self.transition_type.set_model(Some(&string_list(
+                TransitionKind::ALL
+                    .into_iter()
+                    .map(crate::i18n::transition_name),
+            )));
             self.updating.set(false);
 
             let obj = self.obj();

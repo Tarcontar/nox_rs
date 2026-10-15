@@ -40,18 +40,12 @@ impl AudioDecoder {
             .ok_or(Error::NoAudioStream)?;
         let stream_index = stream.index();
         let time_base = stream.time_base();
-        let start = match stream.start_time() {
-            ffi::AV_NOPTS_VALUE => 0,
-            start => start,
-        };
+        let start = crate::stream::start_time(&stream);
         let context = codec::Context::from_parameters(stream.parameters())?;
         let decoder = context.decoder().audio()?;
         // Only the audio is read: less to demux, and Matroska's seeks
         // otherwise stop at video blocks ("keyframes not correctly marked").
-        for mut other in input.streams_mut().filter(|s| s.index() != stream_index) {
-            // SAFETY: the stream's own field, before reading packets.
-            unsafe { (*other.as_mut_ptr()).discard = ffi::AVDiscard::AVDISCARD_ALL };
-        }
+        crate::stream::discard_other_streams(&mut input, stream_index);
         Ok(Self {
             input,
             decoder,
@@ -120,20 +114,7 @@ impl AudioDecoder {
         // A little early, so the decoder has settled at the requested sample.
         let seconds = (sample as f64 / f64::from(self.rate) - 0.1).max(0.0);
         let ts = self.start + (seconds / f64::from(self.time_base)) as i64;
-        // SAFETY: valid context; seeks to the last position at or before `ts`.
-        let result = unsafe {
-            ffi::avformat_seek_file(
-                self.input.as_mut_ptr(),
-                self.stream_index as i32,
-                i64::MIN,
-                ts,
-                ts,
-                0,
-            )
-        };
-        if result < 0 {
-            return Err(ffmpeg::Error::from(result).into());
-        }
+        crate::stream::seek_stream(&mut self.input, self.stream_index, ts)?;
         self.decoder.flush();
         self.resampler = None;
         self.buffer.clear();
@@ -151,22 +132,17 @@ impl AudioDecoder {
                 self.append(&decoded)?;
                 return Ok(());
             }
-            match self.input.packets().next() {
-                Some((stream, packet)) => {
-                    if stream.index() == self.stream_index {
-                        // Corrupt packets are skipped, as players do.
-                        let _ = self.decoder.send_packet(&packet);
-                    }
+            if crate::stream::send_next_packet(
+                &mut self.input,
+                &mut self.decoder,
+                self.stream_index,
+            )? {
+                if self.decoder.receive_frame(&mut decoded).is_ok() {
+                    self.append(&decoded)?;
+                } else {
+                    self.eof = true;
                 }
-                None => {
-                    let _ = self.decoder.send_eof();
-                    if self.decoder.receive_frame(&mut decoded).is_ok() {
-                        self.append(&decoded)?;
-                    } else {
-                        self.eof = true;
-                    }
-                    return Ok(());
-                }
+                return Ok(());
             }
         }
     }

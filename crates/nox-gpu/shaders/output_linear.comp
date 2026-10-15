@@ -38,23 +38,7 @@ layout(push_constant) uniform Params {
 } p;
 
 #include "light.glsl"
-
-vec4 rgb_at(ivec2 pos) {
-    pos = clamp(pos, ivec2(0), p.size - 1);
-    return vec4(encode_output(imageLoad(accum, pos).rgb, p.encoding), 1.0);
-}
-
-// Cb, Cr (normalized) of the chroma sample at luma column `x`, rows
-// `y` and `y + 1`.
-vec2 chroma_at(int x, int y) {
-    vec4 rgb = vec4(0.0);
-    for (int dy = 0; dy < 2; dy++) {
-        ivec2 row = ivec2(x, y + dy);
-        rgb += 0.25 * rgb_at(row - ivec2(1, 0)) + 0.5 * rgb_at(row) + 0.25 * rgb_at(row + ivec2(1, 0));
-    }
-    rgb *= 0.5;
-    return vec2(dot(p.row1, rgb), dot(p.row2, rgb));
-}
+#include "yuv_output.glsl"
 
 uint unorm16(float v) {
     return uint(round(clamp(v, 0.0, 1.0) * 65535.0));

@@ -1,30 +1,119 @@
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use nox_engine::{AudioCodec, Container, EncodeQuality, ExportSettings, VideoCodec};
+use nox_media::OutputEncoding;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::ops::Range;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: nox-cli <command>
+/// Probes media and renders Nox timelines without the editor.
+#[derive(Parser)]
+#[command(name = "nox-cli", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-commands:
-  version          print Nox and FFmpeg versions
-  probe <file>...  print stream information
-  encoders         list the encoders that work on this system
-  render <project.otio> <output> [options]
-                   render a timeline to a file (container from the
-                   extension: .mp4, .mov, .mkv, .webm, .avi)
-    --codec h264|hevc|prores|av1|vp9
-                               (default: h264; prores for .mov, vp9 for .webm)
-    --audio aac|opus|mp3|flac|pcm16|pcm24
-                               audio codec (default: the container's usual)
-    --quality high|medium|low  (default: high)
-    --software                 no hardware encoders
-    --encoder NAME             this encoder (see `encoders`), e.g. hevc_nvenc
-    --no-audio                 leave out the audio track
-    --frames START-END         sequence frames START..END (END exclusive)
-    --in-out                   only the frames between the In and Out marks
-    --hdr pq|hlg               HDR10 (PQ) or HLG in BT.2020, 10 bit (HEVC,
-                               the default with --hdr, or ProRes)
-    --peak NITS                mastering display peak for PQ (default: 1000)";
+#[derive(Subcommand)]
+enum Command {
+    /// Print Nox and FFmpeg versions
+    Version,
+    /// Print stream information
+    Probe {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// List the encoders that work on this system
+    Encoders,
+    /// Render a timeline to a file (container from the extension: .mp4,
+    /// .mov, .mkv, .webm, .avi)
+    Render(RenderArgs),
+}
+
+#[derive(Args)]
+struct RenderArgs {
+    /// The timeline (.otio)
+    project: PathBuf,
+    output: PathBuf,
+    /// Video codec [default: the container's usual one: H.264, ProRes for
+    /// .mov, VP9 for .webm; HEVC with --hdr]
+    #[arg(long, value_enum)]
+    codec: Option<CodecArg>,
+    /// Audio codec [default: the container's usual one]
+    #[arg(long, value_enum)]
+    audio: Option<AudioArg>,
+    #[arg(long, value_enum, default_value_t = QualityArg::High)]
+    quality: QualityArg,
+    /// No hardware encoders
+    #[arg(long)]
+    software: bool,
+    /// This encoder (see `encoders`), e.g. hevc_nvenc
+    #[arg(long, value_name = "NAME")]
+    encoder: Option<String>,
+    /// Leave out the audio track
+    #[arg(long)]
+    no_audio: bool,
+    /// Sequence frames START..END (END exclusive)
+    #[arg(long, value_name = "START-END", value_parser = parse_frames, conflicts_with = "in_out")]
+    frames: Option<Range<i64>>,
+    /// Only the frames between the In and Out marks
+    #[arg(long)]
+    in_out: bool,
+    /// HDR10 (PQ) or HLG in BT.2020, 10 bit
+    #[arg(long, value_enum)]
+    hdr: Option<HdrArg>,
+    /// Mastering display peak for PQ, in nits (100–10000)
+    #[arg(long, default_value_t = 1000.0, value_parser = parse_peak)]
+    peak: f32,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CodecArg {
+    H264,
+    Hevc,
+    Prores,
+    Av1,
+    Vp9,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AudioArg {
+    Aac,
+    Opus,
+    Mp3,
+    Flac,
+    Pcm16,
+    Pcm24,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum QualityArg {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HdrArg {
+    Pq,
+    Hlg,
+}
+
+fn parse_frames(range: &str) -> Result<Range<i64>, String> {
+    range
+        .split_once('-')
+        .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+        .filter(|&(a, b): &(i64, i64)| a < b && a >= 0)
+        .map(|(a, b)| a..b)
+        .ok_or_else(|| format!("invalid frame range {range}"))
+}
+
+fn parse_peak(peak: &str) -> Result<f32, String> {
+    peak.parse()
+        .ok()
+        .filter(|p: &f32| (100.0..=10_000.0).contains(p))
+        .ok_or_else(|| format!("invalid peak {peak} (100–10000 nits)"))
+}
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -34,29 +123,18 @@ fn main() -> ExitCode {
         )
         .with_writer(std::io::stderr)
         .init();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("version") => {
-            version();
-            ExitCode::SUCCESS
-        }
-        Some("probe") if args.len() > 1 => probe(&args[1..]),
-        Some("encoders") => {
-            encoders();
-            ExitCode::SUCCESS
-        }
-        Some("render") if args.len() >= 3 => match render(&args[1..]) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
+    match Cli::parse().command {
+        Command::Version => version(),
+        Command::Probe { files } => return probe(&files),
+        Command::Encoders => encoders(),
+        Command::Render(args) => {
+            if let Err(err) = render(args) {
                 eprintln!("nox-cli: {err}");
-                ExitCode::FAILURE
+                return ExitCode::FAILURE;
             }
-        },
-        _ => {
-            eprintln!("{USAGE}");
-            ExitCode::FAILURE
         }
     }
+    ExitCode::SUCCESS
 }
 
 fn version() {
@@ -74,7 +152,6 @@ fn version() {
 }
 
 fn encoders() {
-    use nox_media::OutputEncoding;
     for codec in VideoCodec::ALL {
         for (range, encoding) in [("SDR", OutputEncoding::Sdr), ("HDR", OutputEncoding::Pq)] {
             let found = nox_engine::available_encoders(codec, encoding);
@@ -95,13 +172,13 @@ fn encoders() {
     }
 }
 
-fn probe(paths: &[String]) -> ExitCode {
+fn probe(paths: &[PathBuf]) -> ExitCode {
     let mut status = ExitCode::SUCCESS;
     for path in paths {
-        match nox_media::probe(Path::new(path)) {
+        match nox_media::probe(path) {
             Ok(info) => print_info(&info),
             Err(err) => {
-                eprintln!("{path}: {err}");
+                eprintln!("{}: {err}", path.display());
                 status = ExitCode::FAILURE;
             }
         }
@@ -116,99 +193,54 @@ fn print_info(info: &nox_media::MediaInfo) {
     }
 }
 
-fn render(args: &[String]) -> Result<(), String> {
-    let project = Path::new(&args[0]);
-    let output = PathBuf::from(&args[1]);
-    let container = Container::for_path(&output);
-    let mut settings = ExportSettings {
-        path: output.clone(),
-        // The container's usual codec.
-        codec: container.map_or(VideoCodec::H264, |c| c.codecs()[0]),
-        container,
-        quality: EncodeQuality::High,
-        hardware: true,
-        decode: nox_media::HwDecode::from_env(),
-        encoder: None,
-        range: None,
-        audio: true,
-        audio_codec: None,
-        encoding: nox_media::OutputEncoding::Sdr,
-        peak_nits: 1000.0,
+fn render(args: RenderArgs) -> Result<(), String> {
+    let project = &args.project;
+    let container = Container::for_path(&args.output);
+    let encoding = match args.hdr {
+        None => OutputEncoding::Sdr,
+        Some(HdrArg::Pq) => OutputEncoding::Pq,
+        Some(HdrArg::Hlg) => OutputEncoding::Hlg,
     };
-    let mut in_out = false;
-    let mut codec_given = false;
-    let mut rest = args[2..].iter();
-    while let Some(arg) = rest.next() {
-        let mut value = || rest.next().ok_or(format!("{arg} needs a value"));
-        match arg.as_str() {
-            "--codec" => {
-                codec_given = true;
-                settings.codec = match value()?.as_str() {
-                    "h264" => VideoCodec::H264,
-                    "hevc" => VideoCodec::Hevc,
-                    "prores" => VideoCodec::ProRes,
-                    "av1" => VideoCodec::Av1,
-                    "vp9" => VideoCodec::Vp9,
-                    other => return Err(format!("unknown codec {other}")),
-                }
-            }
-            "--audio" => {
-                settings.audio_codec = Some(match value()?.as_str() {
-                    "aac" => AudioCodec::Aac,
-                    "opus" => AudioCodec::Opus,
-                    "mp3" => AudioCodec::Mp3,
-                    "flac" => AudioCodec::Flac,
-                    "pcm16" => AudioCodec::Pcm16,
-                    "pcm24" => AudioCodec::Pcm24,
-                    other => return Err(format!("unknown audio codec {other}")),
-                })
-            }
-            "--quality" => {
-                settings.quality = match value()?.as_str() {
-                    "high" => EncodeQuality::High,
-                    "medium" => EncodeQuality::Medium,
-                    "low" => EncodeQuality::Low,
-                    other => return Err(format!("unknown quality {other}")),
-                }
-            }
-            "--software" => settings.hardware = false,
-            "--encoder" => settings.encoder = Some(value()?.clone()),
-            "--no-audio" => settings.audio = false,
-            "--frames" => {
-                let range = value()?;
-                let (start, end) = range
-                    .split_once('-')
-                    .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
-                    .filter(|(a, b): &(i64, i64)| a < b && *a >= 0)
-                    .ok_or(format!("invalid frame range {range}"))?;
-                settings.range = Some(start..end);
-            }
-            "--in-out" => in_out = true,
-            "--hdr" => {
-                settings.encoding = match value()?.as_str() {
-                    "pq" => nox_media::OutputEncoding::Pq,
-                    "hlg" => nox_media::OutputEncoding::Hlg,
-                    other => return Err(format!("unknown HDR format {other}")),
-                }
-            }
-            "--peak" => {
-                let peak = value()?;
-                settings.peak_nits = peak
-                    .parse()
-                    .ok()
-                    .filter(|p: &f32| (100.0..=10_000.0).contains(p))
-                    .ok_or(format!("invalid peak {peak} (100–10000 nits)"))?;
-            }
-            other => return Err(format!("unknown option {other}\n\n{USAGE}")),
-        }
-    }
-    // HDR is HEVC unless the codec was chosen (H.264 is SDR only).
-    if settings.encoding.is_hdr() && !codec_given && !settings.codec.does_hdr() {
-        settings.codec = VideoCodec::Hevc;
-    }
+    let codec = match args.codec {
+        Some(CodecArg::H264) => VideoCodec::H264,
+        Some(CodecArg::Hevc) => VideoCodec::Hevc,
+        Some(CodecArg::Prores) => VideoCodec::ProRes,
+        Some(CodecArg::Av1) => VideoCodec::Av1,
+        Some(CodecArg::Vp9) => VideoCodec::Vp9,
+        // The container's usual codec; HDR needs one that carries it.
+        None => match container.map_or(VideoCodec::H264, |c| c.codecs()[0]) {
+            codec if encoding.is_hdr() && !codec.does_hdr() => VideoCodec::Hevc,
+            codec => codec,
+        },
+    };
+    let mut settings = ExportSettings {
+        path: args.output.clone(),
+        codec,
+        container,
+        quality: match args.quality {
+            QualityArg::High => EncodeQuality::High,
+            QualityArg::Medium => EncodeQuality::Medium,
+            QualityArg::Low => EncodeQuality::Low,
+        },
+        hardware: !args.software,
+        decode: nox_media::HwDecode::from_env(),
+        encoder: args.encoder,
+        range: args.frames,
+        audio: !args.no_audio,
+        audio_codec: args.audio.map(|audio| match audio {
+            AudioArg::Aac => AudioCodec::Aac,
+            AudioArg::Opus => AudioCodec::Opus,
+            AudioArg::Mp3 => AudioCodec::Mp3,
+            AudioArg::Flac => AudioCodec::Flac,
+            AudioArg::Pcm16 => AudioCodec::Pcm16,
+            AudioArg::Pcm24 => AudioCodec::Pcm24,
+        }),
+        encoding,
+        peak_nits: args.peak,
+    };
     let timeline =
         nox_otio::read_file(project).map_err(|e| format!("{}: {e}", project.display()))?;
-    if in_out {
+    if args.in_out {
         let range = nox_engine::marked_range(&timeline)
             .ok_or(format!("{} has no In and Out marks", project.display()))?;
         settings.range = Some(range);

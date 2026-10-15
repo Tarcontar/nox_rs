@@ -2,36 +2,14 @@
 
 mod common;
 
-use common::{fixture, wait_for};
+use common::{FPS, clip, f, fixture, solid, wait_for};
 use nox_engine::{DecodeApi, Engine, EngineEvent, FrameImage, HwDecode, Mixer, RenderedFrame};
 use nox_project::{
-    Clip, Composable, Edge, ItemRef, MediaReference, Rational, Time, TimeRange, Timeline, TrackKind,
+    Clip, Composable, Edge, ItemRef, MediaReference, TimeRange, Timeline, TrackKind,
 };
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
-
-const FPS: Rational = Rational::new(25, 1);
-
-fn f(n: i64) -> Time {
-    Time::from_frames(n, FPS)
-}
-
-fn solid(name: &str, color: &str) -> Option<std::path::PathBuf> {
-    let input = format!("color=c={color}:size=320x180:rate=25:duration=4,format=yuv444p");
-    fixture(name, &["-f", "lavfi", "-i", &input, "-c:v", "ffv1"])
-}
-
-/// A clip of `path` using frames `start..start + length` of 100 available.
-fn clip(path: &Path, start: i64, length: i64) -> Composable {
-    let reference = MediaReference::from_path(path, Some(TimeRange::new(f(0), f(100))));
-    Composable::Clip(Clip::new(
-        "c",
-        reference,
-        TimeRange::new(f(start), f(length)),
-    ))
-}
 
 fn pixel(frame: &RenderedFrame, x: u32, y: u32) -> [u8; 3] {
     let FrameImage::Pixels(image) = &frame.image else {
@@ -71,8 +49,10 @@ fn composites_tracks_and_dissolves() {
     if !common::have_gpu() {
         return;
     }
-    let (Some(red), Some(blue)) = (solid("red.mkv", "0xC03020"), solid("blue.mkv", "0x2060E0"))
-    else {
+    let (Some(red), Some(blue)) = (
+        solid("red.mkv", "0xC03020", "320x180"),
+        solid("blue.mkv", "0x2060E0", "320x180"),
+    ) else {
         return;
     };
     let mut timeline = Timeline::new("t", FPS);
@@ -262,7 +242,7 @@ fn playback_follows_the_clock_and_renders_ahead() {
 /// More layers of one file than the decoder pool opens per file.
 #[test]
 fn one_file_on_many_layers() {
-    let Some(red) = solid("red-layers.mkv", "0xC03020") else {
+    let Some(red) = solid("red-layers.mkv", "0xC03020", "320x180") else {
         return;
     };
     let mut timeline = Timeline::new("t", FPS);
@@ -367,7 +347,7 @@ fn stills_from_the_cache() {
     ) else {
         return;
     };
-    let Some(red) = solid("red-still-test.mkv", "0xC03020") else {
+    let Some(red) = solid("red-still-test.mkv", "0xC03020", "320x180") else {
         return;
     };
     let still = |start: i64, length: i64| {
@@ -418,7 +398,7 @@ fn stills_from_the_cache() {
 /// cached frames rather than handing out ones without them.
 #[test]
 fn scopes_come_with_frames_when_enabled() {
-    let Some(red) = solid("red-scopes.mkv", "0xC03020") else {
+    let Some(red) = solid("red-scopes.mkv", "0xC03020", "320x180") else {
         return;
     };
     let mut timeline = Timeline::new("t", FPS);
@@ -459,7 +439,7 @@ fn clip_grades_are_rendered() {
     if !common::have_gpu() {
         return;
     }
-    let Some(gray) = solid("gray-grade.mkv", "0x808080") else {
+    let Some(gray) = solid("gray-grade.mkv", "0x808080", "320x180") else {
         return;
     };
     let mut timeline = Timeline::new("t", FPS);
@@ -501,8 +481,8 @@ fn clip_transforms_are_rendered() {
         return;
     }
     let (Some(red), Some(blue)) = (
-        solid("red-under.mkv", "0xC03020"),
-        solid("blue-moved.mkv", "0x2060E0"),
+        solid("red-under.mkv", "0xC03020", "320x180"),
+        solid("blue-moved.mkv", "0x2060E0", "320x180"),
     ) else {
         return;
     };
@@ -598,8 +578,8 @@ fn dips_go_through_a_color() {
         return;
     }
     let (Some(red), Some(blue)) = (
-        solid("red-dip.mkv", "0xC03020"),
-        solid("blue-dip.mkv", "0x2060E0"),
+        solid("red-dip.mkv", "0xC03020", "320x180"),
+        solid("blue-dip.mkv", "0x2060E0", "320x180"),
     ) else {
         return;
     };
@@ -635,7 +615,7 @@ fn dips_go_through_a_color() {
 /// The engine tells how each file decodes, and decodes as it's told.
 #[test]
 fn reports_how_files_decode() {
-    let Some(red) = solid("red.mkv", "0xC03020") else {
+    let Some(red) = solid("red.mkv", "0xC03020", "320x180") else {
         return;
     };
     let mut timeline = Timeline::new("t", FPS);

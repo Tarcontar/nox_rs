@@ -28,16 +28,27 @@ vec3 output_transform(vec3 working) {
     return pow(rgb, vec3(1.0 / 2.4));
 }
 
+// PQ (SMPTE ST 2084).
+const float PQ_M1 = 2610.0 / 16384.0;
+const float PQ_M2 = 2523.0 / 4096.0 * 128.0;
+const float PQ_C1 = 3424.0 / 4096.0;
+const float PQ_C2 = 2413.0 / 4096.0 * 32.0;
+const float PQ_C3 = 2392.0 / 4096.0 * 32.0;
+
+// PQ signal to light relative to 10000 nits, and back.
+float pq_eotf(float e) {
+    float s = pow(clamp(e, 0.0, 1.0), 1.0 / PQ_M2);
+    return pow(max(s - PQ_C1, 0.0) / (PQ_C2 - PQ_C3 * s), 1.0 / PQ_M1);
+}
+float pq_inverse(float l) {
+    float y = pow(clamp(l, 0.0, 1.0), PQ_M1);
+    return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), PQ_M2);
+}
+
 // HDR outputs (nox_color::OutputEncoding): BT.2020 with SDR white at 203
 // nits (BT.2408), PQ (SMPTE ST 2084) or HLG for a 1000-nit display.
 float pq_encode(float nits) {
-    const float m1 = 2610.0 / 16384.0;
-    const float m2 = 2523.0 / 4096.0 * 128.0;
-    const float c1 = 3424.0 / 4096.0;
-    const float c2 = 2413.0 / 4096.0 * 32.0;
-    const float c3 = 2392.0 / 4096.0 * 32.0;
-    float y = pow(clamp(nits / 10000.0, 0.0, 1.0), m1);
-    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+    return pq_inverse(nits / 10000.0);
 }
 
 float hlg_oetf(float e) {

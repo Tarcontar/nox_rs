@@ -7,7 +7,7 @@
 //! The newest requests are decoded first (what's on screen now), and old
 //! ones are dropped when many pile up.
 
-use gtk::{gdk, glib, prelude::*};
+use gtk::{gdk, glib};
 use nox_media::{Image, ThumbnailReader};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -109,15 +109,8 @@ impl Thumbnails {
                 }
                 let file = files.entry(path).or_default();
                 file.aspect = Some(image.width as f32 / image.height.max(1) as f32);
-                let bytes = glib::Bytes::from_owned(image.data);
-                let texture = gdk::MemoryTexture::new(
-                    image.width as i32,
-                    image.height as i32,
-                    gdk::MemoryFormat::R8g8b8a8,
-                    &bytes,
-                    image.stride,
-                );
-                if file.pictures.insert(ms, texture.upcast()).is_none() {
+                let texture = crate::ui_util::texture(image);
+                if file.pictures.insert(ms, texture).is_none() {
                     self.kept.set(self.kept.get() + 1);
                 }
             }
