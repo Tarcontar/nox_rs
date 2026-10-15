@@ -45,6 +45,11 @@ case "$(uname -s)" in
         [ "$(uname -m)" = x86_64 ] && with_nvenc=yes || with_nvenc=no ;;
     Darwin)
         options="$options --enable-videotoolbox"
+        # LAME has no pkg-config file, so configure looks for it on the
+        # compiler's default paths, which Homebrew's prefix (/opt/homebrew
+        # on Apple silicon) isn't on.
+        lame=$(brew --prefix lame)
+        options="$options --extra-cflags=-I$lame/include --extra-ldflags=-L$lame/lib"
         with_nvenc=no ;;
 esac
 

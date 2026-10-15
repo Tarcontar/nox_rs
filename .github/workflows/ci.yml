@@ -1,4 +1,5 @@
-# Checks every push and pull request: formatting, lints and the test suite
+# Checks every push to a branch and every pull request (tags only run the
+# Release workflow): formatting, lints and the test suite
 # on Linux (in the Debian 13 build environment, with lavapipe as the
 # Vulkan driver, as runners have no GPU), lints and tests on Windows and
 # macOS (GPU tests skip themselves there), and that the Flatpak builds.
@@ -6,6 +7,9 @@ name: CI
 
 on:
   push:
+    # Branches only: with a branch filter and no tag filter, tag pushes
+    # don't trigger this workflow.
+    branches: ['**']
   pull_request:
 
 concurrency:
