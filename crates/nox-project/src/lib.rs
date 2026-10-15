@@ -24,7 +24,8 @@ pub use time::{
     timecode,
 };
 pub use timeline::{
-    AudioSegment, BlendMode, Clip, Composable, DEFAULT_MEDIA_KEY, Dip, DipColor, Effect,
-    EffectKind, Gap, Item, Marker, MediaReference, Mix, ReferenceKind, ResolvedClip, ScalingMode,
-    Settings, Side, Stack, Timeline, Track, TrackKind, Transform, Transition, TransitionKind,
+    AudioSegment, BACKGROUND_REMOVAL, BlendMode, Clip, Composable, DEFAULT_MEDIA_KEY, Dip,
+    DipColor, Effect, EffectKind, Gap, Item, Marker, MediaReference, Mix, ReferenceKind,
+    ResolvedClip, ScalingMode, Settings, Side, Stack, Timeline, Track, TrackKind, Transform,
+    Transition, TransitionKind,
 };

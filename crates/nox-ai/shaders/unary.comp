@@ -1,0 +1,54 @@
+// out = f(x) elementwise (cpu::UnaryOp), with two parameters.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint op;
+    uint x_offset;
+    float alpha;
+    float beta;
+} p;
+
+// Abramowitz–Stegun 7.1.26, as cpu.rs.
+float erf_approx(float v) {
+    float t = 1.0 / (1.0 + 0.3275911 * abs(v));
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+        - 0.284496736) * t + 0.254829592) * t * exp(-v * v);
+    return v < 0.0 ? -y : y;
+}
+
+// tanh without overflow (some drivers' tanh is NaN for large |v|).
+float safe_tanh(float v) {
+    float t = exp(-2.0 * abs(v));
+    float r = (1.0 - t) / (1.0 + t);
+    return v < 0.0 ? -r : r;
+}
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    float v = x[p.x_offset + i];
+    float r;
+    switch (p.op) {
+    case 0: r = v; break;
+    case 1: r = max(v, 0.0); break;
+    case 2: r = 1.0 / (1.0 + exp(-v)); break;
+    case 3: r = safe_tanh(v); break;
+    case 4: r = exp(v); break;
+    case 5: r = sqrt(v); break;
+    case 6: r = -v; break;
+    case 7: r = abs(v); break;
+    case 8: r = erf_approx(v); break;
+    case 9: r = clamp(p.alpha * v + p.beta, 0.0, 1.0); break;
+    case 10: r = v * clamp(p.alpha * v + p.beta, 0.0, 1.0); break;
+    default: r = min(max(v, p.alpha), p.beta); break;
+    }
+    o[i] = r;
+}

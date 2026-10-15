@@ -2,7 +2,8 @@
 //! GPU and hands out the result as DMA-BUF or in system memory.
 
 use nox_gpu::{
-    BlendMode, Compositor, FrameLight, GpuTarget, Image, LayerStyle, Placement, Rect, Transform,
+    BlendMode, Compositor, FrameLight, GpuTarget, Image, LayerHook, LayerPicture, LayerStyle,
+    Placement, Rect, Transform,
 };
 use nox_media::{Accel, Decoding, HwDecode, VideoDecoder};
 use nox_project::{Time, Timeline};
@@ -138,6 +139,7 @@ pub(crate) struct Renderer {
     hw: HwDecode,
     /// How each file decodes, as last reported (`decodings_changed`).
     decodings: std::collections::HashMap<PathBuf, Decoding>,
+    matting: MattingState,
 }
 
 impl Renderer {
@@ -170,6 +172,43 @@ impl Renderer {
             scopes: false,
             hw: HwDecode::from_env(),
             decodings: Default::default(),
+            matting: MattingState::Unloaded,
+        }
+    }
+
+    /// Loads background removal, if it isn't yet and the model is there.
+    fn load_matting(&mut self) {
+        if !matches!(self.matting, MattingState::Unloaded) {
+            return;
+        }
+        let Some((accel, _)) = &self.gpu else {
+            return;
+        };
+        let model = nox_ai::models::ROBUST_VIDEO_MATTING;
+        let dir = nox_ai::models::default_dir();
+        if !model.is_available(&dir) {
+            tracing::warn!(
+                "background removal needs {} in {}; clips show unchanged",
+                model.file,
+                dir.display()
+            );
+            self.matting = MattingState::Unavailable;
+            return;
+        }
+        self.matting = match nox_ai::Matting::new(accel.gpu().clone(), &model.path(&dir)) {
+            Ok(matting) => MattingState::Ready(Box::new(matting)),
+            Err(err) => {
+                tracing::warn!("background removal unavailable: {err}");
+                MattingState::Unavailable
+            }
+        };
+    }
+
+    /// Tries loading background removal again (e.g. after the model was
+    /// downloaded).
+    pub fn reload_matting(&mut self) {
+        if matches!(self.matting, MattingState::Unavailable) {
+            self.matting = MattingState::Unloaded;
         }
     }
 
@@ -222,18 +261,30 @@ impl Renderer {
             .into_iter()
             .filter_map(|layer| {
                 let path = timeline.media_path(layer.clip.media_reference()?)?;
-                Some((
-                    path,
-                    layer.file_time(),
-                    layer.opacity,
-                    layer.blend_mode(),
-                    layer.clip.item.grade_at(layer.source_time.as_seconds()),
-                    with_wipe(
+                let matte = layer.clip.item.removes_background().then(|| {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    path.hash(&mut hasher);
+                    layer
+                        .clip
+                        .trimmed_range()
+                        .map(|r| r.start.as_seconds().to_bits())
+                        .hash(&mut hasher);
+                    hasher.finish()
+                });
+                Some(Layer {
+                    time: layer.file_time(),
+                    opacity: layer.opacity,
+                    mode: layer.blend_mode(),
+                    grade: layer.clip.item.grade_at(layer.source_time.as_seconds()),
+                    transform: with_wipe(
                         layer.clip.item.transform_at(layer.source_time.as_seconds()),
                         layer.wipe,
                     ),
-                    layer.dip,
-                ))
+                    dip: layer.dip,
+                    matte,
+                    path,
+                })
             })
             .collect()
     }
@@ -244,7 +295,7 @@ impl Renderer {
         self.decoders.begin_frame();
         let accel = self.gpu.as_ref().map(|(accel, _)| accel.clone());
         let mut cost = 0;
-        for (path, time, ..) in Self::layers(timeline, frame) {
+        for Layer { path, time, .. } in Self::layers(timeline, frame) {
             if self.failed.contains(&path) {
                 continue;
             }
@@ -357,9 +408,22 @@ impl Renderer {
         quality: Quality,
         stop: &dyn Fn() -> bool,
     ) -> nox_media::Result<()> {
+        if layers.iter().any(|l| l.matte.is_some()) {
+            self.load_matting();
+        }
         let (accel, compositor) = self.gpu.as_mut().expect("gpu");
         compositor.begin(width, height)?;
-        for (path, time, opacity, mode, grade, transform, dip) in layers {
+        for Layer {
+            path,
+            time,
+            opacity,
+            mode,
+            grade,
+            transform,
+            dip,
+            matte,
+        } in layers
+        {
             // A dip's color goes below the picture or above it.
             if let Some(dip) = dip.filter(|d| d.before) {
                 add_color(compositor, &dip, width, height)?;
@@ -373,9 +437,9 @@ impl Renderer {
                     .get(path, *time, Some(accel), self.hw)
                     .and_then(|(decoder, index)| {
                         let still = decoder.is_still();
-                        decode(decoder, index, quality, stop).map(|frame| (frame, still))
+                        decode(decoder, index, quality, stop).map(|frame| (frame, still, index))
                     });
-                let (decoded, still) = match decoded {
+                let (decoded, still, index) = match decoded {
                     Ok(decoded) => decoded,
                     Err(nox_media::Error::Interrupted) => {
                         return Err(nox_media::Error::Interrupted);
@@ -393,17 +457,28 @@ impl Renderer {
                     grade: *grade,
                     transform: gpu_transform(transform),
                 };
+                // Background removal writes the matte into the picture.
+                let mut hook = match (matte, &mut self.matting) {
+                    (Some(key), MattingState::Ready(matting)) => Some(MatteHook {
+                        matting,
+                        key: *key,
+                        frame: (!still).then_some(index),
+                    }),
+                    _ => None,
+                };
+                let hook = hook.as_mut().map(|h| h as &mut dyn LayerHook);
                 if still {
-                    // Stills are converted once and kept on the GPU.
-                    let key = still_key(path);
+                    // Stills are converted once and kept on the GPU (with
+                    // their matte, if any).
+                    let key = still_key(path, *matte);
                     if !compositor.try_cached_layer(key, rect, style) {
                         nox_media::with_gpu_input(&decoded, Some(&*accel), |input| {
-                            compositor.add_cached_layer(key, input, rect, style)
+                            compositor.add_cached_layer_with(key, input, rect, style, hook)
                         })??;
                     }
                 } else {
                     nox_media::with_gpu_input(&decoded, Some(&*accel), |input| {
-                        compositor.add_layer(input, rect, style)
+                        compositor.add_layer_with(input, rect, style, hook)
                     })??;
                 }
             }
@@ -449,7 +524,7 @@ impl Renderer {
             stride: width as usize * 4,
             data: [0, 0, 0, 255].repeat(width as usize * height as usize),
         };
-        if let Some((path, time, ..)) = layers.last() {
+        if let Some(Layer { path, time, .. }) = layers.last() {
             let (decoder, index) = self.decoders.get(path, *time, None, self.hw)?;
             let decoded = decode(decoder, index, quality, stop)?;
             let rect = framing.place(nox_media::display_size(&decoded), (width, height));
@@ -518,24 +593,55 @@ impl Framing {
 }
 
 /// The still cache key of a file.
-fn still_key(path: &Path) -> u64 {
+fn still_key(path: &Path, matte: Option<u64>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
+    matte.hash(&mut hasher);
     hasher.finish()
 }
 
-/// A video layer: file, time in it, opacity, blend mode, grade, transform,
-/// and the color of a dip drawn with it.
-type Layer = (
-    PathBuf,
-    Time,
-    f64,
-    nox_project::BlendMode,
-    nox_project::Grade,
-    nox_project::Transform,
-    Option<nox_project::Dip>,
-);
+/// A video layer.
+struct Layer {
+    path: PathBuf,
+    /// Time in the file.
+    time: Time,
+    opacity: f64,
+    mode: nox_project::BlendMode,
+    grade: nox_project::Grade,
+    transform: nox_project::Transform,
+    /// The color of a dip drawn with it.
+    dip: Option<nox_project::Dip>,
+    /// With its background removed: the clip, whose matte state this is.
+    matte: Option<u64>,
+}
+
+/// Background removal, loaded when a clip first needs it.
+enum MattingState {
+    Unloaded,
+    Ready(Box<nox_ai::Matting>),
+    /// The model isn't there or doesn't load; not tried again.
+    Unavailable,
+}
+
+/// Writes a clip's matte into its picture (`nox_ai::Matting`).
+struct MatteHook<'m> {
+    matting: &'m mut nox_ai::Matting,
+    key: u64,
+    /// The frame in the clip's media; `None` for stills.
+    frame: Option<i64>,
+}
+
+impl LayerHook for MatteHook<'_> {
+    fn process(&mut self, picture: &LayerPicture) -> nox_gpu::Result<()> {
+        // A failed matte leaves the clip as it is rather than the frame
+        // unrendered.
+        if let Err(err) = self.matting.apply(self.key, self.frame, picture) {
+            tracing::warn!("background removal: {err}");
+        }
+        Ok(())
+    }
+}
 
 /// Queues a solid color over the whole picture (a dip).
 fn add_color(
@@ -545,7 +651,7 @@ fn add_color(
     height: u32,
 ) -> nox_media::Result<()> {
     let rgb = dip.color.rgb().map(|c| (c * 255.0).round() as u8);
-    let key = still_key(Path::new(&format!("nox:color:{rgb:?}")));
+    let key = still_key(Path::new(&format!("nox:color:{rgb:?}")), None);
     let rect = Rect {
         x: 0,
         y: 0,

@@ -439,6 +439,55 @@
                         </child>
                       </object>
                     </child>
+                    <!-- Effects that change the picture (video clips). -->
+                    <child>
+                      <object class="GtkBox" id="effects_section">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="label" translatable="yes">Effects</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkBox">
+                            <property name="spacing">8</property>
+                            <child>
+                              <object class="GtkLabel" id="background_label">
+                                <property name="label" translatable="yes">Remove background</property>
+                                <property name="xalign">0</property>
+                                <property name="hexpand">true</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSwitch" id="remove_background">
+                                <property name="valign">center</property>
+                                <signal name="notify::active" handler="on_remove_background_changed" swapped="true"/>
+                                <property name="tooltip-text" translatable="yes">Cuts people out of their background (Robust Video Matting, on the graphics card)</property>
+                                <accessibility>
+                                  <relation name="labelled-by">background_label</relation>
+                                </accessibility>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel" id="background_status">
+                            <property name="xalign">0</property>
+                            <property name="wrap">true</property>
+                            <property name="visible">false</property>
+                            <style>
+                              <class name="dim-label"/>
+                              <class name="caption"/>
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
                     <child>
                       <object class="GtkBox" id="transform_section">
                         <property name="orientation">vertical</property>

@@ -1,0 +1,75 @@
+// Resizes the last two axes of NCHW (cpu::ResizeParams): nearest or
+// bilinear, with ONNX's coordinate transformations.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint in_h;
+    uint in_w;
+    uint out_h;
+    uint out_w;
+    float scale_h;
+    float scale_w;
+    uint linear;
+    uint coordinates; // cpu::CoordinateMode
+    uint nearest;     // cpu::NearestMode
+} p;
+
+float source(uint o, float scale, uint in_len, uint out_len) {
+    float v = float(o);
+    switch (p.coordinates) {
+    case 0u: return (v + 0.5) / scale - 0.5;
+    case 1u: return out_len > 1u ? (v + 0.5) / scale - 0.5 : 0.0;
+    case 2u: return out_len > 1u ? v * float(in_len - 1u) / float(out_len - 1u) : 0.0;
+    default: return v / scale;
+    }
+}
+
+// GPU division may be off by an ulp or two, so a coordinate that is
+// exactly whole (or exactly halfway) can land just beside it; rounding
+// allows for that, as cpu.rs does (NEAREST_SLACK).
+const float SLACK = 1e-4;
+
+uint nearest_index(float v, uint len) {
+    float i;
+    switch (p.nearest) {
+    case 2u: i = floor(v + SLACK); break;
+    case 3u: i = ceil(v - SLACK); break;
+    case 1u: i = floor(v + 0.5 + SLACK); break;
+    default: i = ceil(v - 0.5 - SLACK); break;
+    }
+    return min(uint(max(i, 0.0)), len - 1u);
+}
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    uint ox = i % p.out_w;
+    uint oy = (i / p.out_w) % p.out_h;
+    uint plane = i / (p.out_w * p.out_h);
+    uint base = plane * p.in_h * p.in_w;
+    float sy = source(oy, p.scale_h, p.in_h, p.out_h);
+    float sx = source(ox, p.scale_w, p.in_w, p.out_w);
+    if (p.linear == 0u) {
+        o[i] = x[base + nearest_index(sy, p.in_h) * p.in_w + nearest_index(sx, p.in_w)];
+        return;
+    }
+    sy = clamp(sy, 0.0, float(p.in_h - 1u));
+    sx = clamp(sx, 0.0, float(p.in_w - 1u));
+    uint y0 = uint(floor(sy));
+    uint x0 = uint(floor(sx));
+    uint y1 = min(y0 + 1u, p.in_h - 1u);
+    uint x1 = min(x0 + 1u, p.in_w - 1u);
+    float fy = sy - float(y0);
+    float fx = sx - float(x0);
+    float top = x[base + y0 * p.in_w + x0] * (1.0 - fx) + x[base + y0 * p.in_w + x1] * fx;
+    float bottom = x[base + y1 * p.in_w + x0] * (1.0 - fx) + x[base + y1 * p.in_w + x1] * fx;
+    o[i] = top * (1.0 - fy) + bottom * fy;
+}

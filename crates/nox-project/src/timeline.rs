@@ -696,6 +696,28 @@ impl Item {
         speed
     }
 
+    /// Whether the item's background is removed (`BACKGROUND_REMOVAL`).
+    pub fn removes_background(&self) -> bool {
+        self.effects
+            .iter()
+            .any(|e| e.enabled && e.effect_name == BACKGROUND_REMOVAL)
+    }
+
+    /// Turns background removal on or off; other effects stay.
+    pub fn set_background_removal(&mut self, on: bool) {
+        self.effects.retain(|e| e.effect_name != BACKGROUND_REMOVAL);
+        if on {
+            self.effects.push(Effect {
+                name: "Remove Background".into(),
+                metadata: Object::new(),
+                effect_name: BACKGROUND_REMOVAL.into(),
+                enabled: true,
+                kind: EffectKind::Generic,
+                extra: Object::new(),
+            });
+        }
+    }
+
     /// Whether the item holds one frame (a freeze frame effect).
     pub fn is_frozen(&self) -> bool {
         self.effects
@@ -1717,6 +1739,10 @@ pub struct Effect {
     pub extra: Object,
 }
 
+/// The `effect_name` of background removal (nox-ai's matting): an OTIO
+/// effect with only a name, so other tools keep it.
+pub const BACKGROUND_REMOVAL: &str = "nox.remove_background";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectKind {
     /// `Effect.1`: described only by its name and metadata.
@@ -1762,6 +1788,23 @@ mod tests {
             reference,
             TimeRange::new(frames(start), frames(duration)),
         ))
+    }
+
+    #[test]
+    fn background_removal_is_an_effect() {
+        let Composable::Clip(mut c) = clip("a", 0, 10) else {
+            unreachable!()
+        };
+        c.item.set_time_effects(2.0, false);
+        assert!(!c.item.removes_background());
+        c.item.set_background_removal(true);
+        c.item.set_background_removal(true);
+        assert!(c.item.removes_background());
+        assert_eq!(c.item.effects.len(), 2, "one of each");
+        assert_eq!(c.item.speed(), 2.0);
+        c.item.set_background_removal(false);
+        assert!(!c.item.removes_background());
+        assert_eq!(c.item.speed(), 2.0, "the speed stays");
     }
 
     #[test]

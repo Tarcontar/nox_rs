@@ -1,0 +1,54 @@
+// Average or max pooling over windows of NCHW (cpu::PoolParams).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint in_h;
+    uint in_w;
+    uint out_h;
+    uint out_w;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint is_max;
+    uint count_include_pad;
+} p;
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    uint ox = i % p.out_w;
+    uint oy = (i / p.out_w) % p.out_h;
+    uint plane = i / (p.out_w * p.out_h);
+    uint base = plane * p.in_h * p.in_w;
+    int y0 = int(oy * p.stride_h) - int(p.pad_h);
+    int x0 = int(ox * p.stride_w) - int(p.pad_w);
+    float acc = p.is_max != 0u ? -3.402823466e38 : 0.0;
+    uint count = 0u;
+    uint padded = 0u;
+    for (int ky = 0; ky < int(p.kernel_h); ky++) {
+        for (int kx = 0; kx < int(p.kernel_w); kx++) {
+            int y = y0 + ky;
+            int xx = x0 + kx;
+            if (y >= 0 && xx >= 0 && y < int(p.in_h) && xx < int(p.in_w)) {
+                float v = x[base + uint(y) * p.in_w + uint(xx)];
+                acc = p.is_max != 0u ? max(acc, v) : acc + v;
+                count++;
+            } else if (y < int(p.in_h + p.pad_h) && xx < int(p.in_w + p.pad_w)) {
+                padded++;
+            }
+        }
+    }
+    uint divisor = p.count_include_pad != 0u ? count + padded : count;
+    o[i] = p.is_max != 0u ? acc : acc / float(max(divisor, 1u));
+}

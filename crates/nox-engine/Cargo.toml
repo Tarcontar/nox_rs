@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 cpal.workspace = true
+nox-ai.workspace = true
 nox-gpu.workspace = true
 nox-media.workspace = true
 nox-project.workspace = true

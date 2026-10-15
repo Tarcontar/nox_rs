@@ -1,0 +1,66 @@
+// 2D convolution of NCHW tensors (cpu::ConvParams), grouped and dilated,
+// one output element per invocation.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer W { float w[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Bias { float bias[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint in_channels;
+    uint in_h;
+    uint in_w;
+    uint out_channels;
+    uint out_h;
+    uint out_w;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dilation_h;
+    uint dilation_w;
+    uint group;
+    uint has_bias;
+} p;
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    uint ox = i % p.out_w;
+    uint oy = (i / p.out_w) % p.out_h;
+    uint m = (i / (p.out_w * p.out_h)) % p.out_channels;
+    uint b = i / (p.out_w * p.out_h * p.out_channels);
+    uint per_group_in = p.in_channels / p.group;
+    uint per_group_out = p.out_channels / p.group;
+    uint g = m / per_group_out;
+    float sum = p.has_bias != 0u ? bias[m] : 0.0;
+    int y0 = int(oy * p.stride_h) - int(p.pad_h);
+    int x0 = int(ox * p.stride_w) - int(p.pad_w);
+    for (uint c = 0u; c < per_group_in; c++) {
+        uint ic = g * per_group_in + c;
+        uint x_plane = (b * p.in_channels + ic) * p.in_h * p.in_w;
+        uint w_base = (m * per_group_in + c) * p.kernel_h * p.kernel_w;
+        for (uint ky = 0u; ky < p.kernel_h; ky++) {
+            int iy = y0 + int(ky * p.dilation_h);
+            if (iy < 0 || iy >= int(p.in_h)) {
+                continue;
+            }
+            for (uint kx = 0u; kx < p.kernel_w; kx++) {
+                int ix = x0 + int(kx * p.dilation_w);
+                if (ix < 0 || ix >= int(p.in_w)) {
+                    continue;
+                }
+                sum += x[x_plane + uint(iy) * p.in_w + uint(ix)] * w[w_base + ky * p.kernel_w + kx];
+            }
+        }
+    }
+    o[i] = sum;
+}

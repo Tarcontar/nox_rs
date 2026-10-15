@@ -28,6 +28,8 @@ finish-args:
   - --device=all
   # Projects refer to media files by path, anywhere.
   - --filesystem=host
+  # AI effects download their models the first time they're used.
+  - --share=network
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
   prepend-ld-library-path: /usr/lib/sdk/llvm22/lib

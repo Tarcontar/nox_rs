@@ -3,6 +3,7 @@
 //! export (readback now; DMA-BUF and GL interop later).
 
 mod compositor;
+pub mod compute;
 mod converter;
 mod device;
 mod export;
@@ -13,7 +14,8 @@ mod vk_util;
 
 pub use ash::vk;
 pub use compositor::{
-    BlendMode, Compositor, LayerStyle, MAX_LAYERS, Placement, Rect, Transform, YuvTarget,
+    BlendMode, Compositor, LayerHook, LayerPicture, LayerStyle, MAX_LAYERS, Placement, Rect,
+    Transform, YuvTarget,
 };
 pub use converter::{
     BufferFrame, Converter, CpuFrame, ImageSync, Input, Layout, Orientation, Plane, PlaneFormat,
@@ -45,6 +47,8 @@ pub enum Error {
     InvalidFrame(&'static str),
     #[error("not supported: {0}")]
     Unsupported(String),
+    #[error("effect: {0}")]
+    Effect(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

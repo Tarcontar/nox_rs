@@ -147,6 +147,8 @@ struct Shared {
     interrupts: AtomicU64,
     /// How decoders decode (`Engine::set_hw_decode`).
     hw_decode: Mutex<HwDecode>,
+    /// Set when effects should be loaded again (`Engine::reload_effects`).
+    reload_effects: AtomicBool,
     /// How each file decodes, as far as known.
     decodings: Mutex<HashMap<PathBuf, Decoding>>,
 }
@@ -212,6 +214,7 @@ impl Engine {
             cache: Mutex::new(FrameCache::new(budget << 20)),
             interrupts: AtomicU64::new(0),
             hw_decode: Mutex::new(HwDecode::from_env()),
+            reload_effects: AtomicBool::new(false),
             decodings: Mutex::default(),
         });
         let dmabuf_allowed = Arc::new(AtomicBool::new(!dmabuf_formats.is_empty()));
@@ -370,6 +373,14 @@ impl Engine {
         self.shared.interrupt();
     }
 
+    /// Loads effects that couldn't load before (e.g. background removal,
+    /// once its model is downloaded) and renders frames again.
+    pub fn reload_effects(&self) {
+        self.shared.reload_effects.store(true, Ordering::Relaxed);
+        self.shared.state().generation += 1;
+        self.shared.interrupt();
+    }
+
     /// How `path` decodes, once a frame of it has been (reported as
     /// `EngineEvent::Decoding`).
     pub fn decoding(&self, path: &Path) -> Option<Decoding> {
@@ -503,6 +514,9 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
         let (width, height) = (key.width, key.height);
         renderer.set_scopes(scopes);
         renderer.set_hw_decode(shared.hw_decode());
+        if shared.reload_effects.swap(false, Ordering::Relaxed) {
+            renderer.reload_matting();
+        }
         let result = match job {
             // Scrubbing: if the frame is expensive to reach (far from a
             // keyframe), show a cheap stand-in at once, then work on the

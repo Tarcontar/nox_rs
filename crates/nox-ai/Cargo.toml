@@ -1,0 +1,27 @@
+[package]
+name = "nox-ai"
+description = "ONNX models on the GPU (Vulkan compute) for AI effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+nox-color.workspace = true
+nox-gpu.workspace = true
+prost = "0.14"
+sha2 = "0.10"
+thiserror.workspace = true
+tracing.workspace = true
+ureq = "3"
+
+[dev-dependencies]
+nox-media.workspace = true
+prost = "0.14"
+
+[build-dependencies]
+nox-build.workspace = true
+
+[lints]
+workspace = true

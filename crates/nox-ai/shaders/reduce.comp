@@ -1,0 +1,44 @@
+// Sum or mean over some axes (cpu::ReduceParams), one output element per
+// invocation. Kept and reduced axes each come as up to 4 extents with
+// their input strides.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint count; // elements reduced into each output
+    uint mean;
+    uint x_offset;
+    uvec4 kept;
+    uvec4 kept_strides;
+    uvec4 reduced;
+    uvec4 reduced_strides;
+} p;
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    uint base = p.x_offset;
+    uint rest = i;
+    for (int d = 3; d >= 0; d--) {
+        base += (rest % p.kept[d]) * p.kept_strides[d];
+        rest /= p.kept[d];
+    }
+    float sum = 0.0;
+    for (uint r = 0u; r < p.count; r++) {
+        uint at = base;
+        uint left = r;
+        for (int d = 3; d >= 0; d--) {
+            at += (left % p.reduced[d]) * p.reduced_strides[d];
+            left /= p.reduced[d];
+        }
+        sum += x[at];
+    }
+    o[i] = p.mean != 0u ? sum / float(max(p.count, 1u)) : sum;
+}

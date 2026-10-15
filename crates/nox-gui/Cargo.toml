@@ -14,6 +14,7 @@ path = "src/main.rs"
 gettext-rs.workspace = true
 async-channel.workspace = true
 gtk.workspace = true
+nox-ai.workspace = true
 nox-engine.workspace = true
 nox-media.workspace = true
 nox-otio.workspace = true

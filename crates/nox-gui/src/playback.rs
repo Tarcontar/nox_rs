@@ -286,6 +286,15 @@ impl Playback {
         }
     }
 
+    /// Loads effects that couldn't before (a model was downloaded) and
+    /// renders the picture again.
+    pub fn reload_effects(&self) {
+        self.engine.reload_effects();
+        if !self.engine.is_playing() {
+            self.show_playhead();
+        }
+    }
+
     /// How `path` decodes, once a frame of it has been rendered.
     pub fn decoding(&self, path: &Path) -> Option<Decoding> {
         self.engine.decoding(path)

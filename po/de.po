@@ -1511,3 +1511,67 @@ msgstr "Die Video-Einheit der Grafikkarte über VAAPI (AMD- und Intel-Karten), f
 #: src/preferences.rs
 msgid "Set by the NOX_DECODE environment variable ({value}) for this session."
 msgstr "Für diese Sitzung durch die Umgebungsvariable NOX_DECODE ({value}) festgelegt."
+
+#: resources/ui/inspector.ui
+msgid "Effects"
+msgstr "Effekte"
+
+#: resources/ui/inspector.ui
+msgid "Remove background"
+msgstr "Hintergrund entfernen"
+
+#: resources/ui/inspector.ui
+msgid "Cuts people out of their background (Robust Video Matting, on the graphics card)"
+msgstr "Stellt Personen frei (Robust Video Matting, auf der Grafikkarte)"
+
+#: src/inspector.rs
+msgid "Remove Background"
+msgstr "Hintergrund entfernen"
+
+#: src/inspector.rs
+msgid "Keep Background"
+msgstr "Hintergrund behalten"
+
+#: src/inspector.rs
+msgid "Download the background removal model?"
+msgstr "Das Modell zum Entfernen des Hintergrunds herunterladen?"
+
+#: src/inspector.rs
+msgid "Removing backgrounds uses {model} ({size} MB, {license}), which is downloaded once from GitHub into {folder}."
+msgstr "Zum Entfernen des Hintergrunds dient {model} ({size} MB, {license}), das einmalig von GitHub nach {folder} heruntergeladen wird."
+
+#: src/inspector.rs
+msgid "Download"
+msgstr "Herunterladen"
+
+#: src/inspector.rs
+msgid "Downloading…"
+msgstr "Wird heruntergeladen …"
+
+#: src/inspector.rs
+msgid "Downloading… {percent} %"
+msgstr "Wird heruntergeladen … {percent} %"
+
+#: src/inspector.rs
+msgid "The download failed: {error}"
+msgstr "Das Herunterladen ist fehlgeschlagen: {error}"
+
+#: resources/ui/preferences.ui
+msgid "AI Models"
+msgstr "KI-Modelle"
+
+#: resources/ui/preferences.ui
+msgid "_Delete"
+msgstr "_Löschen"
+
+#: resources/ui/preferences.ui
+msgid "Delete the downloaded models; effects that need one ask to download it again"
+msgstr "Die heruntergeladenen Modelle löschen; Effekte, die eines brauchen, fragen erneut nach dem Herunterladen"
+
+#: src/preferences.rs
+msgid "No models downloaded. Effects that need one offer to download it."
+msgstr "Keine Modelle heruntergeladen. Effekte, die eines brauchen, bieten an, es herunterzuladen."
+
+#: src/preferences.rs
+msgid "{models} ({size} MB) in {folder}"
+msgstr "{models} ({size} MB) in {folder}"

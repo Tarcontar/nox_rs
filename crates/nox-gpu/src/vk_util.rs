@@ -216,10 +216,51 @@ impl OneShot {
         waits: &[vk::SemaphoreSubmitInfo<'_>],
         signals: &[vk::SemaphoreSubmitInfo<'_>],
     ) -> Result<()> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            gpu.device.end_command_buffer(self.cmd)?;
+            self.resubmit_and_wait(gpu, waits, signals)
+        }
+    }
+
+    /// Starts recording commands to be submitted again and again
+    /// (`end`, then `resubmit_and_wait` each time).
+    ///
+    /// # Safety
+    /// No submission may be pending.
+    pub unsafe fn begin_reusable(&self, device: &ash::Device) -> Result<()> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            device.begin_command_buffer(self.cmd, &vk::CommandBufferBeginInfo::default())?;
+        }
+        Ok(())
+    }
+
+    /// Ends recording.
+    ///
+    /// # Safety
+    /// The command buffer must be recording valid commands.
+    pub unsafe fn end(&self, device: &ash::Device) -> Result<()> {
+        // SAFETY: guaranteed by the caller.
+        unsafe { device.end_command_buffer(self.cmd)? };
+        Ok(())
+    }
+
+    /// Submits the recorded commands as they are and waits until the GPU
+    /// has finished.
+    ///
+    /// # Safety
+    /// The command buffer must be recorded and ended, and nothing it uses
+    /// may have been destroyed.
+    pub unsafe fn resubmit_and_wait(
+        &self,
+        gpu: &GpuDevice,
+        waits: &[vk::SemaphoreSubmitInfo<'_>],
+        signals: &[vk::SemaphoreSubmitInfo<'_>],
+    ) -> Result<()> {
         let device = &gpu.device;
         // SAFETY: guaranteed by the caller.
         unsafe {
-            device.end_command_buffer(self.cmd)?;
             let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(self.cmd);
             gpu.submit(
                 &vk::SubmitInfo2::default()

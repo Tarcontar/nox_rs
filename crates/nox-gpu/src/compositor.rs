@@ -279,6 +279,41 @@ struct OutputParams {
     encoding: i32,
 }
 
+/// A clip's picture as a `LayerHook` gets it: RGBA32F in the linear
+/// working space (ACEScg), straight alpha, `width` × `height`, in GENERAL
+/// layout with the converter's writes done.
+pub struct LayerPicture {
+    pub image: vk::Image,
+    pub view: vk::ImageView,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Changes a clip's picture after conversion and before blending, e.g.
+/// writes a matte into its alpha, with submissions of its own on the
+/// compositor's device (`compute`). The picture must stay in GENERAL
+/// layout; blending multiplies by its alpha.
+pub trait LayerHook {
+    fn process(&mut self, picture: &LayerPicture) -> Result<()>;
+}
+
+fn run_hook(
+    hook: Option<&mut dyn LayerHook>,
+    image: &GpuImage,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    match hook {
+        Some(hook) => hook.process(&LayerPicture {
+            image: image.image,
+            view: image.view,
+            width,
+            height,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// A converted layer waiting to be blended.
 struct Layer {
     rect: Rect,
@@ -666,6 +701,19 @@ impl Compositor {
         rect: Rect,
         style: LayerStyle,
     ) -> Result<()> {
+        self.add_cached_layer_with(key, input, rect, style, None)
+    }
+
+    /// `add_cached_layer` with `hook` changing the picture before it's
+    /// kept (the key must say so).
+    pub fn add_cached_layer_with<'f, 'a: 'f>(
+        &mut self,
+        key: u64,
+        input: impl Into<Input<'f, 'a>>,
+        rect: Rect,
+        style: LayerStyle,
+        hook: Option<&mut dyn LayerHook>,
+    ) -> Result<()> {
         if self.layers.len() >= MAX_LAYERS {
             return Err(Error::Unsupported(format!("more than {MAX_LAYERS} layers")));
         }
@@ -679,7 +727,11 @@ impl Compositor {
             height,
             vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
         )?;
-        if let Err(err) = self.converter.convert_into(input, &image, width, height) {
+        let converted = self
+            .converter
+            .convert_into(input, &image, width, height)
+            .and_then(|()| run_hook(hook, &image, width, height));
+        if let Err(err) = converted {
             self.converter.destroy_image(image);
             return Err(err);
         }
@@ -740,6 +792,17 @@ impl Compositor {
         rect: Rect,
         style: LayerStyle,
     ) -> Result<()> {
+        self.add_layer_with(input, rect, style, None)
+    }
+
+    /// `add_layer` with `hook` changing the picture before it's blended.
+    pub fn add_layer_with<'f, 'a: 'f>(
+        &mut self,
+        input: impl Into<Input<'f, 'a>>,
+        rect: Rect,
+        style: LayerStyle,
+        hook: Option<&mut dyn LayerHook>,
+    ) -> Result<()> {
         if self.layers.len() >= MAX_LAYERS {
             return Err(Error::Unsupported(format!("more than {MAX_LAYERS} layers")));
         }
@@ -773,6 +836,7 @@ impl Compositor {
         }
         let target = &self.images[index].image;
         self.converter.convert_into(input, target, width, height)?;
+        run_hook(hook, target, width, height)?;
         self.slots_used += 1;
         self.layers.push(Layer {
             rect,

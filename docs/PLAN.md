@@ -289,6 +289,20 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
       - The converter turns the picture while it samples (`ycbcr_to_rgb.comp` maps each output point back into the stored picture), so everything after it sees it upright, at no cost. The clip's own transform stays at 0°.
       - `display_size`, `rgba_cpu` (thumbnails, filmstrips, the no-GPU path) and `probe` (width and height are the displayed size, plus `orientation`) all work upright. Probing a photo decodes its first frame for the EXIF orientation.
       - `tests/orientation.rs` checks every turn and mirror against the `ffmpeg` tool's own upright picture, on the CPU and the GPU, plus a JPEG with EXIF orientation 6. The iPhone files' "clean aperture" crop (`clap`) isn't applied yet, and neither does FFmpeg.
+    - **AI: background removal** (asked for; plan and design in docs/AI_PLAN.md):
+      - **Engine:** `nox-ai` is Nox's own ONNX runtime on the GPU it renders with, so frames don't leave it.
+        - It reads `.onnx` with prost (hand-written schema subset).
+        - Planning folds constants and shape arithmetic on the CPU (`cpu.rs`, which is also the test reference).
+        - The rest becomes GLSL kernels: elementwise, unary, strided copy, convolution, resize, pooling and reduction.
+        - It reuses buffers by liveness, records the dispatches once and resubmits them every frame.
+      - **Robust Video Matting (opset 12):** it matches onnxruntime within 2e-5. A 1080p frame takes 23 ms on an RTX 5060 with naive kernels, and 293 MB.
+      - **Compositor:** `LayerHook` lets the matte go into a clip's alpha between conversion and blending. `nox_gpu::compute` (buffers, kernels, recordings) is the public compute API under it.
+      - **Clips:** the effect is the OTIO `Effect.1` named `nox.remove_background`. Each clip keeps its own recurrent state, which starts over on seeks. Stills run three times.
+      - **GUI:** an Effects switch in the inspector. The model (15 MB, SHA-256 pinned) downloads into `nox/models` in the user's data folder after asking (`NOX_MODELS_DIR` overrides). Preferences shows and deletes downloaded models.
+      - **Tests:**
+        - Every operator on the GPU against the CPU.
+        - RVM over two frames, when `NOX_AI_MODELS` names the model folder.
+        - The engine's matte over a lower track, when `NOX_MODELS_DIR` has the model.
     - **Code cleanup** (asked for, after a review of the 33k lines):
       - **Shared helpers instead of copies:**
         - nox-gpu `vk_util`: pipelines, descriptor writes, `OneShot` submit-and-wait, timeline-semaphore infos, exportable memory.

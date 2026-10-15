@@ -641,3 +641,39 @@ fn reports_how_files_decode() {
         Some(DecodeApi::Software)
     );
 }
+
+/// Background removal (nox-ai's matting) runs on a clip that has it: a
+/// plain blue picture has no person in it, so it's matted out and the red
+/// clip below shows through. Needs the model in `NOX_MODELS_DIR` (skips
+/// otherwise).
+#[test]
+fn background_removal_shows_what_is_below() {
+    let model = nox_ai::models::ROBUST_VIDEO_MATTING;
+    if !common::have_gpu() || !model.is_available(&nox_ai::models::default_dir()) {
+        eprintln!("skipping: needs a GPU and the matting model");
+        return;
+    }
+    let (Some(red), Some(blue)) = (
+        solid("red-matte.mkv", "0xC03020", "320x180"),
+        solid("blue-matte.mkv", "0x2060E0", "320x180"),
+    ) else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    timeline.place(0, clip(&red, 0, 50), f(0)).unwrap();
+    let v2 = timeline.add_track(TrackKind::Video);
+    let mut top = clip(&blue, 0, 50);
+    top.item_mut().unwrap().set_background_removal(true);
+    timeline.place(v2, top, f(0)).unwrap();
+
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    for frame in [5, 6, 30] {
+        let px = pixel(&render(&engine, &events, frame), 80, 45);
+        assert!(close(px, [0xC0, 0x30, 0x20]), "frame {frame}: {px:?}");
+    }
+}

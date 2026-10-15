@@ -1,0 +1,64 @@
+// A compositor layer (RGBA32F, linear working space, straight alpha) as a
+// model's input: sRGB in [0, 1], planar RGB (NCHW) at the model's size,
+// scaled bilinearly (a box of 2×2 bilinear taps when shrinking).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D layer;
+layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Params {
+    // The working space to linear BT.709/sRGB primaries, as rows.
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
+    uint width;  // model input
+    uint height;
+    uint layer_width;
+    uint layer_height;
+} p;
+
+vec3 at(ivec2 pos) {
+    pos = clamp(pos, ivec2(0), ivec2(p.layer_width, p.layer_height) - 1);
+    return imageLoad(layer, pos).rgb;
+}
+
+vec3 bilinear(vec2 xy) {
+    xy -= 0.5;
+    ivec2 i = ivec2(floor(xy));
+    vec2 f = xy - vec2(i);
+    return mix(mix(at(i), at(i + ivec2(1, 0)), f.x),
+               mix(at(i + ivec2(0, 1)), at(i + ivec2(1, 1)), f.x), f.y);
+}
+
+float srgb(float v) {
+    v = clamp(v, 0.0, 1.0);
+    return v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+void main() {
+    uint i = element();
+    uint plane = p.width * p.height;
+    if (i >= plane) {
+        return;
+    }
+    uint x = i % p.width;
+    uint y = i / p.width;
+    vec2 scale = vec2(p.layer_width, p.layer_height) / vec2(p.width, p.height);
+    vec2 center = (vec2(x, y) + 0.5) * scale;
+    vec3 rgb;
+    if (scale.x > 1.0 || scale.y > 1.0) {
+        vec2 quarter = 0.25 * scale;
+        rgb = 0.25 * (bilinear(center + vec2(-quarter.x, -quarter.y))
+                    + bilinear(center + vec2(quarter.x, -quarter.y))
+                    + bilinear(center + vec2(-quarter.x, quarter.y))
+                    + bilinear(center + vec2(quarter.x, quarter.y)));
+    } else {
+        rgb = bilinear(center);
+    }
+    vec4 v = vec4(rgb, 0.0);
+    o[i] = srgb(dot(p.row0, v));
+    o[plane + i] = srgb(dot(p.row1, v));
+    o[2u * plane + i] = srgb(dot(p.row2, v));
+}

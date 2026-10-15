@@ -1,0 +1,36 @@
+// Multiplies a compositor layer's alpha by a matte (one plane of floats at
+// the model's size), scaled to the layer bilinearly.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D layer;
+layout(set = 0, binding = 1, std430) readonly buffer Matte { float m[]; };
+
+layout(push_constant) uniform Params {
+    uint width;  // matte
+    uint height;
+    uint layer_width;
+    uint layer_height;
+} p;
+
+float at(ivec2 pos) {
+    pos = clamp(pos, ivec2(0), ivec2(p.width, p.height) - 1);
+    return m[uint(pos.y) * p.width + uint(pos.x)];
+}
+
+void main() {
+    uint i = element();
+    if (i >= p.layer_width * p.layer_height) {
+        return;
+    }
+    ivec2 pos = ivec2(i % p.layer_width, i / p.layer_width);
+    vec2 xy = (vec2(pos) + 0.5) * vec2(p.width, p.height) / vec2(p.layer_width, p.layer_height) - 0.5;
+    ivec2 c = ivec2(floor(xy));
+    vec2 f = xy - vec2(c);
+    float matte = mix(mix(at(c), at(c + ivec2(1, 0)), f.x),
+                      mix(at(c + ivec2(0, 1)), at(c + ivec2(1, 1)), f.x), f.y);
+    vec4 pixel = imageLoad(layer, pos);
+    pixel.a *= clamp(matte, 0.0, 1.0);
+    imageStore(layer, pos, pixel);
+}

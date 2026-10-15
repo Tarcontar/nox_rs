@@ -1512,3 +1512,67 @@ msgstr ""
 #: src/preferences.rs
 msgid "Set by the NOX_DECODE environment variable ({value}) for this session."
 msgstr ""
+
+#: resources/ui/inspector.ui
+msgid "Effects"
+msgstr ""
+
+#: resources/ui/inspector.ui
+msgid "Remove background"
+msgstr ""
+
+#: resources/ui/inspector.ui
+msgid "Cuts people out of their background (Robust Video Matting, on the graphics card)"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Remove Background"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Keep Background"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Download the background removal model?"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Removing backgrounds uses {model} ({size} MB, {license}), which is downloaded once from GitHub into {folder}."
+msgstr ""
+
+#: src/inspector.rs
+msgid "Download"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Downloading…"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Downloading… {percent} %"
+msgstr ""
+
+#: src/inspector.rs
+msgid "The download failed: {error}"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "AI Models"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "_Delete"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "Delete the downloaded models; effects that need one ask to download it again"
+msgstr ""
+
+#: src/preferences.rs
+msgid "No models downloaded. Effects that need one offer to download it."
+msgstr ""
+
+#: src/preferences.rs
+msgid "{models} ({size} MB) in {folder}"
+msgstr ""

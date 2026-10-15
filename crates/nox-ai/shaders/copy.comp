@@ -1,0 +1,36 @@
+// Copies a strided view of `src` into a strided place in `dst`: Concat,
+// Split, Slice (negative strides for negative steps), Expand (stride 0)
+// and Transpose, over up to 4 dimensions.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer Src { float s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Dst { float d[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    int src_offset;
+    int dst_offset;
+    uint pad0;
+    uvec4 shape;
+    ivec4 src_strides;
+    ivec4 dst_strides;
+} p;
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    uint rest = i;
+    int from = p.src_offset;
+    int to = p.dst_offset;
+    for (int k = 3; k >= 0; k--) {
+        int idx = int(rest % p.shape[k]);
+        rest /= p.shape[k];
+        from += idx * p.src_strides[k];
+        to += idx * p.dst_strides[k];
+    }
+    d[to] = s[from];
+}

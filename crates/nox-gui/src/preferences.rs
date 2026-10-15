@@ -176,6 +176,10 @@ mod imp {
         pub decoding: TemplateChild<gtk::DropDown>,
         #[template_child]
         pub decoding_info: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub models_info: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub delete_models: TemplateChild<gtk::Button>,
         pub choices: RefCell<Vec<(HwDecode, &'static str, &'static str)>>,
     }
 
@@ -187,6 +191,7 @@ mod imp {
 
         fn class_init(klass: &mut Self::Class) {
             klass.bind_template();
+            klass.bind_template_instance_callbacks();
             klass.add_binding_action(
                 gtk::gdk::Key::Escape,
                 gtk::gdk::ModifierType::empty(),
@@ -225,7 +230,22 @@ pub fn show(parent: Option<&gtk::Window>) {
     window.present();
 }
 
+#[gtk::template_callbacks]
 impl PreferencesWindow {
+    #[template_callback]
+    fn on_delete_models_clicked(&self) {
+        let dir = nox_ai::models::default_dir();
+        for model in nox_ai::models::MODELS {
+            let path = model.path(&dir);
+            if path.exists()
+                && let Err(err) = std::fs::remove_file(&path)
+            {
+                tracing::warn!("cannot delete {}: {err}", path.display());
+            }
+        }
+        self.show_models();
+    }
+
     fn setup(&self) {
         let imp = self.imp();
         let preferences = Preferences::get();
@@ -268,6 +288,33 @@ impl PreferencesWindow {
             }
         ));
         self.explain_decoding();
+        self.show_models();
+    }
+
+    /// Which AI models are downloaded, and how big they are.
+    fn show_models(&self) {
+        let imp = self.imp();
+        let dir = nox_ai::models::default_dir();
+        let present: Vec<nox_ai::models::ModelInfo> = nox_ai::models::MODELS
+            .into_iter()
+            .filter(|m| m.is_available(&dir))
+            .collect();
+        let text = if present.is_empty() {
+            gettext("No models downloaded. Effects that need one offer to download it.")
+        } else {
+            let names: Vec<&str> = present.iter().map(|m| m.name).collect();
+            let size: u64 = present.iter().map(|m| m.size).sum();
+            fill(
+                &gettext("{models} ({size} MB) in {folder}"),
+                &[
+                    ("models", &names.join(", ")),
+                    ("size", &(size / 1_000_000)),
+                    ("folder", &dir.display()),
+                ],
+            )
+        };
+        imp.models_info.set_text(&text);
+        imp.delete_models.set_sensitive(!present.is_empty());
     }
 
     /// Says what the chosen way to decode does, or that `NOX_DECODE`

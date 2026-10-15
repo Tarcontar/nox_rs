@@ -1,0 +1,46 @@
+// out = a (op) b, broadcasting NumPy-style over up to 4 dimensions (the
+// planner pads shapes; broadcast dimensions have stride 0).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer A { float a[]; };
+layout(set = 0, binding = 1, std430) readonly buffer B { float b[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint op; // cpu::BinaryOp
+    uint a_offset;
+    uint b_offset;
+    uvec4 shape;
+    uvec4 a_strides;
+    uvec4 b_strides;
+} p;
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    uint rest = i;
+    uint ia = p.a_offset;
+    uint ib = p.b_offset;
+    for (int d = 3; d >= 0; d--) {
+        uint idx = rest % p.shape[d];
+        rest /= p.shape[d];
+        ia += idx * p.a_strides[d];
+        ib += idx * p.b_strides[d];
+    }
+    float x = a[ia];
+    float y = b[ib];
+    float r;
+    switch (p.op) {
+    case 0: r = x + y; break;
+    case 1: r = x - y; break;
+    case 2: r = x * y; break;
+    case 3: r = x / y; break;
+    default: r = pow(x, y); break;
+    }
+    o[i] = r;
+}

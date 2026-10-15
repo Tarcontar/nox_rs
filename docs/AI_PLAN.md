@@ -1,5 +1,7 @@
 # AI in Nox: own ONNX engine on Vulkan (nox-ai), first feature: background removal
 
+**Status (2026-10-15): steps 0–4 done.** Background removal works in the viewer and in exports. What's left is in "Later" and the risks below (faster kernels).
+
 ## Context
 You want AI-powered processing (speech to text, background removal, …) built on ONNX, the open and portable model format. You want inference in Vulkan compute shaders, so frames never leave the GPU. Nox already decodes, composites and encodes on one ash device without copies. Everything AI-related goes in its own crate.
 

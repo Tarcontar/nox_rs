@@ -31,6 +31,12 @@ mod imp {
         #[template_child]
         pub composite_section: TemplateChild<gtk::Box>,
         #[template_child]
+        pub effects_section: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub remove_background: TemplateChild<gtk::Switch>,
+        #[template_child]
+        pub background_status: TemplateChild<gtk::Label>,
+        #[template_child]
         pub audio_section: TemplateChild<gtk::Box>,
         #[template_child]
         pub opacity_scale: TemplateChild<gtk::Scale>,
@@ -398,6 +404,27 @@ impl Inspector {
         }
     }
 
+    /// Turns background removal on or off; the first time, offers to
+    /// download its model.
+    #[template_callback]
+    fn on_remove_background_changed(&self) {
+        let imp = self.imp();
+        if imp.updating.get() {
+            return;
+        }
+        let on = imp.remove_background.is_active();
+        let model = nox_ai::models::ROBUST_VIDEO_MATTING;
+        if on && !model.is_available(&nox_ai::models::default_dir()) {
+            // Off until the model is there.
+            imp.updating.set(true);
+            imp.remove_background.set_active(false);
+            imp.updating.set(false);
+            self.offer_model_download();
+            return;
+        }
+        self.set_background_removal(on);
+    }
+
     #[template_callback]
     fn on_freeze_toggled(&self) {
         let imp = self.imp();
@@ -672,6 +699,9 @@ impl Inspector {
                     ],
                 ));
                 imp.composite_section.set_visible(video);
+                imp.effects_section.set_visible(video);
+                imp.remove_background
+                    .set_active(clip.item.removes_background());
                 imp.audio_section.set_visible(!video);
                 let time = self.media_time().unwrap_or_default();
                 imp.opacity_scale
@@ -758,6 +788,7 @@ impl Inspector {
                     &[("length", &length(frames))],
                 ));
                 imp.composite_section.set_visible(false);
+                imp.effects_section.set_visible(false);
                 imp.audio_section.set_visible(false);
                 imp.fade_section.set_visible(false);
                 imp.transform_section.set_visible(false);
@@ -776,6 +807,112 @@ impl Inspector {
 }
 
 impl Inspector {
+    fn set_background_removal(&self, on: bool) {
+        let label = if on {
+            gettext("Remove Background")
+        } else {
+            gettext("Keep Background")
+        };
+        self.edit(&label, None, |item| item.set_background_removal(on));
+    }
+
+    /// Asks before downloading the matting model, then downloads it,
+    /// showing progress, and turns background removal on for the selected
+    /// clip.
+    fn offer_model_download(&self) {
+        let model = nox_ai::models::ROBUST_VIDEO_MATTING;
+        let dir = nox_ai::models::default_dir();
+        let dialog = gtk::AlertDialog::builder()
+            .modal(true)
+            .message(gettext("Download the background removal model?"))
+            .detail(fill(
+                &gettext(
+                    "Removing backgrounds uses {model} ({size} MB, {license}), which is downloaded once from GitHub into {folder}.",
+                ),
+                &[
+                    ("model", &model.name),
+                    ("size", &(model.size / 1_000_000)),
+                    ("license", &model.license),
+                    ("folder", &dir.display()),
+                ],
+            ))
+            .buttons([gettext("Cancel"), gettext("Download")])
+            .cancel_button(0)
+            .default_button(1)
+            .build();
+        let window = self.root().and_downcast::<gtk::Window>();
+        dialog.choose(
+            window.as_ref(),
+            gtk::gio::Cancellable::NONE,
+            glib::clone!(
+                #[weak(rename_to = inspector)]
+                self,
+                move |answer| {
+                    if answer == Ok(1) {
+                        inspector.download_model();
+                    }
+                }
+            ),
+        );
+    }
+
+    fn download_model(&self) {
+        let status = self.imp().background_status.get();
+        status.set_text(&gettext("Downloading…"));
+        status.set_visible(true);
+        let (sender, receiver) = async_channel::unbounded::<(u64, u64)>();
+        let download = gtk::gio::spawn_blocking(move || {
+            let model = nox_ai::models::ROBUST_VIDEO_MATTING;
+            model.download(
+                &nox_ai::models::default_dir(),
+                |done, total| {
+                    let _ = sender.send_blocking((done, total));
+                },
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        });
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = inspector)]
+            self,
+            async move {
+                let status = inspector.imp().background_status.get();
+                let mut shown = None;
+                while let Ok((done, total)) = receiver.recv().await {
+                    let percent = done * 100 / total.max(1);
+                    if shown != Some(percent) {
+                        shown = Some(percent);
+                        status.set_text(&fill(
+                            &gettext("Downloading… {percent} %"),
+                            &[("percent", &percent)],
+                        ));
+                    }
+                }
+                match download.await {
+                    Ok(Ok(_)) => {
+                        status.set_visible(false);
+                        if let Some(playback) = inspector
+                            .imp()
+                            .playback
+                            .get()
+                            .and_then(std::rc::Weak::upgrade)
+                        {
+                            playback.reload_effects();
+                        }
+                        inspector.set_background_removal(true);
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!("model download failed: {err}");
+                        status.set_text(&fill(
+                            &gettext("The download failed: {error}"),
+                            &[("error", &err)],
+                        ));
+                    }
+                    Err(_) => status.set_visible(false),
+                }
+            }
+        ));
+    }
+
     fn show_marker(&self, project: &Project, index: usize) {
         let imp = self.imp();
         let model = project.timeline();
