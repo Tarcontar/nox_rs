@@ -733,3 +733,72 @@ fn automatic_decoding_picks_the_backend() {
         .unwrap();
     assert!(worst <= 1, "4:2:2 picture differs by up to {worst}");
 }
+
+/// VAAPI output must be bit-exact with software decoding. Needs Nox's
+/// Vulkan device on a GPU with VAAPI (e.g. `NOX_GPU=RADV` for AMD).
+#[test]
+fn vaapi_decode_matches_software() {
+    let Some((accel, _)) = gpu() else { return };
+    let Some(path) = h264_clip("h264-vaapi.mp4") else {
+        return;
+    };
+    let Ok(mut hardware) = VideoDecoder::open_with(&path, Some(&accel), HwDecode::Vaapi) else {
+        eprintln!("skipping: no VAAPI on this GPU");
+        return;
+    };
+    let mut software = VideoDecoder::open(&path, None).unwrap();
+    for index in [0, 7, 23, 4, 49] {
+        let hw_frame = hardware.frame_at(index).unwrap();
+        if hw_frame.format() != ffmpeg::format::Pixel::VAAPI {
+            eprintln!("skipping: no VAAPI H.264 decode here");
+            return;
+        }
+        let nv12 = to_software(&hw_frame).unwrap();
+        let yuv = software.frame_at(index).unwrap();
+        let (w, h) = (yuv.width() as usize, yuv.height() as usize);
+        for y in 0..h {
+            assert_eq!(
+                &nv12.data(0)[y * nv12.stride(0)..][..w],
+                &yuv.data(0)[y * yuv.stride(0)..][..w],
+                "frame {index}: luma row {y}"
+            );
+        }
+    }
+}
+
+/// VAAPI frames reach the converter as Vulkan images (their DMA-BUFs
+/// imported, no copies) and convert exactly like the same frames
+/// downloaded.
+#[test]
+fn vaapi_frames_convert_in_place() {
+    let Some((accel, gpu)) = gpu() else { return };
+    let Some(path) = h264_clip("h264-vaapi-gpu.mp4") else {
+        return;
+    };
+    let Ok(mut decoder) = VideoDecoder::open_with(&path, Some(&accel), HwDecode::Vaapi) else {
+        eprintln!("skipping: no VAAPI on this GPU");
+        return;
+    };
+    let mut converter = Converter::new(gpu).unwrap();
+    for index in [0, 13, 49] {
+        let frame = decoder.frame_at(index).unwrap();
+        if frame.format() != ffmpeg::format::Pixel::VAAPI {
+            eprintln!("skipping: no VAAPI H.264 decode here");
+            return;
+        }
+        let in_place = nox_media::with_gpu_input(&frame, Some(&accel), |input| {
+            assert!(
+                matches!(input, nox_gpu::Input::Vulkan(_)),
+                "VAAPI frames are mapped to Vulkan images"
+            );
+            converter.convert(input, 320, 240)
+        })
+        .unwrap()
+        .unwrap();
+        let downloaded = to_software(&frame).unwrap();
+        let reference = with_cpu_frame(&downloaded, |cpu| converter.convert(cpu, 320, 240))
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_place.data, reference.data, "frame {index}");
+    }
+}

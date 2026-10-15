@@ -22,12 +22,16 @@ fn main() {
     let mut decoder = VideoDecoder::open(path.as_ref(), Some(&hw)).expect("open");
     let fps = decoder.frame_rate().as_f64();
     let first = decoder.frame_at(0).expect("frame 0");
-    let hardware = first.format() == ffmpeg::format::Pixel::VULKAN;
+    let decoding = match first.format() {
+        ffmpeg::format::Pixel::VULKAN => "Vulkan Video",
+        ffmpeg::format::Pixel::CUDA => "NVDEC",
+        ffmpeg::format::Pixel::VAAPI => "VAAPI",
+        _ => "software",
+    };
     println!(
-        "{path}: {}×{} at {fps:.3} fps, {} decoding",
+        "{path}: {}×{} at {fps:.3} fps, {decoding} decoding",
         first.width(),
         first.height(),
-        if hardware { "Vulkan Video" } else { "software" }
     );
 
     let start = Instant::now();

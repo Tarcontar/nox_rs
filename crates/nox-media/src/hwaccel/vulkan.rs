@@ -76,9 +76,14 @@ impl DecodedFrame {
                 return Err("frame has no hardware frames context");
             }
             let frames_ctx = (*frames_ref).data.cast::<ffi::AVHWFramesContext>();
-            if vulkan_frames_context(frames_ctx).img_flags
-                & vk::ImageCreateFlags::MUTABLE_FORMAT.as_raw()
-                == 0
+            let vk_frame = (*av).data[0].cast::<ffi::AVVkFrame>();
+            // Views of single planes of a multi-planar image need a mutable
+            // format; images of one plane each (e.g. mapped DMA-BUFs) don't.
+            let multi_planar = (*vk_frame).img[1] == 0;
+            if multi_planar
+                && vulkan_frames_context(frames_ctx).img_flags
+                    & vk::ImageCreateFlags::MUTABLE_FORMAT.as_raw()
+                    == 0
             {
                 return Err(
                     "decoder images are not created with MUTABLE_FORMAT (no per-plane views)",
@@ -96,7 +101,6 @@ impl DecodedFrame {
             if layout == Layout::Packed {
                 return Err("packed decoder output format");
             }
-            let vk_frame = (*av).data[0].cast::<ffi::AVVkFrame>();
             let template = VkFrame {
                 width: frame.width(),
                 height: frame.height(),
@@ -185,31 +189,51 @@ impl GpuSink for VulkanSink {
         if ret < 0 {
             return Err(ffmpeg::Error::from(ret).into());
         }
-        // SAFETY: `frame` is a Vulkan frame of `frames`, alive for the call;
-        // the lock brackets all access to its state.
-        unsafe {
-            let ctx = (*self.frames).data.cast::<ffi::AVHWFramesContext>();
-            let vkf = (*frame.as_ptr()).data[0].cast::<ffi::AVVkFrame>();
-            let (luma, chroma) = if self.deep {
-                (PlaneFormat::R16, PlaneFormat::Rg16)
-            } else {
-                (PlaneFormat::R8, PlaneFormat::Rg8)
-            };
-            let mut planes = vk_planes(ctx, vkf, &[(luma, 0, 0), (chroma, 1, 1)]).into_iter();
-            let mut locked = LockedFrame::new(ctx, vkf);
-            let mut target = YuvTarget {
-                width: (*ctx).width as u32,
-                height: (*ctx).height as u32,
-                luma: planes.next().expect("luma"),
-                chroma: planes.next().expect("chroma"),
-                images: std::mem::take(&mut locked.images),
-                matrix: self.matrix,
-            };
-            let result = render(GpuTarget::Images(&mut target));
-            locked.images = std::mem::take(&mut target.images);
-            result.map_err(Error::from)?;
-        }
+        // SAFETY: `frame` is a Vulkan frame of `frames`, alive for the call.
+        unsafe { render_into(&frame, self.matrix, self.deep, render)? };
         Ok(frame)
+    }
+}
+
+/// Has `render` write Y'CbCr into the Vulkan `frame` (NV12, or P010 with
+/// `deep`) through storage views of its planes, following FFmpeg's
+/// `AVVkFrame` protocol. Encoders' frames: the Vulkan Video sink's own, or
+/// other APIs' surfaces mapped to Vulkan (VAAPI).
+///
+/// # Safety
+/// `frame` must be a valid `AV_PIX_FMT_VULKAN` frame in `deep`'s format,
+/// with images that allow storage views.
+pub(super) unsafe fn render_into(
+    frame: &frame::Video,
+    matrix: nox_color::Matrix3x4,
+    deep: bool,
+    render: Render<'_>,
+) -> Result<()> {
+    // SAFETY: guaranteed by the caller; the lock brackets all access to the
+    // frame's state.
+    unsafe {
+        let ctx = (*(*frame.as_ptr()).hw_frames_ctx)
+            .data
+            .cast::<ffi::AVHWFramesContext>();
+        let vkf = (*frame.as_ptr()).data[0].cast::<ffi::AVVkFrame>();
+        let (luma, chroma) = if deep {
+            (PlaneFormat::R16, PlaneFormat::Rg16)
+        } else {
+            (PlaneFormat::R8, PlaneFormat::Rg8)
+        };
+        let mut planes = vk_planes(ctx, vkf, &[(luma, 0, 0), (chroma, 1, 1)]).into_iter();
+        let mut locked = LockedFrame::new(ctx, vkf);
+        let mut target = YuvTarget {
+            width: (*ctx).width as u32,
+            height: (*ctx).height as u32,
+            luma: planes.next().expect("luma"),
+            chroma: planes.next().expect("chroma"),
+            images: std::mem::take(&mut locked.images),
+            matrix,
+        };
+        let result = render(GpuTarget::Images(&mut target));
+        locked.images = std::mem::take(&mut target.images);
+        result.map_err(Error::from)
     }
 }
 

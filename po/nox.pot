@@ -593,6 +593,10 @@ msgid "Encodes on the graphics card's video engine, and the frames never leave t
 msgstr ""
 
 #: src/export_dialog.rs
+msgid "The graphics card's video engine through VAAPI, Linux's video interface for AMD and Intel cards: fast, and the frames never leave the card. Files are somewhat larger than from a software encoder at the same quality."
+msgstr ""
+
+#: src/export_dialog.rs
 msgid "NVIDIA's video engine: very fast, with better quality for the size than most hardware encoders. NVIDIA cards only."
 msgstr ""
 

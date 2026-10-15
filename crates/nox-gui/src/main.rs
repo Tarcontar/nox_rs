@@ -44,16 +44,12 @@ fn main() -> glib::ExitCode {
         .build();
     app.connect_startup(|_| {
         if let Some(settings) = gtk::Settings::default() {
-            // GTK 4.20 replaced the dark-theme preference with a color
-            // scheme (GtkInterfaceColorScheme); older GTKs (e.g. Debian 13's
-            // 4.18) only have the former.
-            let dark = glib::Type::from_name("GtkInterfaceColorScheme")
-                .and_then(glib::EnumClass::with_type)
-                .and_then(|class| class.to_value_by_nick("dark"));
-            match dark {
-                Some(dark) => settings.set_property("gtk-interface-color-scheme", dark),
-                None => settings.set_gtk_application_prefer_dark_theme(true),
-            }
+            // The dark variant of the user's theme. Not GTK 4.20's
+            // `gtk-interface-color-scheme`, although GTK calls this setting
+            // deprecated: with a theme that has no separate dark theme
+            // (Ubuntu's Yaru), that loads no stylesheet at all, and windows
+            // come out unstyled and transparent.
+            settings.set_gtk_application_prefer_dark_theme(true);
         }
         // The app's own icons (timeline tools, the app icon), also when run
         // uninstalled or with another app id.

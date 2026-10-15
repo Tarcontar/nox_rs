@@ -16,10 +16,21 @@ runs:
         msystem: ${{ inputs.msystem }}
         update: true
         path-type: inherit
-        install: git make curl diffutils
-        pacboy: >-
-          toolchain:p clang:p pkgconf:p gtk4:p librsvg:p adwaita-icon-theme:p
-          gettext:p glslang:p x264:p x265:p dav1d:p vulkan-headers:p
+    # Not through setup-msys2's install: MSYS2's mirrors sometimes stall,
+    # and a retry usually gets a better one.
+    - name: Packages
+      shell: msys2 {0}
+      run: |
+        for attempt in 1 2 3; do
+          pacman -S --needed --noconfirm git make curl diffutils &&
+            pacboy -S --needed --noconfirm toolchain:p clang:p pkgconf:p gtk4:p \
+              librsvg:p adwaita-icon-theme:p gettext:p glslang:p x264:p x265:p \
+              dav1d:p vulkan-headers:p &&
+            exit 0
+          echo "attempt $attempt failed; retrying in 30 s"
+          sleep 30
+        done
+        exit 1
     - name: NASM (FFmpeg's x86 assembly)
       if: inputs.msystem == 'CLANG64'
       shell: msys2 {0}

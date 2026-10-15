@@ -156,6 +156,14 @@ fn nvenc_encode_from_gpu_memory() {
     gpu_encode("h264_nvenc", "nvenc.mp4");
 }
 
+/// VAAPI: the compositor writes into the encoder's surfaces, mapped to
+/// Vulkan (DMA-BUF). Needs Nox's Vulkan device on a GPU with VAAPI
+/// encoding (e.g. `NOX_GPU=RADV` for AMD).
+#[test]
+fn vaapi_encode_without_copies() {
+    gpu_encode("h264_vaapi", "vaapi.mp4");
+}
+
 /// Encodes test frames with `encoder`, which takes them on the GPU, and
 /// checks what comes out.
 fn gpu_encode(encoder: &str, name: &str) {

@@ -6,6 +6,8 @@
 // left-sited, the MPEG-2/H.264 convention: horizontally filtered
 // [1/4 1/2 1/4] around the left column, averaged over the two rows (of
 // R'G'B', as encoders do).
+//
+// With `measure` set, also measures the light of HDR10 frames (light.glsl).
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
@@ -21,6 +23,9 @@ layout(set = 0, binding = 2, rg16) uniform writeonly image2D chroma;
 layout(set = 0, binding = 1, r8) uniform writeonly image2D luma;
 layout(set = 0, binding = 2, rg8) uniform writeonly image2D chroma;
 #endif
+layout(set = 0, binding = 3, std430) writeonly buffer Light {
+    vec2 partials[];
+} light;
 
 layout(push_constant) uniform Params {
     // R'G'B' → normalized (Y, Cb, Cr) texel values (nox_color::ycbcr).
@@ -29,7 +34,10 @@ layout(push_constant) uniform Params {
     vec4 row2;
     ivec2 size;
     int encoding;
+    int measure;
 } p;
+
+#include "light.glsl"
 
 vec4 rgb_at(ivec2 pos) {
     pos = clamp(pos, ivec2(0), p.size - 1);
@@ -39,22 +47,28 @@ vec4 rgb_at(ivec2 pos) {
 void main() {
     ivec2 block = ivec2(gl_GlobalInvocationID.xy);
     ivec2 base = block * 2;
-    if (any(greaterThanEqual(base, p.size))) {
-        return;
-    }
-    for (int dy = 0; dy < 2; dy++) {
-        for (int dx = 0; dx < 2; dx++) {
-            ivec2 pos = base + ivec2(dx, dy);
-            if (all(lessThan(pos, p.size))) {
-                imageStore(luma, pos, vec4(dot(p.row0, rgb_at(pos))));
+    vec2 measured = vec2(0.0);
+    if (all(lessThan(base, p.size))) {
+        for (int dy = 0; dy < 2; dy++) {
+            for (int dx = 0; dx < 2; dx++) {
+                ivec2 pos = base + ivec2(dx, dy);
+                if (all(lessThan(pos, p.size))) {
+                    imageStore(luma, pos, vec4(dot(p.row0, rgb_at(pos))));
+                    if (p.measure != 0) {
+                        measured = add_light(measured, brightest_nits(imageLoad(accum, pos).rgb));
+                    }
+                }
             }
         }
+        vec4 rgb = vec4(0.0);
+        for (int dy = 0; dy < 2; dy++) {
+            ivec2 row = base + ivec2(0, dy);
+            rgb += 0.25 * rgb_at(row - ivec2(1, 0)) + 0.5 * rgb_at(row) + 0.25 * rgb_at(row + ivec2(1, 0));
+        }
+        rgb *= 0.5;
+        imageStore(chroma, block, vec4(dot(p.row1, rgb), dot(p.row2, rgb), 0.0, 0.0));
     }
-    vec4 rgb = vec4(0.0);
-    for (int dy = 0; dy < 2; dy++) {
-        ivec2 row = base + ivec2(0, dy);
-        rgb += 0.25 * rgb_at(row - ivec2(1, 0)) + 0.5 * rgb_at(row) + 0.25 * rgb_at(row + ivec2(1, 0));
+    if (p.measure != 0) {
+        store_light(measured);
     }
-    rgb *= 0.5;
-    imageStore(chroma, block, vec4(dot(p.row1, rgb), dot(p.row2, rgb), 0.0, 0.0));
 }

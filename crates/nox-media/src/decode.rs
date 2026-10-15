@@ -8,8 +8,10 @@
 //! with Vulkan Video (`AV_PIX_FMT_VULKAN` frames, used in place) when the
 //! device's Vulkan decoder handles the codec and the format is 4:2:0, else
 //! with NVDEC (`AV_PIX_FMT_CUDA` frames, copied once on the GPU; it also
-//! decodes 4:2:2 on recent GPUs, and codecs Vulkan Video lacks). If
-//! hardware initialization fails, FFmpeg falls back to software decoding.
+//! decodes 4:2:2 on recent GPUs, and codecs Vulkan Video lacks), else with
+//! VAAPI on Linux (`AV_PIX_FMT_VAAPI` frames, mapped to Vulkan without
+//! copies). If hardware initialization fails, FFmpeg falls back to
+//! software decoding.
 
 use ffmpeg::{codec, ffi, format, frame, media};
 use nox_project::{Rational, Time};
@@ -28,15 +30,19 @@ pub enum HwDecode {
     Vulkan,
     /// NVDEC, through CUDA.
     Cuda,
+    /// VAAPI (Linux).
+    Vaapi,
 }
 
 impl HwDecode {
-    /// `NOX_DECODE` (`auto`, `software`, `vulkan`, `cuda`), else `Auto`.
+    /// `NOX_DECODE` (`auto`, `software`, `vulkan`, `cuda`, `vaapi`), else
+    /// `Auto`.
     pub fn from_env() -> Self {
         match std::env::var("NOX_DECODE").as_deref() {
             Ok("software") => Self::Software,
             Ok("vulkan") => Self::Vulkan,
             Ok("cuda") => Self::Cuda,
+            Ok("vaapi") => Self::Vaapi,
             _ => Self::Auto,
         }
     }
@@ -47,6 +53,7 @@ impl HwDecode {
 enum Backend {
     Vulkan,
     Cuda,
+    Vaapi,
 }
 
 impl Backend {
@@ -54,6 +61,7 @@ impl Backend {
         match self {
             Self::Vulkan => ffi::AVPixelFormat::AV_PIX_FMT_VULKAN,
             Self::Cuda => ffi::AVPixelFormat::AV_PIX_FMT_CUDA,
+            Self::Vaapi => ffi::AVPixelFormat::AV_PIX_FMT_VAAPI,
         }
     }
 }
@@ -121,6 +129,7 @@ impl VideoDecoder {
                 let device = match backend {
                     Backend::Vulkan => accel.vulkan().as_ptr(),
                     Backend::Cuda => accel.cuda()?.as_ptr(),
+                    Backend::Vaapi => accel.vaapi()?.as_ptr(),
                 };
                 let ctx = context.as_mut_ptr();
                 (*ctx).hw_device_ctx = ffi::av_buffer_ref(device);
@@ -445,6 +454,7 @@ impl VideoDecoder {
             let path = match frame.format() {
                 format::Pixel::VULKAN => "Vulkan Video",
                 format::Pixel::CUDA => "NVDEC (CUDA)",
+                format::Pixel::VAAPI => "VAAPI",
                 _ => "software",
             };
             tracing::info!("decoding {} with {path}", self.decoder.id().name());
@@ -477,15 +487,25 @@ fn choose_backend(
                 .inspect_err(|err| tracing::debug!("no NVDEC: {err}"))
                 .is_ok()
     };
+    let vaapi = || {
+        supports(codec, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI)
+            && accel
+                .vaapi()
+                .inspect_err(|err| tracing::debug!("no VAAPI: {err}"))
+                .is_ok()
+    };
     match hw {
         HwDecode::Software => None,
         HwDecode::Vulkan => vulkan.then_some(Backend::Vulkan),
         HwDecode::Cuda => cuda().then_some(Backend::Cuda),
+        HwDecode::Vaapi => vaapi().then_some(Backend::Vaapi),
         HwDecode::Auto => {
             if vulkan && vulkan_decodes(accel, codec.id(), format) {
                 Some(Backend::Vulkan)
             } else if cuda() {
                 Some(Backend::Cuda)
+            } else if vaapi() {
+                Some(Backend::Vaapi)
             } else {
                 // Let FFmpeg try (it falls back to software).
                 vulkan.then_some(Backend::Vulkan)

@@ -18,6 +18,10 @@
 //!   exported to CUDA on the same GPU: decoded frames are copied into them
 //!   once (`Input::Buffer`), encoded frames are written into them
 //!   (`GpuTarget::Buffer`).
+//! - `vaapi`: VAAPI (Linux), both ways. Its frames, DMA-BUFs, are mapped to
+//!   Vulkan images by FFmpeg: decoded frames are read in place
+//!   (`Input::Vulkan`), encoders' surfaces written in place
+//!   (`GpuTarget::Images`).
 //!
 //! Other APIs fit the same shape: VAAPI through DMA-BUF (images or buffers
 //! exported as `DRM_PRIME`), D3D11 for AMF, QSV and NVENC on Windows through
@@ -29,6 +33,7 @@
 //! CUDA driver), take frames from memory; decoders decode in software.
 
 mod cuda;
+mod vaapi;
 mod vulkan;
 
 use ffmpeg::{ffi, format, frame};
@@ -53,6 +58,9 @@ struct Devices {
     cuda: OnceLock<std::result::Result<Arc<cuda::CudaDevice>, String>>,
     /// Buffers decoded CUDA frames are copied into.
     cuda_decoded: cuda::DecodeBuffers,
+    vaapi: OnceLock<std::result::Result<Arc<vaapi::VaapiDevice>, String>>,
+    /// Vulkan frames contexts VAAPI frames are mapped into.
+    vaapi_mapped: vaapi::MappedFrames,
 }
 
 impl std::fmt::Debug for Accel {
@@ -70,6 +78,8 @@ impl Accel {
             gpu,
             cuda: OnceLock::new(),
             cuda_decoded: cuda::DecodeBuffers::default(),
+            vaapi: OnceLock::new(),
+            vaapi_mapped: vaapi::MappedFrames::default(),
         })))
     }
 
@@ -81,6 +91,20 @@ impl Accel {
     /// The same device for nox-gpu.
     pub fn gpu(&self) -> &Arc<GpuDevice> {
         &self.0.gpu
+    }
+
+    /// FFmpeg's VAAPI device on the same GPU, if there is one (Linux, with
+    /// a VA driver for it).
+    pub(crate) fn vaapi(&self) -> Result<Arc<vaapi::VaapiDevice>> {
+        self.0
+            .vaapi
+            .get_or_init(|| {
+                vaapi::VaapiDevice::for_gpu(&self.0.gpu)
+                    .map(Arc::new)
+                    .map_err(|err| err.to_string())
+            })
+            .clone()
+            .map_err(Error::Encode)
     }
 
     /// FFmpeg's CUDA device on the same GPU, if there is one (NVIDIA, with
@@ -99,9 +123,10 @@ impl Accel {
 }
 
 /// Calls `f` with the best GPU input for the decoded `frame`: Vulkan
-/// frames' own images (no copies), CUDA frames copied once into a buffer
-/// on the GPU (with `accel`, whose CUDA device decoded them), otherwise a
-/// CPU view (downloading hardware frames).
+/// frames' own images (no copies), VAAPI frames mapped to Vulkan images
+/// (no copies), CUDA frames copied once into a buffer on the GPU (VAAPI
+/// and CUDA with `accel`, whose devices decoded them), otherwise a CPU view
+/// (downloading hardware frames).
 pub fn with_gpu_input<R>(
     frame: &frame::Video,
     accel: Option<&Accel>,
@@ -134,9 +159,27 @@ pub fn with_gpu_input<R>(
             }),
         }
     }
+    if frame.format() == format::Pixel::VAAPI
+        && let Some(accel) = accel
+    {
+        // SAFETY: a VAAPI frame from a decoder on `accel`'s VAAPI device.
+        match unsafe { accel.0.vaapi_mapped.map(accel.vulkan(), frame) } {
+            Ok(mapped) => {
+                log_once(&VAAPI_MAPPED, || {
+                    "mapping VAAPI-decoded frames to Vulkan (DMA-BUF, no copies)".into()
+                });
+                return vulkan::with_gpu_input(&mapped, f);
+            }
+            Err(err) => log_once(&VAAPI_DOWNLOAD, || {
+                format!("downloading VAAPI-decoded frames: {err}")
+            }),
+        }
+    }
     crate::with_cpu_frame(frame, |cpu| f(Input::Cpu(cpu)))
 }
 
+static VAAPI_MAPPED: AtomicBool = AtomicBool::new(false);
+static VAAPI_DOWNLOAD: AtomicBool = AtomicBool::new(false);
 static CUDA_IN_PLACE: AtomicBool = AtomicBool::new(false);
 static CUDA_DOWNLOAD: AtomicBool = AtomicBool::new(false);
 
@@ -249,6 +292,16 @@ pub(crate) fn open_sink(name: &str, settings: &OutputSettings) -> Result<Option<
             height,
             deep,
         )?)));
+    }
+    if name.ends_with("_vaapi") {
+        // VAAPI encoders take VAAPI surfaces only: without a sink they
+        // aren't usable.
+        let accel = settings
+            .accel
+            .as_ref()
+            .ok_or_else(|| Error::Encode("no GPU".into()))?;
+        let sink = vaapi::VaapiSink::new(accel.vaapi()?, accel.vulkan(), width, height, deep)?;
+        return Ok(Some(Box::new(sink)));
     }
     if name.ends_with("_nvenc") {
         if std::env::var_os("NOX_NVENC_MEMORY").is_some() {

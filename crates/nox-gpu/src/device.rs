@@ -119,6 +119,31 @@ impl GpuDevice {
         id.device_uuid
     }
 
+    /// The device's DRM render node (`/dev/dri/renderD128` and so on),
+    /// which other APIs on Linux (VAAPI) use to find the same GPU. `None`
+    /// if the driver doesn't say (no `VK_EXT_physical_device_drm`).
+    pub fn drm_render_node(&self) -> Option<std::path::PathBuf> {
+        // SAFETY: valid physical device; the DRM properties are only
+        // queried if the device supports the extension.
+        unsafe {
+            let supported = self
+                .instance
+                .enumerate_device_extension_properties(self.physical_device)
+                .ok()?
+                .iter()
+                .any(|e| e.extension_name_as_c_str() == Ok(ash::ext::physical_device_drm::NAME));
+            if !supported {
+                return None;
+            }
+            let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
+            let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut drm);
+            self.instance
+                .get_physical_device_properties2(self.physical_device, &mut properties);
+            (drm.has_render == vk::TRUE)
+                .then(|| format!("/dev/dri/renderD{}", drm.render_minor).into())
+        }
+    }
+
     pub fn has_extension(&self, name: &CStr) -> bool {
         self.extensions.iter().any(|e| e.as_c_str() == name)
     }

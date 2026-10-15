@@ -51,9 +51,10 @@ const PRESETS: &[(&str, usize, usize, usize)] = &[
     (n_("Custom"), usize::MAX, usize::MAX, 0),
 ];
 
-/// How the encoder list names an FFmpeg encoder, and what it's good at.
-/// Product names stay as they are.
-fn encoder_text(name: &str) -> (&'static str, &'static str) {
+/// How the encoder list names an FFmpeg encoder, and what it's good at
+/// (empty if unknown). Product names stay as they are; encoders without an
+/// entry show FFmpeg's name.
+fn encoder_text(name: &'static str) -> (&'static str, &'static str) {
     match name {
         "h264_vulkan" | "hevc_vulkan" => (
             "Vulkan Video (GPU)",
@@ -65,6 +66,12 @@ fn encoder_text(name: &str) -> (&'static str, &'static str) {
             "NVENC (NVIDIA GPU)",
             n_(
                 "NVIDIA's video engine: very fast, with better quality for the size than most hardware encoders. NVIDIA cards only.",
+            ),
+        ),
+        "h264_vaapi" | "hevc_vaapi" => (
+            "VAAPI (GPU)",
+            n_(
+                "The graphics card's video engine through VAAPI, Linux's video interface for AMD and Intel cards: fast, and the frames never leave the card. Files are somewhat larger than from a software encoder at the same quality.",
             ),
         ),
         "libx264" => (
@@ -85,7 +92,7 @@ fn encoder_text(name: &str) -> (&'static str, &'static str) {
                 "Encodes on the processor: large files that decode easily, made for editing and grading in other applications rather than for watching.",
             ),
         ),
-        _ => ("", ""),
+        _ => (name, ""),
     }
 }
 
@@ -381,7 +388,13 @@ impl ExportDialog {
                 None => gettext("No encoder for this format works on this computer."),
             },
             (Some(_), Some(chosen)) => {
-                let mut text = gettext(encoder_text(chosen.name).1);
+                // gettext("") would be the catalog's header.
+                let description = encoder_text(chosen.name).1;
+                let mut text = if description.is_empty() {
+                    String::new()
+                } else {
+                    gettext(description)
+                };
                 if chosen.hardware && chosen.gpu_frames.is_none() {
                     text += " ";
                     text +=

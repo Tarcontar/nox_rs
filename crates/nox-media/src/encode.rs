@@ -9,7 +9,10 @@
 //!    with. Not for HDR by default (see `open_video`).
 //! 2. NVENC, fed from GPU memory through CUDA (from system memory without
 //!    a CUDA driver, or with `NOX_NVENC_MEMORY=1`).
-//! 3. Software (x264, x265; ProRes is always software).
+//! 3. VAAPI (`h264_vaapi`, `hevc_vaapi`; Linux, AMD and Intel) on the GPU
+//!    Nox renders with: the compositor writes into its surfaces, mapped to
+//!    Vulkan.
+//! 4. Software (x264, x265; ProRes is always software).
 //!
 //! Hardware encoders that take frames on the GPU (`hwaccel`) are written by
 //! the compositor directly (`write_gpu`), no copies; frames in system
@@ -47,9 +50,9 @@ impl VideoCodec {
     /// FFmpeg encoders to try, best first.
     fn encoders(self, hardware: bool) -> &'static [&'static str] {
         match (self, hardware) {
-            (Self::H264, true) => &["h264_vulkan", "h264_nvenc", "libx264"],
+            (Self::H264, true) => &["h264_vulkan", "h264_nvenc", "h264_vaapi", "libx264"],
             (Self::H264, false) => &["libx264"],
-            (Self::Hevc, true) => &["hevc_vulkan", "hevc_nvenc", "libx265"],
+            (Self::Hevc, true) => &["hevc_vulkan", "hevc_nvenc", "hevc_vaapi", "libx265"],
             (Self::Hevc, false) => &["libx265"],
             (Self::ProRes, _) => &["prores_ks"],
         }
@@ -389,7 +392,7 @@ impl MediaWriter {
         self.drain_video()?;
         // MP4 and MOV write their header (`moov`, with `clli`) last, so the
         // measured light levels still get in. Light levels are only written
-        // when every frame was measured (Vulkan images aren't).
+        // when every frame was measured.
         let frames = self.frames;
         if let Some(light) = self
             .light
@@ -465,113 +468,128 @@ fn open_video(
         };
         names = &all[i..=i];
     }
-    for &name in names {
-        let codec = match find_encoder(name, settings) {
-            Ok(codec) => codec,
-            Err(err) => {
-                failures.push(format!("{name}: {err}"));
+    // Encoders that take frames on the GPU Nox renders with first (no
+    // copies), then those fed from memory (e.g. NVENC on another GPU than
+    // the one rendering), each in order of preference.
+    let mut tried = Vec::new();
+    for gpu_only in [true, false] {
+        for &name in names {
+            if tried.contains(&name) {
                 continue;
             }
-        };
-        let gpu_frames = match hwaccel::open_sink(name, settings) {
-            Ok(frames) => frames,
-            Err(err) => {
-                failures.push(format!("{name}: {err}"));
+            let codec = match find_encoder(name, settings) {
+                Ok(codec) => codec,
+                Err(err) => {
+                    failures.push(format!("{name}: {err}"));
+                    tried.push(name);
+                    continue;
+                }
+            };
+            let gpu_frames = match hwaccel::open_sink(name, settings) {
+                Ok(frames) => frames,
+                Err(err) => {
+                    failures.push(format!("{name}: {err}"));
+                    tried.push(name);
+                    continue;
+                }
+            };
+            if gpu_only && gpu_frames.is_none() {
                 continue;
             }
-        };
-        match open_video_encoder(codec, name, settings, global_header, gpu_frames.as_deref()) {
-            Ok((encoder, pixel_format)) => {
-                let time_base = ffmpeg::Rational::new(
-                    settings.frame_rate.den as i32,
-                    settings.frame_rate.num as i32,
-                );
-                let mut stream = output.add_stream(codec)?;
-                stream.set_parameters(&encoder);
-                stream.set_time_base(time_base);
-                if settings.encoding == OutputEncoding::Pq {
-                    // SAFETY: the stream's own parameters; FFmpeg owns the
-                    // side data it allocates.
-                    unsafe {
-                        let par = (*stream.as_mut_ptr()).codecpar;
-                        add_hdr10_stream_data(par, settings.peak_nits);
+            tried.push(name);
+            match open_video_encoder(codec, name, settings, global_header, gpu_frames.as_deref()) {
+                Ok((encoder, pixel_format)) => {
+                    let time_base = ffmpeg::Rational::new(
+                        settings.frame_rate.den as i32,
+                        settings.frame_rate.num as i32,
+                    );
+                    let mut stream = output.add_stream(codec)?;
+                    stream.set_parameters(&encoder);
+                    stream.set_time_base(time_base);
+                    if settings.encoding == OutputEncoding::Pq {
+                        // SAFETY: the stream's own parameters; FFmpeg owns the
+                        // side data it allocates.
+                        unsafe {
+                            let par = (*stream.as_mut_ptr()).codecpar;
+                            add_hdr10_stream_data(par, settings.peak_nits);
+                        }
                     }
-                }
-                let rate = ffmpeg::Rational::new(
-                    settings.frame_rate.num as i32,
-                    settings.frame_rate.den as i32,
-                );
-                stream.set_avg_frame_rate(rate);
-                stream.set_rate(rate);
-                let index = stream.index();
-                let (w, h) = (settings.width, settings.height);
-                if !failures.is_empty() {
-                    tracing::info!("video encoder {name} ({})", failures.join("; "));
-                }
-                let hdr = settings.encoding.is_hdr();
-                if let Some(frames) = gpu_frames {
+                    let rate = ffmpeg::Rational::new(
+                        settings.frame_rate.num as i32,
+                        settings.frame_rate.den as i32,
+                    );
+                    stream.set_avg_frame_rate(rate);
+                    stream.set_rate(rate);
+                    let index = stream.index();
+                    let (w, h) = (settings.width, settings.height);
+                    if !failures.is_empty() {
+                        tracing::info!("video encoder {name} ({})", failures.join("; "));
+                    }
+                    let hdr = settings.encoding.is_hdr();
+                    if let Some(frames) = gpu_frames {
+                        return Ok(VideoOutput {
+                            encoder,
+                            stream: index,
+                            time_base,
+                            input: VideoInput::Gpu(frames),
+                            width: w,
+                            height: h,
+                            name,
+                        });
+                    }
+                    let source = if hdr {
+                        format::Pixel::RGBA64LE
+                    } else {
+                        format::Pixel::RGBA
+                    };
+                    let mut scaler = software::scaling::Context::get(
+                        source,
+                        w,
+                        h,
+                        pixel_format,
+                        w,
+                        h,
+                        software::scaling::Flags::BICUBIC
+                            | software::scaling::Flags::FULL_CHR_H_INT
+                            | software::scaling::Flags::ACCURATE_RND,
+                    )?;
+                    // Full-range R'G'B' in, limited-range Y'CbCr out (BT.709,
+                    // or BT.2020 for HDR).
+                    // SAFETY: valid context; coefficient tables are static.
+                    unsafe {
+                        let space = if hdr {
+                            ffi::SWS_CS_BT2020
+                        } else {
+                            ffi::SWS_CS_ITU709
+                        };
+                        let coefficients = ffi::sws_getCoefficients(space);
+                        ffi::sws_setColorspaceDetails(
+                            scaler.as_mut_ptr(),
+                            coefficients,
+                            1,
+                            coefficients,
+                            0,
+                            0,
+                            1 << 16,
+                            1 << 16,
+                        );
+                    }
                     return Ok(VideoOutput {
                         encoder,
                         stream: index,
                         time_base,
-                        input: VideoInput::Gpu(frames),
+                        input: VideoInput::Memory {
+                            scaler,
+                            rgba: frame::Video::new(source, w, h),
+                            yuv: frame::Video::new(pixel_format, w, h),
+                        },
                         width: w,
                         height: h,
                         name,
                     });
                 }
-                let source = if hdr {
-                    format::Pixel::RGBA64LE
-                } else {
-                    format::Pixel::RGBA
-                };
-                let mut scaler = software::scaling::Context::get(
-                    source,
-                    w,
-                    h,
-                    pixel_format,
-                    w,
-                    h,
-                    software::scaling::Flags::BICUBIC
-                        | software::scaling::Flags::FULL_CHR_H_INT
-                        | software::scaling::Flags::ACCURATE_RND,
-                )?;
-                // Full-range R'G'B' in, limited-range Y'CbCr out (BT.709,
-                // or BT.2020 for HDR).
-                // SAFETY: valid context; coefficient tables are static.
-                unsafe {
-                    let space = if hdr {
-                        ffi::SWS_CS_BT2020
-                    } else {
-                        ffi::SWS_CS_ITU709
-                    };
-                    let coefficients = ffi::sws_getCoefficients(space);
-                    ffi::sws_setColorspaceDetails(
-                        scaler.as_mut_ptr(),
-                        coefficients,
-                        1,
-                        coefficients,
-                        0,
-                        0,
-                        1 << 16,
-                        1 << 16,
-                    );
-                }
-                return Ok(VideoOutput {
-                    encoder,
-                    stream: index,
-                    time_base,
-                    input: VideoInput::Memory {
-                        scaler,
-                        rgba: frame::Video::new(source, w, h),
-                        yuv: frame::Video::new(pixel_format, w, h),
-                    },
-                    width: w,
-                    height: h,
-                    name,
-                });
+                Err(err) => failures.push(format!("{name}: {err}")),
             }
-            Err(err) => failures.push(format!("{name}: {err}")),
         }
     }
     Err(Error::Encode(format!(
@@ -747,6 +765,10 @@ fn open_video_encoder(
         }
         "h264_vulkan" | "hevc_vulkan" => {
             options.set("rc_mode", "cqp");
+            options.set("qp", level("20", "25", "30"));
+        }
+        "h264_vaapi" | "hevc_vaapi" => {
+            options.set("rc_mode", "CQP");
             options.set("qp", level("20", "25", "30"));
         }
         _ => {}

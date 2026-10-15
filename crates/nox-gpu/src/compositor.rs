@@ -326,6 +326,8 @@ struct YuvParams {
     rows: Matrix3x4,
     size: [i32; 2],
     encoding: i32,
+    /// Measure the light (`light.glsl`).
+    measure: i32,
 }
 
 #[repr(C)]
@@ -361,8 +363,9 @@ pub struct YuvTarget {
 enum Output<'a> {
     Readback(&'a Readback),
     Export(vk::Image, vk::ImageView),
-    /// Luma and chroma plane views of the target.
-    Yuv(&'a mut YuvTarget, vk::ImageView, vk::ImageView),
+    /// Luma and chroma plane views of the target; measures the light when
+    /// the flag is set.
+    Yuv(&'a mut YuvTarget, vk::ImageView, vk::ImageView, bool),
     /// Measures the light when the flag is set.
     Buffer(&'a BufferTarget<'a>, bool),
 }
@@ -370,7 +373,8 @@ enum Output<'a> {
 /// The views the output shader writes.
 enum OutputViews {
     Rgba(vk::ImageView),
-    Yuv(vk::ImageView, vk::ImageView),
+    /// Luma, chroma and the light measurements.
+    Yuv(vk::ImageView, vk::ImageView, vk::Buffer),
     /// The frame buffer and the light measurements.
     Buffer(vk::Buffer, vk::Buffer),
 }
@@ -456,10 +460,17 @@ impl Compositor {
                 &[storage(0), storage(1)],
                 size_of::<OutputParams>(),
             )?;
+            let buffer = |binding| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            };
             let output_yuv = create_pipeline(
                 device,
                 OUTPUT_YUV_SHADER,
-                &[storage(0), storage(1), storage(2)],
+                &[storage(0), storage(1), storage(2), buffer(3)],
                 size_of::<YuvParams>(),
             )?;
             let output_deep = create_pipeline(
@@ -471,16 +482,9 @@ impl Compositor {
             let output_yuv_deep = create_pipeline(
                 device,
                 OUTPUT_YUV_DEEP_SHADER,
-                &[storage(0), storage(1), storage(2)],
+                &[storage(0), storage(1), storage(2), buffer(3)],
                 size_of::<YuvParams>(),
             )?;
-            let buffer = |binding| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(binding)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            };
             let output_linear = create_pipeline(
                 device,
                 OUTPUT_LINEAR_SHADER,
@@ -494,7 +498,7 @@ impl Compositor {
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 2,
+                    descriptor_count: 3,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -864,10 +868,23 @@ impl Compositor {
     /// Vulkan Video encoder's input): no copies. Follows the same protocol
     /// as reading decoder images: waits for `target`'s semaphores, signals
     /// the next values and records the state it leaves the images in.
-    pub fn finish_to_yuv(&mut self, target: &mut YuvTarget) -> Result<()> {
+    /// With `measure`, also returns the light of the frame (for HDR10
+    /// metadata).
+    pub fn finish_to_yuv(
+        &mut self,
+        target: &mut YuvTarget,
+        measure: bool,
+    ) -> Result<Option<FrameLight>> {
         if (target.width, target.height) != (self.width, self.height) {
             return Err(Error::InvalidFrame("target size differs from the picture"));
         }
+        // One workgroup per 32×32 pixels (2×2 blocks).
+        let (groups_x, groups_y) = (
+            self.width.div_ceil(2 * WORKGROUP_SIZE),
+            self.height.div_ceil(2 * WORKGROUP_SIZE),
+        );
+        let groups = u64::from(groups_x) * u64::from(groups_y);
+        self.ensure_light(groups)?;
         let luma = self.plane_view(&target.luma, target.luma.format.vk())?;
         let chroma = match self.plane_view(&target.chroma, target.chroma.format.vk()) {
             Ok(view) => view,
@@ -877,13 +894,53 @@ impl Compositor {
                 return Err(err);
             }
         };
-        let result = self.composite(Output::Yuv(target, luma, chroma));
+        let result = self.composite(Output::Yuv(target, luma, chroma, measure));
         // SAFETY: the submission has completed (or failed); views are unused.
         unsafe {
             self.gpu().device.destroy_image_view(luma, None);
             self.gpu().device.destroy_image_view(chroma, None);
         }
-        result
+        result?;
+        Ok(measure.then(|| self.read_light(groups)))
+    }
+
+    /// A light buffer (`light.glsl`) for at least `groups` workgroups.
+    fn ensure_light(&mut self, groups: u64) -> Result<()> {
+        if self.light.as_ref().is_none_or(|(_, count)| *count < groups) {
+            if let Some((old, _)) = self.light.take() {
+                self.converter.destroy_buffer(old);
+            }
+            let buffer = self.converter.create_buffer(
+                groups * 8,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuToCpu,
+            )?;
+            self.light = Some((buffer, groups));
+        }
+        Ok(())
+    }
+
+    /// Sums up the light the last output measured, over `groups`
+    /// workgroups.
+    fn read_light(&self, groups: u64) -> FrameLight {
+        let (buffer, _) = self.light.as_ref().expect("light buffer");
+        let partials = buffer
+            .allocation
+            .as_ref()
+            .and_then(|a| a.mapped_slice())
+            .expect("mapped light buffer");
+        let (mut peak, mut sum) = (0f32, 0f64);
+        for partial in partials[..groups as usize * 8].as_chunks::<8>().0 {
+            let value =
+                |i: usize| f32::from_le_bytes(partial[i..i + 4].try_into().expect("4 bytes"));
+            peak = peak.max(value(0));
+            sum += f64::from(value(4));
+        }
+        let pixels = f64::from(self.width) * f64::from(self.height);
+        FrameLight {
+            peak,
+            average: (sum / pixels.max(1.0)) as f32,
+        }
     }
 
     /// Blends the layers and writes the picture as 4:2:0 Y'CbCr into
@@ -916,39 +973,9 @@ impl Compositor {
             return Err(Error::InvalidFrame("target layout doesn't fit its buffer"));
         }
         let groups = self.linear_groups(layout.format);
-        if self.light.as_ref().is_none_or(|(_, count)| *count < groups) {
-            if let Some((old, _)) = self.light.take() {
-                self.converter.destroy_buffer(old);
-            }
-            let buffer = self.converter.create_buffer(
-                groups * 8,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                gpu_allocator::MemoryLocation::GpuToCpu,
-            )?;
-            self.light = Some((buffer, groups));
-        }
+        self.ensure_light(groups)?;
         self.composite(Output::Buffer(target, measure))?;
-        if !measure {
-            return Ok(None);
-        }
-        let (buffer, _) = self.light.as_ref().expect("light buffer");
-        let partials = buffer
-            .allocation
-            .as_ref()
-            .and_then(|a| a.mapped_slice())
-            .expect("mapped light buffer");
-        let (mut peak, mut sum) = (0f32, 0f64);
-        for partial in partials[..groups as usize * 8].as_chunks::<8>().0 {
-            let value =
-                |i: usize| f32::from_le_bytes(partial[i..i + 4].try_into().expect("4 bytes"));
-            peak = peak.max(value(0));
-            sum += f64::from(value(4));
-        }
-        let pixels = f64::from(self.width) * f64::from(self.height);
-        Ok(Some(FrameLight {
-            peak,
-            average: (sum / pixels.max(1.0)) as f32,
-        }))
+        Ok(measure.then(|| self.read_light(groups)))
     }
 
     /// Workgroups of `output_linear` across the picture, in X and Y.
@@ -976,7 +1003,7 @@ impl Compositor {
         measure: bool,
     ) -> Result<Option<FrameLight>> {
         match target {
-            GpuTarget::Images(target) => self.finish_to_yuv(target).map(|()| None),
+            GpuTarget::Images(target) => self.finish_to_yuv(target, measure),
             GpuTarget::Buffer(target) => self.finish_to_buffer(&target, measure),
         }
     }
@@ -1035,7 +1062,7 @@ impl Compositor {
         let accum_info = storage(accum);
         let (first, second) = match *output {
             OutputViews::Rgba(view) => (view, None),
-            OutputViews::Yuv(luma, chroma) => (luma, Some(chroma)),
+            OutputViews::Yuv(luma, chroma, _) => (luma, Some(chroma)),
             OutputViews::Buffer(..) => (vk::ImageView::null(), None),
         };
         let first_info = storage(first);
@@ -1044,6 +1071,14 @@ impl Compositor {
             self.output_yuv_set
         } else {
             self.output_set
+        };
+        let yuv_light = match *output {
+            OutputViews::Yuv(_, _, light) => Some(
+                vk::DescriptorBufferInfo::default()
+                    .buffer(light)
+                    .range(vk::WHOLE_SIZE),
+            ),
+            _ => None,
         };
         let buffer_infos = match *output {
             OutputViews::Buffer(frame, light) => Some([
@@ -1118,6 +1153,15 @@ impl Compositor {
                 );
             }
         }
+        if let Some(info) = &yuv_light {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.output_yuv_set)
+                    .dst_binding(3)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info)),
+            );
+        }
         // SAFETY: no submission using the sets is pending.
         unsafe { self.gpu().device.update_descriptor_sets(&writes, &[]) };
     }
@@ -1128,7 +1172,14 @@ impl Compositor {
         let (out_image, views) = match &output {
             Output::Readback(r) => (r.image.image, OutputViews::Rgba(r.image.view)),
             Output::Export(image, view) => (*image, OutputViews::Rgba(*view)),
-            Output::Yuv(_, luma, chroma) => (vk::Image::null(), OutputViews::Yuv(*luma, *chroma)),
+            Output::Yuv(_, luma, chroma, _) => (
+                vk::Image::null(),
+                OutputViews::Yuv(
+                    *luma,
+                    *chroma,
+                    self.light.as_ref().expect("light buffer").0.buffer,
+                ),
+            ),
             Output::Buffer(target, _) => (
                 vk::Image::null(),
                 OutputViews::Buffer(
@@ -1299,7 +1350,7 @@ impl Compositor {
                 );
             }
 
-            if let Output::Yuv(target, ..) = &output {
+            if let Output::Yuv(target, _, _, measure) = &output {
                 // Acquire the target from its last user. Its contents are
                 // overwritten, so the old layout's data doesn't matter.
                 let own = gpu.queue_family;
@@ -1344,6 +1395,7 @@ impl Compositor {
                         rows: target.matrix,
                         size: [width as i32, height as i32],
                         encoding: self.encoding as i32,
+                        measure: i32::from(*measure),
                     },
                 );
                 // One invocation per 2×2 block.
@@ -1467,8 +1519,24 @@ impl Compositor {
                     );
                 }
                 // The semaphore signal below makes the writes available to
-                // the next user, who acquires the images itself.
-                Output::Yuv(..) => {}
+                // the next user, who acquires the images itself; the light
+                // measured becomes readable on the host.
+                Output::Yuv(.., measure) => {
+                    if *measure {
+                        let to_host = vk::BufferMemoryBarrier2::default()
+                            .buffer(self.light.as_ref().expect("light buffer").0.buffer)
+                            .size(vk::WHOLE_SIZE)
+                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                            .dst_access_mask(vk::AccessFlags2::HOST_READ);
+                        device.cmd_pipeline_barrier2(
+                            cmd,
+                            &vk::DependencyInfo::default()
+                                .buffer_memory_barriers(std::slice::from_ref(&to_host)),
+                        );
+                    }
+                }
                 Output::Buffer(target, measure) => {
                     let release = vk::BufferMemoryBarrier2::default()
                         .buffer(target.buffer.buffer)

@@ -6,9 +6,7 @@
 // one invocation per 4×2 block, so every write is a whole 32-bit word.
 // Chroma is left-sited, filtered as in output_yuv.comp.
 //
-// With `measure` set, also measures the light of HDR10 frames (MaxCLL and
-// MaxFALL, CTA-861.3): every workgroup writes the brightest pixel and the
-// sum over its pixels of max(R, G, B) in nits to `light`.
+// With `measure` set, also measures the light of HDR10 frames (light.glsl).
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
@@ -39,13 +37,7 @@ layout(push_constant) uniform Params {
     int measure;
 } p;
 
-shared vec2 shared_light[gl_WorkGroupSize.x * gl_WorkGroupSize.y];
-
-// The largest of R, G, B in nits, as PQ represents it.
-float nits_at(ivec2 pos) {
-    vec3 nits = min(max(WORKING_TO_BT2020 * imageLoad(accum, pos).rgb, 0.0) * 203.0, 10000.0);
-    return max(nits.r, max(nits.g, nits.b));
-}
+#include "light.glsl"
 
 vec4 rgb_at(ivec2 pos) {
     pos = clamp(pos, ivec2(0), p.size - 1);
@@ -90,8 +82,7 @@ void main() {
                 float luma = dot(p.row0, rgb_at(pos));
                 word |= p.deep != 0 ? unorm16(luma) << (16 * dx) : unorm8(luma) << (8 * dx);
                 if (p.measure != 0 && pos.x < p.size.x) {
-                    float nits = nits_at(pos);
-                    measured = vec2(max(measured.x, nits), measured.y + nits);
+                    measured = add_light(measured, brightest_nits(imageLoad(accum, pos).rgb));
                 }
             }
             frame.words[p.luma_offset + uint(y) * p.pitch + uint(block.x)] = word;
@@ -107,18 +98,5 @@ void main() {
     if (p.measure == 0) {
         return;
     }
-    // Reduce the workgroup's measurements (uniform control flow from here).
-    uint index = gl_LocalInvocationIndex;
-    shared_light[index] = measured;
-    barrier();
-    for (uint stride = gl_WorkGroupSize.x * gl_WorkGroupSize.y / 2; stride > 0; stride /= 2) {
-        if (index < stride) {
-            vec2 other = shared_light[index + stride];
-            shared_light[index] = vec2(max(shared_light[index].x, other.x), shared_light[index].y + other.y);
-        }
-        barrier();
-    }
-    if (index == 0) {
-        light.partials[gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x] = shared_light[0];
-    }
+    store_light(measured);
 }
