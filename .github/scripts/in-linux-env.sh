@@ -10,5 +10,6 @@ exec docker run --rm \
     --env CARGO_HOME=/src/.ci/cargo-home \
     --env CARGO_TARGET_DIR=/src/target/debian13 \
     --env CARGO_TERM_COLOR=always \
+    --env NOX_REQUIRE_GPU \
     --volume "$PWD:/src" --workdir /src \
     nox-build-linux "$@"

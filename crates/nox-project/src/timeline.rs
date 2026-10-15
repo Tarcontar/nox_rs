@@ -1606,26 +1606,62 @@ impl MediaReference {
 }
 
 /// `file://` URL for an absolute path, percent-encoding everything except
-/// unreserved characters and `/`.
+/// unreserved characters and `/`. Windows paths take RFC 8089's forms:
+/// `C:\a\b` becomes `file:///C:/a/b`, `\\server\share\a` becomes
+/// `file://server/share/a`.
 pub fn file_url(path: &Path) -> String {
-    let mut url = String::from("file://");
-    for &byte in path.as_os_str().as_encoded_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                url.push(byte as char)
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy().replace('\\', "/");
+        // Verbatim paths (`\\?\C:\…`, `\\?\UNC\server\…`) as plain ones.
+        let text = match text.strip_prefix("//?/") {
+            Some(rest) => match rest.strip_prefix("UNC/") {
+                Some(unc) => format!("//{unc}"),
+                None => rest.to_owned(),
+            },
+            None => text,
+        };
+        match text.strip_prefix("//") {
+            // A share: its server is the URL's host.
+            Some(unc) => format!("file://{}", percent_encode(unc.as_bytes(), b"/")),
+            None if text.as_bytes().get(1) == Some(&b':') => {
+                format!("file:///{}", percent_encode(text.as_bytes(), b"/:"))
             }
-            _ => url.push_str(&format!("%{byte:02X}")),
+            None => format!("file://{}", percent_encode(text.as_bytes(), b"/")),
         }
     }
-    url
+    #[cfg(not(windows))]
+    {
+        format!(
+            "file://{}",
+            percent_encode(path.as_os_str().as_encoded_bytes(), b"/")
+        )
+    }
+}
+
+/// Percent-encodes all bytes but unreserved characters and `keep`.
+fn percent_encode(bytes: &[u8], keep: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) || keep.contains(&byte) {
+            text.push(byte as char);
+        } else {
+            text.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    text
 }
 
 /// The local path of a `file:` URL (with or without host) or of a plain
 /// path. `None` for other schemes.
 pub fn url_to_path(url: &str) -> Option<PathBuf> {
+    // The host of `file://host/…`, if it names a machine (Windows shares).
+    let mut host = "";
     let path = if let Some(rest) = url.strip_prefix("file://") {
-        // Skip an authority such as `localhost`.
         let slash = rest.find('/').unwrap_or(rest.len());
+        if &rest[..slash] != "localhost" {
+            host = &rest[..slash];
+        }
         &rest[slash..]
     } else if let Some(rest) = url.strip_prefix("file:") {
         rest
@@ -1653,17 +1689,19 @@ pub fn url_to_path(url: &str) -> Option<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
+        let _ = host; // Unix has no network paths in URLs.
         Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
     }
     #[cfg(not(unix))]
     {
-        // Windows: `file:///C:/x` decodes to `/C:/x`.
+        // Windows: `file:///C:/x` decodes to `/C:/x`; shares keep their host.
         let text = String::from_utf8_lossy(&decoded).into_owned();
         let text = match text.as_bytes() {
+            _ if !host.is_empty() => format!("//{host}{text}"),
             [b'/', _, b':', ..] => text[1..].to_owned(),
             _ => text,
         };
-        Some(PathBuf::from(text))
+        Some(PathBuf::from(text.replace('/', "\\")))
     }
 }
 
@@ -1975,6 +2013,27 @@ mod tests {
         assert!(item.metadata.is_empty());
     }
 
+    /// An absolute path on this platform (`/x` on Unix, `C:\\x` on Windows).
+    fn absolute(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_file_urls() {
+        for (path, url) in [
+            (r"C:\My Clips\a.mov", "file:///C:/My%20Clips/a.mov"),
+            (r"\\server\share\a.mov", "file://server/share/a.mov"),
+        ] {
+            assert_eq!(file_url(Path::new(path)), url);
+            assert_eq!(url_to_path(url).as_deref(), Some(Path::new(path)));
+        }
+    }
+
     #[test]
     fn file_urls() {
         let path = Path::new("/home/me/My Clips/ä#1.mov");
@@ -2004,9 +2063,11 @@ mod tests {
                 range,
             )
         };
+        let media = absolute("/media/b.mov");
+        let media = media.to_str().unwrap();
         timeline.track_mut(0).unwrap().children = vec![
             Composable::Clip(Clip::new("rel", relative("clips/a.mov"), range.unwrap())),
-            Composable::Clip(Clip::new("abs", relative("/media/b.mov"), range.unwrap())),
+            Composable::Clip(Clip::new("abs", relative(media), range.unwrap())),
         ];
         let paths = |t: &Timeline| -> Vec<_> {
             t.clips()
@@ -2016,14 +2077,14 @@ mod tests {
         // Without a folder, paths are taken as they are.
         assert_eq!(
             paths(&timeline),
-            [Path::new("clips/a.mov"), Path::new("/media/b.mov")]
+            [Path::new("clips/a.mov"), Path::new(media)]
         );
-        timeline.media_dir = Some("/projects/x".into());
+        timeline.media_dir = Some(absolute("/projects/x"));
         assert_eq!(
             paths(&timeline),
             [
-                Path::new("/projects/x/clips/a.mov"),
-                Path::new("/media/b.mov")
+                absolute("/projects/x").join("clips/a.mov"),
+                PathBuf::from(media)
             ]
         );
         // Saving elsewhere writes absolute URLs; absolute ones stay as they are.
@@ -2036,7 +2097,12 @@ mod tests {
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(urls, ["file:///projects/x/clips/a.mov", "/media/b.mov"]);
+        let expected = if cfg!(windows) {
+            "file:///C:/projects/x/clips/a.mov"
+        } else {
+            "file:///projects/x/clips/a.mov"
+        };
+        assert_eq!(urls, [expected, media]);
         assert_eq!(paths(&copy), paths(&timeline));
     }
 }

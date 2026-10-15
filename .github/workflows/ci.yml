@@ -40,6 +40,9 @@ jobs:
         run: .github/scripts/in-linux-env.sh cargo clippy --workspace --all-targets --locked
 
       - name: Test
+        # lavapipe must work here: GPU tests fail rather than skip.
+        env:
+          NOX_REQUIRE_GPU: 1
         run: .github/scripts/in-linux-env.sh cargo test --workspace --locked --no-fail-fast -- --test-threads=1
 
   windows:

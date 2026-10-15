@@ -12,6 +12,9 @@ fn gpu() -> Option<(Accel, Arc<nox_gpu::GpuDevice>)> {
     static GPU: OnceLock<Option<(Accel, Arc<nox_gpu::GpuDevice>)>> = OnceLock::new();
     GPU.get_or_init(|| match Accel::new() {
         Ok(accel) => Some((accel.clone(), accel.gpu().clone())),
+        Err(err) if std::env::var_os("NOX_REQUIRE_GPU").is_some() => {
+            panic!("no Vulkan GPU ({err}), but NOX_REQUIRE_GPU is set")
+        }
         Err(err) => {
             eprintln!("skipping GPU tests: {err}");
             None

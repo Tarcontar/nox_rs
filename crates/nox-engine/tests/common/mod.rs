@@ -5,6 +5,28 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// Whether there's a Vulkan GPU for tests that need one (GPU compositing,
+/// HDR). Without one they skip, unless `NOX_REQUIRE_GPU` is set (CI on
+/// Linux, where lavapipe must work), which makes it a failure.
+pub fn have_gpu() -> bool {
+    static GPU: OnceLock<Result<(), String>> = OnceLock::new();
+    match GPU.get_or_init(|| {
+        nox_media::Accel::new()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(()) => true,
+        Err(err) if std::env::var_os("NOX_REQUIRE_GPU").is_some() => {
+            panic!("no Vulkan GPU ({err}), but NOX_REQUIRE_GPU is set")
+        }
+        Err(err) => {
+            eprintln!("skipping: no Vulkan GPU ({err})");
+            false
+        }
+    }
+}
 
 /// Generates `name` in the test temp dir with the given ffmpeg arguments, or
 /// returns `None` (after printing why) if ffmpeg or an encoder is missing.

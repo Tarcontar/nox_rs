@@ -141,9 +141,13 @@ fn template_is_up_to_date() {
         .chain(files("resources/ui", "ui"));
     for path in sources {
         let text = std::fs::read_to_string(&path).unwrap();
+        // POTFILES uses `/`, also on Windows.
         let relative = format!(
             "crates/nox-gui/{}",
-            path.strip_prefix(crate_dir()).unwrap().display()
+            path.strip_prefix(crate_dir())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
         );
         let marks = ["gettext(\"", "n_(\"", "translatable=\"yes\""];
         if marks.iter().any(|m| text.contains(m)) && !listed.contains(&relative.as_str()) {

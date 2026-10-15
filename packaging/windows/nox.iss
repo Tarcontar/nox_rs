@@ -1,4 +1,4 @@
-; Windows installer for Nox (Inno Setup 6.3 or newer), made from the
+; Windows installer for Nox (Inno Setup 7), made from the
 ; package tree of `cargo xtask dist`. CI builds it like this:
 ;
 ;   iscc /DVersion=0.1.0 /DArch=x64 /DSource=<repo>\target\dist\nox-0.1.0-windows-x64

@@ -61,8 +61,15 @@ jobs:
       - name: Inno Setup
         shell: pwsh
         run: |
-          Invoke-WebRequest https://jrsoftware.org/download.php/is.exe -OutFile is.exe
-          Start-Process .\is.exe -Wait -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER',"/DIR=$env:RUNNER_TEMP\inno"
+          # Inno Setup 7 from its GitHub release (the x64 edition also runs
+          # on ARM64 Windows), checked against its known hash.
+          $url = 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe'
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\innosetup.exe"
+          $hash = (Get-FileHash "$env:RUNNER_TEMP\innosetup.exe" -Algorithm SHA256).Hash
+          if ($hash -ne '0362A383ED217D4C4239B5933866DD96D3EB2102737DA92F80F6057A4B40DF2F') {
+            throw "unexpected Inno Setup download (SHA-256 $hash)"
+          }
+          Start-Process "$env:RUNNER_TEMP\innosetup.exe" -Wait -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER',"/DIR=$env:RUNNER_TEMP\inno"
       - name: Installer
         shell: pwsh
         run: |

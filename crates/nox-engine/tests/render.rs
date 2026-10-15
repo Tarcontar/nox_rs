@@ -67,6 +67,10 @@ fn render(engine: &Engine, events: &mpsc::Receiver<EngineEvent>, frame: i64) -> 
 
 #[test]
 fn composites_tracks_and_dissolves() {
+    // Composited on the GPU (the CPU fallback shows the top layer only).
+    if !common::have_gpu() {
+        return;
+    }
     let (Some(red), Some(blue)) = (solid("red.mkv", "0xC03020"), solid("blue.mkv", "0x2060E0"))
     else {
         return;
@@ -448,6 +452,10 @@ fn scopes_come_with_frames_when_enabled() {
 /// A clip's grade (`metadata.nox.grade`) reaches the rendered picture.
 #[test]
 fn clip_grades_are_rendered() {
+    // Composited on the GPU (the CPU fallback shows the top layer only).
+    if !common::have_gpu() {
+        return;
+    }
     let Some(gray) = solid("gray-grade.mkv", "0x808080") else {
         return;
     };
@@ -485,6 +493,10 @@ fn clip_grades_are_rendered() {
 /// it leaves the left of the picture to the track below.
 #[test]
 fn clip_transforms_are_rendered() {
+    // Composited on the GPU (the CPU fallback shows the top layer only).
+    if !common::have_gpu() {
+        return;
+    }
     let (Some(red), Some(blue)) = (
         solid("red-under.mkv", "0xC03020"),
         solid("blue-moved.mkv", "0x2060E0"),
@@ -578,6 +590,10 @@ fn mixer_follows_clip_speed() {
 /// incoming one fades in over it, whatever is on the tracks below.
 #[test]
 fn dips_go_through_a_color() {
+    // Composited on the GPU (the CPU fallback shows the top layer only).
+    if !common::have_gpu() {
+        return;
+    }
     let (Some(red), Some(blue)) = (
         solid("red-dip.mkv", "0xC03020"),
         solid("blue-dip.mkv", "0x2060E0"),

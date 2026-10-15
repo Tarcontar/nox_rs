@@ -436,6 +436,7 @@ Closing the window during playback crashed: a SIGSEGV in the NVIDIA driver on th
 - Variable-frame-rate sources (GNOME screencasts) map frame indices approximately.
 - Uncached backward jumps in long-GOP footage still take 20–100 ms (1 s when a 4K decoder first opens and seeks).
 - FFmpeg's own log lines go to stderr instead of the tracing log.
+- Without a Vulkan device, the CPU fallback renders only the top layer of a frame: it doesn't do dissolves, dips, grades or transforms. HDR exports refuse to run. Engine tests that need GPU compositing skip without a GPU, unless `NOX_REQUIRE_GPU` is set (Linux CI sets it, so lavapipe has to work there). GitHub's macOS runners are VMs without Metal, so MoltenVK has no device there, and macOS GPU paths can only be checked on a real Mac.
 - `scrubbing_previews_and_interrupts` (nox-engine) fails about one run in seven. It requests frame 150 and then frame 3 at once, and sometimes 150 is still delivered exactly instead of being abandoned. The interruption isn't checked somewhere on the way to the first decoded frame.
 - Dropping folders onto the media pool isn't supported.
 - Not built or tested on Windows or macOS yet. The planned Vulkan→OpenGL interop path (for Windows) doesn't exist yet.

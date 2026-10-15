@@ -18,6 +18,10 @@ use crate::viewer::Viewer;
 use crate::window::Window;
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "GTK must be initialized on the main thread on macOS; tests run on others"
+)]
 fn templates_build() {
     if gtk::init().is_err() {
         eprintln!("skipping: no display");

@@ -114,7 +114,10 @@ fn check(name: &str, codec: VideoCodec, hardware: bool) -> Option<&'static str> 
         let l = (linear(red[c]) + linear(blue[c])) / 2.0;
         (l.powf(1.0 / 2.4) * 255.0).round() as i32
     });
-    assert!(close(mid, half), "{name}: dissolve {mid:?} vs {half:?}");
+    // Dissolves are composited on the GPU.
+    if common::have_gpu() {
+        assert!(close(mid, half), "{name}: dissolve {mid:?} vs {half:?}");
+    }
 
     let mut audio = AudioDecoder::open(&summary.path, 48_000).unwrap();
     let mut samples = vec![0f32; 2 * 4800];
@@ -213,6 +216,10 @@ fn center_luma10(path: &Path, frame: i64) -> f64 {
 /// display are in the file.
 #[test]
 fn hdr_exports_encode_pq_and_hlg() {
+    // HDR exports need the GPU.
+    if !common::have_gpu() {
+        return;
+    }
     use nox_media::OutputEncoding;
     let Some(gray) = solid("x-gray.mkv", "0x9A9A9A", "320x180") else {
         return;
@@ -297,6 +304,10 @@ fn hdr_exports_encode_pq_and_hlg() {
 /// export compresses it.
 #[test]
 fn hdr_sources_pass_through_hdr_exports() {
+    // HDR exports need the GPU.
+    if !common::have_gpu() {
+        return;
+    }
     use nox_media::OutputEncoding;
     // A gray around 1000 nits, tagged BT.2020 PQ, 10 bit.
     let args = [
