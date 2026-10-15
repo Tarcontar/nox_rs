@@ -65,6 +65,7 @@ fn settings(name: &str, codec: VideoCodec, hardware: bool) -> ExportSettings {
         container: None,
         quality: EncodeQuality::High,
         hardware,
+        decode: nox_media::HwDecode::from_env(),
         encoder: None,
         range: None,
         audio: true,

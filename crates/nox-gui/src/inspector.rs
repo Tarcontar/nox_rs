@@ -8,6 +8,7 @@ use nox_project::{BlendMode, Composable, Ease, Param, Time, TrackKind, Transform
 use std::rc::Rc;
 
 use crate::i18n::{blend_mode_name, fill, gettext};
+use crate::playback::Playback;
 use crate::project::Project;
 use crate::timeline::TimelineView;
 
@@ -24,6 +25,8 @@ mod imp {
         pub name_label: TemplateChild<gtk::Label>,
         #[template_child]
         pub details_label: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub decoder_label: TemplateChild<gtk::Label>,
         #[template_child]
         pub composite_section: TemplateChild<gtk::Box>,
         #[template_child]
@@ -107,6 +110,8 @@ mod imp {
         #[template_child]
         pub fade_out: TemplateChild<gtk::SpinButton>,
         pub timeline: OnceCell<TimelineView>,
+        /// Tells how files decode (the playback engine's report).
+        pub playback: OnceCell<std::rc::Weak<Playback>>,
         /// Set while the widgets are updated from the model, so their
         /// change handlers don't write the values back as edits.
         pub updating: Cell<bool>,
@@ -562,6 +567,64 @@ impl Inspector {
         self.refresh();
     }
 
+    /// Shows how the selected clip's file decodes, as `playback` reports
+    /// it. Called once.
+    pub fn set_playback(&self, playback: &Rc<Playback>) {
+        let _ = self.imp().playback.set(Rc::downgrade(playback));
+        playback.connect_decoding_changed(glib::clone!(
+            #[weak(rename_to = inspector)]
+            self,
+            move |_| inspector.show_decoder()
+        ));
+        self.show_decoder();
+    }
+
+    /// The decoder line: how the selected video clip's file decodes, once a
+    /// frame of it has been shown. Hidden for everything else.
+    fn show_decoder(&self) {
+        let imp = self.imp();
+        let label = &imp.decoder_label;
+        let (Some(timeline), Some(playback)) = (
+            imp.timeline.get(),
+            imp.playback.get().and_then(std::rc::Weak::upgrade),
+        ) else {
+            label.set_visible(false);
+            return;
+        };
+        let project = timeline.project();
+        let model = project.timeline();
+        let path = timeline.selection().and_then(|item| {
+            let video = model
+                .track(item.track)
+                .is_some_and(|t| t.kind == TrackKind::Video);
+            match model.item(item).ok()? {
+                Composable::Clip(clip) if video => model.media_path(clip.media_reference()?),
+                _ => None,
+            }
+        });
+        let Some(path) = path else {
+            label.set_visible(false);
+            return;
+        };
+        let text = match playback.decoding(&path) {
+            Some(decoding) if decoding.api.is_hardware() => fill(
+                &gettext("Decoded with {api} ({decoder})"),
+                &[
+                    ("api", &decoding.api.name()),
+                    ("decoder", &decoding.decoder),
+                ],
+            ),
+            Some(decoding) => fill(
+                &gettext("Decoded on the processor ({decoder})"),
+                &[("decoder", &decoding.decoder)],
+            ),
+            None => gettext("Decoder known once a frame of the clip is shown"),
+        };
+        label.set_tooltip_text(Some(&text));
+        label.set_text(&text);
+        label.set_visible(true);
+    }
+
     fn edit(&self, label: &str, merge_key: Option<&str>, change: impl Fn(&mut nox_project::Item)) {
         let imp = self.imp();
         if imp.updating.get() {
@@ -711,6 +774,7 @@ impl Inspector {
             }
         }
         imp.updating.set(false);
+        self.show_decoder();
         imp.pages.set_visible_child_name("item");
     }
 }

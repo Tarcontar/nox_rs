@@ -127,6 +127,7 @@ fn render(args: &[String]) -> Result<(), String> {
         container,
         quality: EncodeQuality::High,
         hardware: true,
+        decode: nox_media::HwDecode::from_env(),
         encoder: None,
         range: None,
         audio: true,

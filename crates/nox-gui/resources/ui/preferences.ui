@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="nox">
+  <!-- Preferences (preferences.rs): the timeline's thumbnails and
+       waveforms, and how video is decoded. Changes apply at once. -->
+  <template class="NoxPreferencesWindow" parent="GtkWindow">
+    <property name="title" translatable="yes">Preferences</property>
+    <property name="modal">true</property>
+    <property name="default-width">560</property>
+    <property name="resizable">false</property>
+    <property name="child">
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">6</property>
+        <property name="margin-top">12</property>
+        <property name="margin-bottom">18</property>
+        <property name="margin-start">12</property>
+        <property name="margin-end">12</property>
+        <child>
+          <object class="GtkLabel">
+            <property name="label" translatable="yes">Timeline</property>
+            <property name="xalign">0</property>
+            <style><class name="heading"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkFrame">
+            <property name="child">
+              <object class="GtkGrid">
+                <property name="row-spacing">10</property>
+                <property name="column-spacing">14</property>
+                <property name="margin-top">14</property>
+                <property name="margin-bottom">14</property>
+                <property name="margin-start">14</property>
+                <property name="margin-end">14</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label" translatable="yes">_Thumbnails on video clips</property>
+                    <property name="use-underline">true</property>
+                    <property name="mnemonic-widget">thumbnails</property>
+                    <property name="xalign">0</property>
+                    <property name="hexpand">true</property>
+                    <layout><property name="column">0</property><property name="row">0</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSwitch" id="thumbnails">
+                    <property name="valign">center</property>
+                    <layout><property name="column">1</property><property name="row">0</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label" translatable="yes">_Waveforms on audio clips</property>
+                    <property name="use-underline">true</property>
+                    <property name="mnemonic-widget">waveforms</property>
+                    <property name="xalign">0</property>
+                    <property name="hexpand">true</property>
+                    <layout><property name="column">0</property><property name="row">1</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSwitch" id="waveforms">
+                    <property name="valign">center</property>
+                    <layout><property name="column">1</property><property name="row">1</property></layout>
+                  </object>
+                </child>
+              </object>
+            </property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel">
+            <property name="label" translatable="yes">Playback</property>
+            <property name="xalign">0</property>
+            <property name="margin-top">12</property>
+            <style><class name="heading"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkFrame">
+            <property name="child">
+              <object class="GtkGrid">
+                <property name="row-spacing">10</property>
+                <property name="column-spacing">14</property>
+                <property name="margin-top">14</property>
+                <property name="margin-bottom">14</property>
+                <property name="margin-start">14</property>
+                <property name="margin-end">14</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label" translatable="yes">Video _decoding</property>
+                    <property name="use-underline">true</property>
+                    <property name="mnemonic-widget">decoding</property>
+                    <property name="xalign">0</property>
+                    <property name="hexpand">true</property>
+                    <layout><property name="column">0</property><property name="row">0</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkDropDown" id="decoding">
+                    <property name="halign">end</property>
+                    <layout><property name="column">1</property><property name="row">0</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="decoding_info">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="width-chars">50</property>
+                    <property name="max-width-chars">60</property>
+                    <style><class name="dim-label"/><class name="caption"/></style>
+                    <layout>
+                      <property name="column">0</property>
+                      <property name="row">1</property>
+                      <property name="column-span">2</property>
+                    </layout>
+                  </object>
+                </child>
+              </object>
+            </property>
+          </object>
+        </child>
+      </object>
+    </property>
+  </template>
+</interface>

@@ -14,7 +14,7 @@ mod tiles;
 pub mod waveform;
 
 pub use audio::{AudioDecoder, CHANNELS};
-pub use decode::{HwDecode, VideoDecoder};
+pub use decode::{DecodeApi, Decoding, HwDecode, VideoDecoder};
 pub use encode::{
     AudioCodec, Container, EncoderProbe, MediaWriter, OutputSettings, Quality as EncodeQuality,
     VideoCodec, container_for, probe_encoders,
@@ -29,7 +29,7 @@ pub use hwaccel::{Accel, with_gpu_input};
 pub use nox_color::OutputEncoding;
 pub use nox_gpu::Image;
 pub use probe::{AudioInfo, MediaInfo, VideoInfo, probe};
-pub use thumbnail::thumbnail;
+pub use thumbnail::{ThumbnailReader, thumbnail};
 
 use std::sync::Once;
 

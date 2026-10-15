@@ -274,6 +274,16 @@ Dependency direction: `gui → {engine, otio}`, `engine → {media, gpu, project
       - In the CLI the container comes from the extension (`.avi` and `.webm` too). `--audio aac|opus|mp3|flac|pcm16|pcm24` picks the audio codec.
       - The audio decoder now discards the file's other streams. Otherwise, seeks in Matroska files stopped at video blocks ("keyframes not correctly marked").
       - Tested: every container with every audio codec it holds (`audio_codecs_in_every_container`), and exports to MKV (HEVC) and AVI.
+    - **Preferences** (asked for): the app's settings, for every window, in a Preferences window (main menu or Ctrl+,). They're kept in `nox/preferences.ini` in the user's config folder (a GLib key file, so no schema to install), saved when they change, and applied at once.
+      - Timeline: thumbnails on video clips and waveforms on audio clips, each on or off.
+      - Playback: video decoding. Automatic, processor only, Vulkan Video, NVDEC (not on macOS) or VAAPI (Linux). `NOX_DECODE` still overrides it for a session, and the window says so. The engine takes the choice at runtime (`Engine::set_hw_decode`): open decoders close and the frames render again. Exports decode the same way (`ExportSettings::decode`).
+    - **Timeline thumbnails** (asked for): video clips show a filmstrip below their name. Each thumbnail shows the media at its left edge, at the clip's speed and trim.
+      - Decoding: `nox_media::ThumbnailReader` keeps a file open, seeks to the keyframe before each time and decodes at most 8 frames on, in software. A thumbnail is near the time, not exact, and cheap. Stills are decoded once.
+      - Scheduling: one background thread with a newest-first queue (what's on screen now). It drops the oldest requests past 256 and keeps 4 files open (`thumbnails.rs`).
+      - Caching: thumbnails are 64 px high, for HiDPI, and up to 4000 are kept in memory. Times are rounded to a power of two milliseconds near what one thumbnail covers, so zooming reuses them. Until one is decoded, the nearest one of that file stands in.
+    - **Decoder in the inspector** (asked for): a video clip's inspector says how its file decodes: "Decoded with Vulkan Video (h264)" or "Decoded on the processor (libdav1d)". This is what actually happened, read from the decoded frames' format (`VideoDecoder::decoding`), not what was asked for.
+      - The engine reports each file's decoding when it becomes known or changes (`EngineEvent::Decoding`, `Engine::decoding`). Before a frame of the clip has been shown, the inspector says the decoder isn't known yet.
+      - FFmpeg 9 decodes FFV1 with Vulkan (compute shaders), and the report shows that too.
     - **Tiled photos** (HEIC from phones, AVIF): FFmpeg demuxes each tile as a stream and describes the layout in a tile grid stream group. Nox's decoder, probe and thumbnails decode the tiles once in software, assemble them in their own planar format (any depth and subsampling), and crop to the grid's picture (`nox_media::tiles`). `tests/data/tiled.heic` (640×480 in 3×2 tiles of 256, made with libheif) checks the result against the pattern it was made from.
     - **Tested:**
       - Encoding: NV12 through CUDA (`nvenc_encode_from_gpu_memory`), and HDR10/HLG through CUDA (`hdr_exports_encode_pq_and_hlg`: levels within 3 codes, MaxCLL/MaxFALL within 2 nits).
@@ -356,7 +366,7 @@ Windows installers and the macOS app are built by `.github/workflows/release.yml
 | `NOX_GPU` | Vulkan device: index or name substring |
 | `NOX_PRESENT=readback` | turn off DMA-BUF presentation |
 | `NOX_NVENC_MEMORY=1` | NVENC takes frames from memory instead of through CUDA |
-| `NOX_DECODE` | `auto` (default), `software`, `vulkan`, `cuda` (NVDEC) or `vaapi`: which hardware decodes video |
+| `NOX_DECODE` | `auto` (default), `software`, `vulkan`, `cuda` (NVDEC) or `vaapi`: which hardware decodes video, over the preference |
 | `NOX_HDR_VULKAN_ENCODE=1` | allow Vulkan Video encoders for HDR (wrong output on NVIDIA 580) |
 | `NOX_AV1_VULKAN_ENCODE=1` | allow the AV1 Vulkan Video encoder (undecodable output on NVIDIA 580) |
 | `NOX_AUDIO_DEVICE` | output device by name substring; `none` plays without audio (wall clock). For tests, `Discard all samples` is ALSA's null device |

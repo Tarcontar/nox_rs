@@ -6,9 +6,11 @@
 //! While playing, it renders ahead of the clock; the GUI shows whatever
 //! cached frame matches the clock on each display refresh.
 
+use nox_media::{Decoding, HwDecode};
 use nox_project::Timeline;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -143,6 +145,10 @@ struct Shared {
     /// pointless (a newer request, a new timeline or size, playback,
     /// shutdown), so long decodes give up early.
     interrupts: AtomicU64,
+    /// How decoders decode (`Engine::set_hw_decode`).
+    hw_decode: Mutex<HwDecode>,
+    /// How each file decodes, as far as known.
+    decodings: Mutex<HashMap<PathBuf, Decoding>>,
 }
 
 impl Shared {
@@ -152,6 +158,14 @@ impl Shared {
 
     fn cache(&self) -> MutexGuard<'_, FrameCache> {
         self.cache.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn decodings(&self) -> MutexGuard<'_, HashMap<PathBuf, Decoding>> {
+        self.decodings.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn hw_decode(&self) -> HwDecode {
+        *self.hw_decode.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Wakes the worker and stops the request it is rendering, if any.
@@ -197,6 +211,8 @@ impl Engine {
             wake: Condvar::new(),
             cache: Mutex::new(FrameCache::new(budget << 20)),
             interrupts: AtomicU64::new(0),
+            hw_decode: Mutex::new(HwDecode::from_env()),
+            decodings: Mutex::default(),
         });
         let dmabuf_allowed = Arc::new(AtomicBool::new(!dmabuf_formats.is_empty()));
         let allowed = dmabuf_allowed.clone();
@@ -335,6 +351,31 @@ impl Engine {
         }
     }
 
+    /// Decodes video as `hw` says from now on (initially as `NOX_DECODE`
+    /// says). Frames are rendered again with the new decoders.
+    pub fn set_hw_decode(&self, hw: HwDecode) {
+        {
+            let mut current = self
+                .shared
+                .hw_decode
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *current == hw {
+                return;
+            }
+            *current = hw;
+        }
+        self.shared.decodings().clear();
+        self.shared.state().generation += 1;
+        self.shared.interrupt();
+    }
+
+    /// How `path` decodes, once a frame of it has been (reported as
+    /// `EngineEvent::Decoding`).
+    pub fn decoding(&self, path: &Path) -> Option<Decoding> {
+        self.shared.decodings().get(path).cloned()
+    }
+
     /// Falls back to readback, e.g. after the consumer failed to import a
     /// DMA-BUF.
     pub fn disable_dmabuf(&self) {
@@ -461,6 +502,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
         let started = Instant::now();
         let (width, height) = (key.width, key.height);
         renderer.set_scopes(scopes);
+        renderer.set_hw_decode(shared.hw_decode());
         let result = match job {
             // Scrubbing: if the frame is expensive to reach (far from a
             // keyframe), show a cheap stand-in at once, then work on the
@@ -497,6 +539,10 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
             }
         };
         let elapsed = started.elapsed();
+        for (path, decoding) in renderer.decodings_changed() {
+            shared.decodings().insert(path.clone(), decoding);
+            on_event(EngineEvent::Decoding(path));
+        }
         if let Err(nox_media::Error::Interrupted) = result {
             tracing::trace!("frame {frame} interrupted after {elapsed:?}");
             continue;

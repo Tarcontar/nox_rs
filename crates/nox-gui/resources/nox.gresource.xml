@@ -8,6 +8,7 @@
     <file compressed="true" preprocess="xml-stripblanks">ui/media-cell.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/media-pool-item.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/project-settings.ui</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/preferences.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/export-dialog.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/menus.ui</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/rename-track.ui</file>

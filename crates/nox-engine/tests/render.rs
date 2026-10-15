@@ -3,7 +3,7 @@
 mod common;
 
 use common::{fixture, wait_for};
-use nox_engine::{Engine, EngineEvent, FrameImage, Mixer, RenderedFrame};
+use nox_engine::{DecodeApi, Engine, EngineEvent, FrameImage, HwDecode, Mixer, RenderedFrame};
 use nox_project::{
     Clip, Composable, Edge, ItemRef, MediaReference, Rational, Time, TimeRange, Timeline, TrackKind,
 };
@@ -59,7 +59,7 @@ fn render(engine: &Engine, events: &mpsc::Receiver<EngineEvent>, frame: i64) -> 
             EngineEvent::Frame(rendered) if rendered.frame == frame && rendered.exact => {
                 return rendered;
             }
-            EngineEvent::Frame(_) => {}
+            EngineEvent::Frame(_) | EngineEvent::Decoding(_) => {}
             EngineEvent::Error { message, .. } => panic!("{message}"),
         }
     }
@@ -312,9 +312,12 @@ fn scrubbing_previews_and_interrupts() {
     });
     engine.set_size(160, 90);
     engine.set_timeline(Arc::new(timeline));
-    let next = || match events.recv_timeout(Duration::from_secs(20)).expect("event") {
-        EngineEvent::Frame(rendered) => rendered,
-        EngineEvent::Error { message, .. } => panic!("{message}"),
+    let next = || loop {
+        match events.recv_timeout(Duration::from_secs(20)).expect("event") {
+            EngineEvent::Frame(rendered) => return rendered,
+            EngineEvent::Decoding(_) => {}
+            EngineEvent::Error { message, .. } => panic!("{message}"),
+        }
     };
 
     // Near the keyframe: exact straight away.
@@ -627,4 +630,34 @@ fn dips_go_through_a_color() {
         "{quarter:?}"
     );
     assert!(quarter[1] < 250, "not white yet: {quarter:?}");
+}
+
+/// The engine tells how each file decodes, and decodes as it's told.
+#[test]
+fn reports_how_files_decode() {
+    let Some(red) = solid("red.mkv", "0xC03020") else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    timeline.place(0, clip(&red, 0, 50), f(0)).unwrap();
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    assert!(engine.decoding(&red).is_none());
+    render(&engine, &events, 5);
+    // FFmpeg 9 decodes FFV1 with Vulkan (compute shaders) on GPUs.
+    let decoding = engine.decoding(&red).expect("decoding reported");
+    assert_eq!(decoding.decoder, "ffv1");
+
+    // A new way to decode: decoders open again and report again.
+    engine.set_hw_decode(HwDecode::Software);
+    assert!(engine.decoding(&red).is_none());
+    render(&engine, &events, 6);
+    assert_eq!(
+        engine.decoding(&red).map(|d| d.api),
+        Some(DecodeApi::Software)
+    );
 }

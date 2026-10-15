@@ -8,8 +8,9 @@
 //! are skipped and counted.
 
 use gtk::{gdk, glib, prelude::*};
-use nox_engine::{Engine, EngineEvent, RenderedFrame};
+use nox_engine::{Decoding, Engine, EngineEvent, RenderedFrame};
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +19,9 @@ use crate::project::Project;
 use crate::scopes::ScopesPanel;
 use crate::timeline::TimelineView;
 use crate::viewer::Viewer;
+
+/// Called with a file whose decoding became known or changed.
+type DecodingChanged = Box<dyn Fn(&Path)>;
 
 pub struct Playback {
     engine: Engine,
@@ -32,6 +36,8 @@ pub struct Playback {
     stats: Cell<Stats>,
     /// Shows the scopes of every frame shown, while set.
     scopes: RefCell<Option<ScopesPanel>>,
+    /// Called when how a file decodes becomes known or changes.
+    decoding_changed: RefCell<Vec<DecodingChanged>>,
 }
 
 impl Playback {
@@ -50,8 +56,21 @@ impl Playback {
             tick: RefCell::default(),
             stats: Cell::new(Stats::default()),
             scopes: RefCell::default(),
+            decoding_changed: RefCell::default(),
         });
         playback.sync_timeline();
+        let preferences = crate::preferences::Preferences::get();
+        playback.engine.set_hw_decode(preferences.hw_decode());
+        preferences.connect_video_decoding_notify(glib::clone!(
+            #[weak]
+            playback,
+            move |preferences| {
+                playback.engine.set_hw_decode(preferences.hw_decode());
+                if !playback.engine.is_playing() {
+                    playback.show_playhead();
+                }
+            }
+        ));
 
         let weak = Rc::downgrade(&playback);
         glib::spawn_future_local(async move {
@@ -66,6 +85,11 @@ impl Playback {
                             && rendered.frame == playback.timeline.playhead()
                         {
                             playback.show(&rendered);
+                        }
+                    }
+                    EngineEvent::Decoding(path) => {
+                        for callback in playback.decoding_changed.borrow().iter() {
+                            callback(&path);
                         }
                     }
                     EngineEvent::Error { frame, message } => {
@@ -260,6 +284,17 @@ impl Playback {
         if self.shown.get() != Some(self.timeline.playhead()) {
             self.show_playhead();
         }
+    }
+
+    /// How `path` decodes, once a frame of it has been rendered.
+    pub fn decoding(&self, path: &Path) -> Option<Decoding> {
+        self.engine.decoding(path)
+    }
+
+    /// Calls `f` with the file whenever how it decodes becomes known or
+    /// changes.
+    pub fn connect_decoding_changed(&self, f: impl Fn(&Path) + 'static) {
+        self.decoding_changed.borrow_mut().push(Box::new(f));
     }
 
     /// Stops playback and the engine for good (see `Engine::shutdown`);

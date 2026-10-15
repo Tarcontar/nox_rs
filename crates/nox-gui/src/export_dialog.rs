@@ -787,6 +787,7 @@ impl ExportDialog {
             container: Some(self.container()),
             quality: QUALITIES[imp.quality.selected() as usize].1,
             hardware: true,
+            decode: crate::preferences::Preferences::get().hw_decode(),
             encoder: self.chosen_encoder().map(|e| e.name.to_owned()),
             range: Some(self.range()),
             audio: imp.audio.is_active(),

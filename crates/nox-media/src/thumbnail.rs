@@ -1,4 +1,5 @@
-//! CPU thumbnails for the media pool.
+//! CPU thumbnails: one per file for the media pool (`thumbnail`), many
+//! along a file for the timeline's filmstrips (`ThumbnailReader`).
 
 use ffmpeg::{codec, ffi, format, frame, media};
 use std::path::Path;
@@ -77,6 +78,138 @@ fn first_frame(
     }
     decoder.send_eof()?;
     Ok(decoder.receive_frame(&mut frame).ok().map(|()| frame))
+}
+
+/// Most frames decoded past the keyframe for one filmstrip thumbnail;
+/// beyond, the frame reached so far stands in.
+const READER_MAX_FRAMES: usize = 8;
+
+/// Thumbnails at any position of one file, for the timeline's filmstrips.
+/// Keeps the file open; each thumbnail seeks to the keyframe before its
+/// time and decodes at most a few frames on (in software, sliced threads),
+/// so it is near, not exactly at, the time asked for. Stills (photos, cover
+/// art) are decoded once.
+pub struct ThumbnailReader {
+    input: format::context::Input,
+    decoder: codec::decoder::Video,
+    stream_index: usize,
+    time_base: f64,
+    start: i64,
+    max_width: u32,
+    max_height: u32,
+    /// The picture of a still.
+    still: Option<Image>,
+}
+
+impl ThumbnailReader {
+    /// Opens `path` for thumbnails that fit `max_width` × `max_height`.
+    pub fn open(path: &Path, max_width: u32, max_height: u32) -> Result<Self> {
+        crate::init();
+        let mut input = format::input(path)?;
+        let tiled = crate::tiles::tile_grid(&input).is_some();
+        let stream = input
+            .streams()
+            .best(media::Type::Video)
+            .ok_or(Error::NoVideoStream)?;
+        let stream_index = stream.index();
+        let time_base = f64::from(stream.time_base());
+        let start = match stream.start_time() {
+            ffi::AV_NOPTS_VALUE => 0,
+            start => start,
+        };
+        let still = tiled
+            || stream
+                .disposition()
+                .contains(format::stream::Disposition::ATTACHED_PIC)
+            || crate::probe::is_image_demuxer(input.format().name());
+        let mut context = codec::Context::from_parameters(stream.parameters())?;
+        context.set_threading(codec::threading::Config {
+            kind: codec::threading::Type::Slice,
+            count: 0,
+        });
+        let decoder = context.decoder().video()?;
+        // Only the video is read.
+        for mut other in input.streams_mut().filter(|s| s.index() != stream_index) {
+            // SAFETY: the stream's own field, before reading packets.
+            unsafe { (*other.as_mut_ptr()).discard = ffi::AVDiscard::AVDISCARD_ALL };
+        }
+        let still = if still {
+            Some(thumbnail(path, max_width, max_height)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            input,
+            decoder,
+            stream_index,
+            time_base,
+            start,
+            max_width,
+            max_height,
+            still,
+        })
+    }
+
+    /// The picture near `seconds` into the stream.
+    pub fn at(&mut self, seconds: f64) -> Result<Image> {
+        if let Some(still) = &self.still {
+            return Ok(still.clone());
+        }
+        let target = self.start + (seconds.max(0.0) / self.time_base) as i64;
+        // SAFETY: valid context; seeks to the last keyframe at or before
+        // `target` in the stream's time base.
+        let ret = unsafe {
+            ffi::avformat_seek_file(
+                self.input.as_mut_ptr(),
+                self.stream_index as i32,
+                i64::MIN,
+                target,
+                target,
+                0,
+            )
+        };
+        if ret < 0 {
+            tracing::debug!("thumbnail seek failed: {}", ffmpeg::Error::from(ret));
+        }
+        self.decoder.flush();
+        let mut best: Option<frame::Video> = None;
+        let mut decoded = 0;
+        let mut eof = false;
+        let mut frame = frame::Video::empty();
+        let mut packet = ffmpeg::Packet::empty();
+        'decode: loop {
+            while self.decoder.receive_frame(&mut frame).is_ok() {
+                let pts = frame.timestamp().or(frame.pts()).unwrap_or(self.start);
+                decoded += 1;
+                best = Some(std::mem::replace(&mut frame, frame::Video::empty()));
+                if pts >= target || decoded >= READER_MAX_FRAMES {
+                    break 'decode;
+                }
+            }
+            if eof {
+                break;
+            }
+            // The next packet of the stream, or the end.
+            loop {
+                match packet.read(&mut self.input) {
+                    Ok(()) if packet.stream() == self.stream_index => {
+                        // Corrupt packets are skipped; a later one may decode.
+                        let _ = self.decoder.send_packet(&packet);
+                        break;
+                    }
+                    Ok(()) => {}
+                    Err(ffmpeg::Error::Eof) => {
+                        let _ = self.decoder.send_eof();
+                        eof = true;
+                        break;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        let frame = best.ok_or(Error::NoFrame)?;
+        scale(&frame, self.max_width, self.max_height)
+    }
 }
 
 fn scale(frame: &frame::Video, max_width: u32, max_height: u32) -> Result<Image> {

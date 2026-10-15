@@ -6,6 +6,7 @@ crates/nox-gui/resources/ui/inspector.ui
 crates/nox-gui/resources/ui/media-pool-item.ui
 crates/nox-gui/resources/ui/media-pool.ui
 crates/nox-gui/resources/ui/menus.ui
+crates/nox-gui/resources/ui/preferences.ui
 crates/nox-gui/resources/ui/project-settings.ui
 crates/nox-gui/resources/ui/rename-track.ui
 crates/nox-gui/resources/ui/scopes-panel.ui
@@ -19,6 +20,7 @@ crates/nox-gui/src/i18n.rs
 crates/nox-gui/src/inspector.rs
 crates/nox-gui/src/media_object.rs
 crates/nox-gui/src/media_pool.rs
+crates/nox-gui/src/preferences.rs
 crates/nox-gui/src/project.rs
 crates/nox-gui/src/scopes.rs
 crates/nox-gui/src/settings_dialog.rs

@@ -35,17 +35,72 @@ pub enum HwDecode {
 }
 
 impl HwDecode {
+    pub const ALL: [HwDecode; 5] = [
+        Self::Auto,
+        Self::Software,
+        Self::Vulkan,
+        Self::Cuda,
+        Self::Vaapi,
+    ];
+
     /// `NOX_DECODE` (`auto`, `software`, `vulkan`, `cuda`, `vaapi`), else
     /// `Auto`.
     pub fn from_env() -> Self {
-        match std::env::var("NOX_DECODE").as_deref() {
-            Ok("software") => Self::Software,
-            Ok("vulkan") => Self::Vulkan,
-            Ok("cuda") => Self::Cuda,
-            Ok("vaapi") => Self::Vaapi,
-            _ => Self::Auto,
+        Self::env_override().unwrap_or_default()
+    }
+
+    /// `NOX_DECODE`, if set to one of the `key`s.
+    pub fn env_override() -> Option<Self> {
+        Self::from_key(&std::env::var("NOX_DECODE").ok()?)
+    }
+
+    /// The name `NOX_DECODE` and settings use.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Software => "software",
+            Self::Vulkan => "vulkan",
+            Self::Cuda => "cuda",
+            Self::Vaapi => "vaapi",
         }
     }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|hw| hw.key() == key)
+    }
+}
+
+/// What decodes a file's video, as seen in its decoded frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeApi {
+    Software,
+    Vulkan,
+    /// NVDEC, through CUDA.
+    Nvdec,
+    Vaapi,
+}
+
+impl DecodeApi {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Software => "Software",
+            Self::Vulkan => "Vulkan Video",
+            Self::Nvdec => "NVDEC",
+            Self::Vaapi => "VAAPI",
+        }
+    }
+
+    pub fn is_hardware(self) -> bool {
+        self != Self::Software
+    }
+}
+
+/// How a decoder decodes: the API and FFmpeg's decoder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decoding {
+    pub api: DecodeApi,
+    /// FFmpeg's decoder, e.g. `hevc` or `libdav1d`.
+    pub decoder: String,
 }
 
 /// The hardware a decoder was opened with.
@@ -83,7 +138,8 @@ pub struct VideoDecoder {
     last: Option<(i64, frame::Video)>,
     /// Decoded but not yet returned (we decoded past the request).
     pending: Option<(i64, frame::Video)>,
-    logged_path: bool,
+    /// How frames are decoded, once the first one is.
+    decoding: Option<Decoding>,
     /// Nothing has been read since opening or rewinding.
     at_start: bool,
     /// A still image: one frame, shown at every position.
@@ -151,6 +207,11 @@ impl VideoDecoder {
             )),
         }
         let decoder = context.decoder().open_as(codec)?.video()?;
+        // Tiles are decoded in software, once.
+        let decoding = tiled.as_ref().map(|_| Decoding {
+            api: DecodeApi::Software,
+            decoder: codec.name().to_owned(),
+        });
 
         Ok(Self {
             path: path.to_owned(),
@@ -163,10 +224,15 @@ impl VideoDecoder {
             eof: false,
             last: tiled.map(|picture| (0, picture)),
             pending: None,
-            logged_path: false,
+            decoding,
             still,
             at_start: true,
         })
+    }
+
+    /// How frames are decoded; `None` until the first one is.
+    pub fn decoding(&self) -> Option<&Decoding> {
+        self.decoding.as_ref()
     }
 
     /// Whether the file is a still image (shows the same frame throughout).
@@ -456,15 +522,23 @@ impl VideoDecoder {
     }
 
     fn log_decode_path(&mut self, frame: &frame::Video) {
-        if !self.logged_path {
-            self.logged_path = true;
-            let path = match frame.format() {
-                format::Pixel::VULKAN => "Vulkan Video",
-                format::Pixel::CUDA => "NVDEC (CUDA)",
-                format::Pixel::VAAPI => "VAAPI",
-                _ => "software",
+        if self.decoding.is_none() {
+            let api = match frame.format() {
+                format::Pixel::VULKAN => DecodeApi::Vulkan,
+                format::Pixel::CUDA => DecodeApi::Nvdec,
+                format::Pixel::VAAPI => DecodeApi::Vaapi,
+                _ => DecodeApi::Software,
             };
-            tracing::info!("decoding {} with {path}", self.decoder.id().name());
+            let decoder = self.decoder.codec().map_or_else(
+                || self.decoder.id().name().to_owned(),
+                |c| c.name().to_owned(),
+            );
+            tracing::info!(
+                "decoding {} with {} ({decoder})",
+                self.path.display(),
+                api.name()
+            );
+            self.decoding = Some(Decoding { api, decoder });
         }
     }
 }

@@ -378,6 +378,8 @@ mod imp {
         pub offline: RefCell<std::collections::BTreeSet<std::path::PathBuf>>,
         /// Waveforms of audio clips' files.
         pub waveforms: OnceCell<Rc<crate::waveforms::Waveforms>>,
+        /// Filmstrips of video clips' files.
+        pub thumbnails: OnceCell<Rc<crate::thumbnails::Thumbnails>>,
         /// One header per track row, in row order.
         pub headers: RefCell<Vec<TrackHeader>>,
         /// The clip under the pointer, which shows its fade handles.
@@ -407,6 +409,7 @@ mod imp {
                 track_actions: gio::SimpleActionGroup::new(),
                 offline: RefCell::default(),
                 waveforms: OnceCell::new(),
+                thumbnails: OnceCell::new(),
                 headers: RefCell::default(),
                 hovered: Cell::new(None),
                 fade_drags: Cell::new(0),
@@ -446,13 +449,29 @@ mod imp {
             self.parent_constructed();
             let obj = self.obj();
             let view = obj.downgrade();
+            let redraw = move || {
+                if let Some(view) = view.upgrade() {
+                    view.queue_draw();
+                }
+            };
             let _ = self
                 .waveforms
-                .set(crate::waveforms::Waveforms::new(move || {
-                    if let Some(view) = view.upgrade() {
-                        view.queue_draw();
-                    }
-                }));
+                .set(crate::waveforms::Waveforms::new(redraw.clone()));
+            let _ = self
+                .thumbnails
+                .set(crate::thumbnails::Thumbnails::new(redraw));
+            // Thumbnails and waveforms come and go with the preferences.
+            let preferences = crate::preferences::Preferences::get();
+            for property in ["timeline-thumbnails", "timeline-waveforms"] {
+                preferences.connect_notify_local(
+                    Some(property),
+                    glib::clone!(
+                        #[weak]
+                        obj,
+                        move |_, _| obj.queue_draw()
+                    ),
+                );
+            }
             obj.set_focusable(true);
             obj.set_overflow(gtk::Overflow::Hidden);
             obj.update_property(&[
@@ -1018,11 +1037,19 @@ mod imp {
                     with_alpha(color, alpha),
                     selected,
                 );
+                let preferences = crate::preferences::Preferences::get();
                 if let Composable::Clip(clip) = child
-                    && track.kind == TrackKind::Audio
                     && !offline
                 {
-                    self.draw_waveform(snapshot, timeline, clip, range, y, alpha);
+                    match track.kind {
+                        TrackKind::Audio if preferences.timeline_waveforms() => {
+                            self.draw_waveform(snapshot, timeline, clip, range, y, alpha);
+                        }
+                        TrackKind::Video if preferences.timeline_thumbnails() => {
+                            self.draw_thumbnails(snapshot, timeline, clip, range, y, alpha);
+                        }
+                        _ => {}
+                    }
                 }
                 if let Composable::Clip(clip) = child
                     && !moving.contains(&item)
@@ -1173,6 +1200,67 @@ mod imp {
                 );
                 x += 1.0;
             }
+        }
+
+        /// The clip's filmstrip below its name: thumbnails side by side
+        /// from the clip's start, each of the media at its left edge.
+        fn draw_thumbnails(
+            &self,
+            snapshot: &gtk::Snapshot,
+            timeline: &Timeline,
+            clip: &nox_project::Clip,
+            range: TimeRange,
+            y: f32,
+            alpha: f32,
+        ) {
+            let rect = self.clip_rect(range, y);
+            let (Some(path), Some(trimmed), Some(thumbnails)) = (
+                clip.media_reference().and_then(|r| timeline.media_path(r)),
+                clip.trimmed_range(),
+                self.thumbnails.get(),
+            ) else {
+                return;
+            };
+            // Inside the clip's border (2 px when selected).
+            let left = (rect.x() + 2.0).max(HEADER_WIDTH);
+            let right = (rect.x() + rect.width() - 2.0).min(self.obj().width() as f32);
+            let top = rect.y() + 16.0;
+            let height = rect.y() + rect.height() - 2.0 - top;
+            let width = (height * thumbnails.aspect(&path)).round();
+            if right - left < 4.0 || height < 8.0 || thumbnails.failed(&path) {
+                return;
+            }
+            // Seconds into the file at widget x, as for waveforms.
+            let file_start = clip
+                .available_range()
+                .map_or(trimmed.start, |available| trimmed.start - available.start);
+            let fps = self.fps();
+            let start_frame = self.time_to_frames(range.start);
+            let speed = clip.item.speed();
+            let seconds_at = |x: f32| {
+                (self.x_to_frame_f64(f64::from(x)) - start_frame) / fps * speed
+                    + file_start.as_seconds()
+            };
+            // Times are rounded to a power of two milliseconds near the
+            // length a thumbnail covers, so zooming reuses thumbnails.
+            let covered = (seconds_at(width) - seconds_at(0.0)).abs() * 1000.0;
+            let step = (covered.max(40.0).log2().ceil().exp2() as i64).max(1);
+            let area = graphene::Rect::new(left, top, right - left, height);
+            snapshot.push_clip(&area);
+            snapshot.push_opacity(f64::from(alpha));
+            let first = ((left - rect.x()) / width).floor().max(0.0) as i64;
+            for i in first.. {
+                let x = rect.x() + i as f32 * width;
+                if x >= right {
+                    break;
+                }
+                let ms = (seconds_at(x).max(0.0) * 1000.0) as i64 / step * step;
+                if let Some(texture) = thumbnails.get(&path, ms) {
+                    snapshot.append_texture(&texture, &graphene::Rect::new(x, top, width, height));
+                }
+            }
+            snapshot.pop();
+            snapshot.pop();
         }
 
         fn draw_transition(

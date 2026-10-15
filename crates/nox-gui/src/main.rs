@@ -10,11 +10,13 @@ mod media_cell;
 mod media_object;
 mod media_pool;
 mod playback;
+mod preferences;
 mod project;
 mod scopes;
 mod settings_dialog;
 #[cfg(test)]
 mod template_tests;
+mod thumbnails;
 mod timeline;
 mod track_header;
 mod transform_overlay;
@@ -42,7 +44,7 @@ fn main() -> glib::ExitCode {
         // separate instance (e.g. for testing next to a running Nox).
         .flags(gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::CAN_OVERRIDE_APP_ID)
         .build();
-    app.connect_startup(|_| {
+    app.connect_startup(|app| {
         if let Some(settings) = gtk::Settings::default() {
             // The dark variant of the user's theme. Not GTK 4.20's
             // `gtk-interface-color-scheme`, although GTK calls this setting
@@ -63,6 +65,14 @@ fn main() -> glib::ExitCode {
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        // Preferences are the application's, for every window.
+        let preferences = gio::SimpleAction::new("preferences", None);
+        preferences.connect_activate(glib::clone!(
+            #[weak]
+            app,
+            move |_, _| preferences::show(app.active_window().as_ref())
+        ));
+        app.add_action(&preferences);
     });
     // Only shortcuts with Ctrl or Alt here: GTK runs application
     // accelerators before the focused widget, so a bare key would be taken
@@ -76,6 +86,7 @@ fn main() -> glib::ExitCode {
     app.set_accels_for_action("win.split", &["<Control>b"]);
     app.set_accels_for_action("win.add-dissolve", &["<Control>t"]);
     app.set_accels_for_action("win.export", &["<Control>e"]);
+    app.set_accels_for_action("app.preferences", &["<Control>comma"]);
     app.set_accels_for_action("win.redo", &["<Control><Shift>z", "<Control>y"]);
     // Clearing In/Out marks as in DaVinci Resolve.
     app.set_accels_for_action("win.clear-in", &["<Alt>i"]);

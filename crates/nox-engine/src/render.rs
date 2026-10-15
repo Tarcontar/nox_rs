@@ -4,7 +4,7 @@
 use nox_gpu::{
     BlendMode, Compositor, FrameLight, GpuTarget, Image, LayerStyle, Placement, Rect, Transform,
 };
-use nox_media::{Accel, VideoDecoder};
+use nox_media::{Accel, Decoding, HwDecode, VideoDecoder};
 use nox_project::{Time, Timeline};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,6 +63,7 @@ impl DecoderPool {
         path: &Path,
         time: Time,
         accel: Option<&Accel>,
+        hw: HwDecode,
     ) -> nox_media::Result<(&mut VideoDecoder, i64)> {
         self.clock += 1;
         let frame_start = self.frame_start;
@@ -98,7 +99,7 @@ impl DecoderPool {
                 tracing::debug!("opening decoder for {}", path.display());
                 self.decoders.push(PooledDecoder {
                     path: path.to_owned(),
-                    decoder: VideoDecoder::open(path, accel)?,
+                    decoder: VideoDecoder::open_with(path, accel, hw)?,
                     used: 0,
                 });
                 self.decoders.len() - 1
@@ -133,6 +134,10 @@ pub(crate) struct Renderer {
     failed: std::collections::HashSet<PathBuf>,
     /// Measure scopes with every frame.
     scopes: bool,
+    /// How decoders opened from now on decode.
+    hw: HwDecode,
+    /// How each file decodes, as last reported (`decodings_changed`).
+    decodings: std::collections::HashMap<PathBuf, Decoding>,
 }
 
 impl Renderer {
@@ -163,7 +168,36 @@ impl Renderer {
             present_path: None,
             failed: Default::default(),
             scopes: false,
+            hw: HwDecode::from_env(),
+            decodings: Default::default(),
         }
+    }
+
+    /// Decodes with `hw` from now on: open decoders are closed, so the
+    /// next frames open them again.
+    pub fn set_hw_decode(&mut self, hw: HwDecode) {
+        if self.hw != hw {
+            tracing::info!("decoding with {hw:?}");
+            self.hw = hw;
+            self.decoders = DecoderPool::default();
+            self.failed.clear();
+            self.decodings.clear();
+        }
+    }
+
+    /// Files whose decoding is newly known or changed since the last call,
+    /// and how they decode now.
+    pub fn decodings_changed(&mut self) -> Vec<(PathBuf, Decoding)> {
+        let mut changed = Vec::new();
+        for pooled in &self.decoders.decoders {
+            if let Some(decoding) = pooled.decoder.decoding()
+                && self.decodings.get(&pooled.path) != Some(decoding)
+            {
+                self.decodings.insert(pooled.path.clone(), decoding.clone());
+                changed.push((pooled.path.clone(), decoding.clone()));
+            }
+        }
+        changed
     }
 
     /// Measures scopes with every frame rendered from now on (GPU only).
@@ -214,7 +248,7 @@ impl Renderer {
             if self.failed.contains(&path) {
                 continue;
             }
-            if let Ok((decoder, index)) = self.decoders.get(&path, time, accel.as_ref()) {
+            if let Ok((decoder, index)) = self.decoders.get(&path, time, accel.as_ref(), self.hw) {
                 cost = cost.max(decoder.decode_cost(index));
             }
         }
@@ -334,13 +368,13 @@ impl Renderer {
                 if self.failed.contains(path) {
                     break 'picture;
                 }
-                let decoded =
-                    self.decoders
-                        .get(path, *time, Some(accel))
-                        .and_then(|(decoder, index)| {
-                            let still = decoder.is_still();
-                            decode(decoder, index, quality, stop).map(|frame| (frame, still))
-                        });
+                let decoded = self
+                    .decoders
+                    .get(path, *time, Some(accel), self.hw)
+                    .and_then(|(decoder, index)| {
+                        let still = decoder.is_still();
+                        decode(decoder, index, quality, stop).map(|frame| (frame, still))
+                    });
                 let (decoded, still) = match decoded {
                     Ok(decoded) => decoded,
                     Err(nox_media::Error::Interrupted) => {
@@ -416,7 +450,7 @@ impl Renderer {
             data: [0, 0, 0, 255].repeat(width as usize * height as usize),
         };
         if let Some((path, time, ..)) = layers.last() {
-            let (decoder, index) = self.decoders.get(path, *time, None)?;
+            let (decoder, index) = self.decoders.get(path, *time, None, self.hw)?;
             let decoded = decode(decoder, index, quality, stop)?;
             let rect = framing.place(nox_media::display_size(&decoded), (width, height));
             let picture = nox_media::rgba_cpu(&decoded, rect.width, rect.height)?;

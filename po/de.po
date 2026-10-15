@@ -1093,13 +1093,7 @@ msgstr "Wiederholen (Strg+Umschalt+Z)"
 msgid "Export the timeline (Ctrl+E)"
 msgstr "Die Timeline exportieren (Strg+E)"
 
-#: resources/ui/window.ui
-msgid "Project Settings (Shift+9)"
-msgstr "Projekteinstellungen (Umschalt+9)"
 
-#: resources/ui/window.ui
-msgid "Project Settings"
-msgstr "Projekteinstellungen"
 
 #: resources/ui/window.ui
 msgid "Timeline Tools"
@@ -1445,3 +1439,75 @@ msgstr "Nits"
 #: src/export_dialog.rs
 msgid "The timeline has no audio in this range"
 msgstr "Die Timeline hat in diesem Bereich keinen Ton"
+
+#: resources/ui/window.ui
+msgid "Main Menu"
+msgstr "Hauptmenü"
+
+#: resources/ui/window.ui
+msgid "_Preferences"
+msgstr "_Einstellungen"
+
+#: resources/ui/window.ui
+msgid "Project _Settings"
+msgstr "_Projekteinstellungen"
+
+#: resources/ui/preferences.ui
+msgid "Preferences"
+msgstr "Einstellungen"
+
+#: resources/ui/preferences.ui
+msgid "_Thumbnails on video clips"
+msgstr "_Vorschaubilder auf Videoclips"
+
+#: resources/ui/preferences.ui
+msgid "_Waveforms on audio clips"
+msgstr "_Wellenformen auf Audioclips"
+
+#: resources/ui/preferences.ui
+msgid "Playback"
+msgstr "Wiedergabe"
+
+#: resources/ui/preferences.ui
+msgid "Video _decoding"
+msgstr "Video-_Dekodierung"
+
+#: src/inspector.rs
+msgid "Decoded with {api} ({decoder})"
+msgstr "Dekodiert mit {api} ({decoder})"
+
+#: src/inspector.rs
+msgid "Decoded on the processor ({decoder})"
+msgstr "Auf dem Prozessor dekodiert ({decoder})"
+
+#: src/inspector.rs
+msgid "Decoder known once a frame of the clip is shown"
+msgstr "Der Decoder steht fest, sobald ein Bild des Clips angezeigt wurde"
+
+#: src/preferences.rs
+msgid "Processor only"
+msgstr "Nur Prozessor"
+
+#: src/preferences.rs
+msgid "Decodes on the graphics card where it can (Vulkan Video, then NVDEC, then VAAPI), else on the processor."
+msgstr "Dekodiert auf der Grafikkarte, wo es geht (Vulkan Video, dann NVDEC, dann VAAPI), sonst auf dem Prozessor."
+
+#: src/preferences.rs
+msgid "Decodes on the processor: works with every file, but is much slower, especially at 4K. Try it if hardware decoding shows wrong frames."
+msgstr "Dekodiert auf dem Prozessor: funktioniert mit jeder Datei, ist aber viel langsamer, besonders bei 4K. Einen Versuch wert, wenn die Hardware-Dekodierung falsche Bilder zeigt."
+
+#: src/preferences.rs
+msgid "The graphics card's video engine through Vulkan, for the codecs it handles; others are decoded on the processor."
+msgstr "Die Video-Einheit der Grafikkarte über Vulkan, für die Codecs, die sie beherrscht; andere werden auf dem Prozessor dekodiert."
+
+#: src/preferences.rs
+msgid "NVIDIA's video engine, for the codecs it handles; others are decoded on the processor. NVIDIA cards only."
+msgstr "Die Video-Einheit von NVIDIA, für die Codecs, die sie beherrscht; andere werden auf dem Prozessor dekodiert. Nur NVIDIA-Karten."
+
+#: src/preferences.rs
+msgid "The graphics card's video engine through VAAPI (AMD and Intel cards), for the codecs it handles; others are decoded on the processor."
+msgstr "Die Video-Einheit der Grafikkarte über VAAPI (AMD- und Intel-Karten), für die Codecs, die sie beherrscht; andere werden auf dem Prozessor dekodiert."
+
+#: src/preferences.rs
+msgid "Set by the NOX_DECODE environment variable ({value}) for this session."
+msgstr "Für diese Sitzung durch die Umgebungsvariable NOX_DECODE ({value}) festgelegt."

@@ -136,6 +136,7 @@ pub fn build(app: &gtk::Application, files: &[gio::File]) -> Window {
         }
     ));
     window.imp().inspector.set_timeline(&timeline);
+    window.imp().inspector.set_playback(&ui.playback);
     window.imp().clip_strip.set_up(&timeline, &pool);
     window.imp().color_wheels.set_timeline(&timeline);
     window

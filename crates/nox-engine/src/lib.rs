@@ -17,7 +17,9 @@ pub use export::{
 pub use nox_gpu::{
     DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F, Image, ScopeImages, scope_sizes,
 };
-pub use nox_media::{AudioCodec, Container, EncodeQuality, EncoderProbe, VideoCodec};
+pub use nox_media::{
+    AudioCodec, Container, DecodeApi, Decoding, EncodeQuality, EncoderProbe, HwDecode, VideoCodec,
+};
 
 /// Display-referred RGBA at the requested output size.
 #[derive(Debug)]
@@ -63,4 +65,6 @@ pub enum EngineEvent {
     Frame(std::sync::Arc<RenderedFrame>),
     /// A requested frame could not be rendered.
     Error { frame: i64, message: String },
+    /// How a file decodes became known or changed (`Engine::decoding`).
+    Decoding(std::path::PathBuf),
 }

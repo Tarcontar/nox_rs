@@ -10,6 +10,7 @@ use crate::export_dialog::ExportDialog;
 use crate::inspector::Inspector;
 use crate::media_cell::MediaCell;
 use crate::media_pool::MediaPool;
+use crate::preferences::PreferencesWindow;
 use crate::project::Project;
 use crate::scopes::ScopesPanel;
 use crate::settings_dialog::ProjectSettings;
@@ -94,12 +95,16 @@ fn templates_build() {
         .property("transient-for", &window)
         .build();
     export.load(&project);
+    let preferences = glib::Object::builder::<PreferencesWindow>()
+        .property("transient-for", &window)
+        .build();
 
     let css = gtk::CssProvider::new();
     css.load_from_resource("/io/github/feliwir/Nox/style.css");
 
     settings.destroy();
     export.destroy();
+    preferences.destroy();
     dialog.destroy();
     window.destroy();
 }

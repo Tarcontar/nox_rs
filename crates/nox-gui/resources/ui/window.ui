@@ -215,6 +215,17 @@
           </object>
         </child>
         <child type="end">
+          <object class="GtkMenuButton">
+            <property name="icon-name">open-menu-symbolic</property>
+            <property name="menu-model">primary_menu</property>
+            <property name="primary">true</property>
+            <property name="tooltip-text" translatable="yes">Main Menu</property>
+            <accessibility>
+              <property name="label" translatable="yes">Main Menu</property>
+            </accessibility>
+          </object>
+        </child>
+        <child type="end">
           <object class="GtkButton">
             <property name="label" translatable="yes">Export</property>
             <property name="action-name">win.export</property>
@@ -234,17 +245,6 @@
             <property name="tooltip-text" translatable="yes">Show Inspector</property>
             <accessibility>
               <property name="label" translatable="yes">Show Inspector</property>
-            </accessibility>
-          </object>
-        </child>
-        <child type="end">
-          <object class="GtkButton">
-            <property name="icon-name">emblem-system-symbolic</property>
-            <property name="action-name">win.project-settings</property>
-            <property name="tooltip-text" translatable="yes">Project Settings (Shift+9)</property>
-            <accessibility>
-              <property name="label" translatable="yes">Project Settings</property>
-              <property name="key-shortcuts">Shift+9</property>
             </accessibility>
           </object>
         </child>
@@ -513,4 +513,19 @@
       </object>
     </property>
   </template>
+  <menu id="primary_menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Preferences</attribute>
+        <attribute name="action">app.preferences</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Project _Settings</attribute>
+        <attribute name="action">win.project-settings</attribute>
+        <!-- Shown only: Shift+9 is the window's own key (window.rs), not
+             an application accelerator. -->
+        <attribute name="accel">&lt;Shift&gt;9</attribute>
+      </item>
+    </section>
+  </menu>
 </interface>

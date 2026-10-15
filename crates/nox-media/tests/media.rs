@@ -4,7 +4,7 @@
 mod common;
 
 use common::fixture;
-use nox_media::{Error, probe, thumbnail};
+use nox_media::{Error, ThumbnailReader, probe, thumbnail};
 use nox_project::Rational;
 use std::path::{Path, PathBuf};
 
@@ -96,6 +96,21 @@ fn probe_still_image() {
     assert_eq!(info.video.unwrap().frame_rate, None);
     let image = thumbnail(&path, 160, 90).unwrap();
     assert_eq!((image.width, image.height), (64, 48), "never upscaled");
+}
+
+/// Filmstrip thumbnails: any position, in any order, past the end too.
+#[test]
+fn thumbnail_reader_seeks_anywhere() {
+    let Some(path) = clip() else { return };
+    let mut reader = ThumbnailReader::open(&path, 160, 90).unwrap();
+    let late = reader.at(1.5).unwrap();
+    let early = reader.at(0.0).unwrap();
+    assert_eq!((early.width, early.height), (120, 90));
+    // testsrc2 moves, so different times look different...
+    assert_ne!(early.data, late.data);
+    // ...and the same time looks the same, however it was reached.
+    assert_eq!(reader.at(1.5).unwrap().data, late.data);
+    assert!(reader.at(60.0).is_ok());
 }
 
 #[test]

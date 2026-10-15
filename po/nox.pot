@@ -1094,13 +1094,7 @@ msgstr ""
 msgid "Export the timeline (Ctrl+E)"
 msgstr ""
 
-#: resources/ui/window.ui
-msgid "Project Settings (Shift+9)"
-msgstr ""
 
-#: resources/ui/window.ui
-msgid "Project Settings"
-msgstr ""
 
 #: resources/ui/window.ui
 msgid "Timeline Tools"
@@ -1445,4 +1439,76 @@ msgstr ""
 
 #: src/export_dialog.rs
 msgid "The timeline has no audio in this range"
+msgstr ""
+
+#: resources/ui/window.ui
+msgid "Main Menu"
+msgstr ""
+
+#: resources/ui/window.ui
+msgid "_Preferences"
+msgstr ""
+
+#: resources/ui/window.ui
+msgid "Project _Settings"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "Preferences"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "_Thumbnails on video clips"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "_Waveforms on audio clips"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "Playback"
+msgstr ""
+
+#: resources/ui/preferences.ui
+msgid "Video _decoding"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Decoded with {api} ({decoder})"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Decoded on the processor ({decoder})"
+msgstr ""
+
+#: src/inspector.rs
+msgid "Decoder known once a frame of the clip is shown"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Processor only"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Decodes on the graphics card where it can (Vulkan Video, then NVDEC, then VAAPI), else on the processor."
+msgstr ""
+
+#: src/preferences.rs
+msgid "Decodes on the processor: works with every file, but is much slower, especially at 4K. Try it if hardware decoding shows wrong frames."
+msgstr ""
+
+#: src/preferences.rs
+msgid "The graphics card's video engine through Vulkan, for the codecs it handles; others are decoded on the processor."
+msgstr ""
+
+#: src/preferences.rs
+msgid "NVIDIA's video engine, for the codecs it handles; others are decoded on the processor. NVIDIA cards only."
+msgstr ""
+
+#: src/preferences.rs
+msgid "The graphics card's video engine through VAAPI (AMD and Intel cards), for the codecs it handles; others are decoded on the processor."
+msgstr ""
+
+#: src/preferences.rs
+msgid "Set by the NOX_DECODE environment variable ({value}) for this session."
 msgstr ""

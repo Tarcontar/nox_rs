@@ -74,6 +74,8 @@ pub struct ExportSettings {
     pub quality: EncodeQuality,
     /// Use hardware encoders (Vulkan Video, NVENC) when available.
     pub hardware: bool,
+    /// How to decode the timeline's media.
+    pub decode: nox_media::HwDecode,
     /// Use this encoder (from `available_encoders`) rather than the first
     /// that works.
     pub encoder: Option<String>,
@@ -185,6 +187,7 @@ pub fn export(
     let with_audio = settings.audio && has_audio(timeline, &range);
     let mut renderer = Renderer::new(&[], Arc::new(AtomicBool::new(false)));
     renderer.set_output_encoding(settings.encoding)?;
+    renderer.set_hw_decode(settings.decode);
     let accel = if settings.hardware {
         renderer.accel()
     } else {

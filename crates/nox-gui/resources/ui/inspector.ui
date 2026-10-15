@@ -271,6 +271,16 @@
                             </style>
                           </object>
                         </child>
+                        <!-- How the clip's file decodes (video clips). -->
+                        <child>
+                          <object class="GtkLabel" id="decoder_label">
+                            <property name="xalign">0</property>
+                            <property name="ellipsize">end</property>
+                            <style>
+                              <class name="dim-label"/>
+                            </style>
+                          </object>
+                        </child>
                       </object>
                     </child>
                     <child>
