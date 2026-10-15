@@ -7,7 +7,8 @@
 //! frames are read back. Audio is mixed frame by frame alongside.
 
 use nox_media::{
-    EncodeQuality, EncoderProbe, MediaWriter, OutputEncoding, OutputSettings, VideoCodec,
+    AudioCodec, Container, EncodeQuality, EncoderProbe, MediaWriter, OutputEncoding,
+    OutputSettings, VideoCodec,
 };
 use nox_project::{Time, Timeline};
 use std::ops::Range;
@@ -68,6 +69,8 @@ pub const EXPORT_AUDIO_RATE: u32 = 48_000;
 pub struct ExportSettings {
     pub path: PathBuf,
     pub codec: VideoCodec,
+    /// The file format; `None` for the one the extension names.
+    pub container: Option<Container>,
     pub quality: EncodeQuality,
     /// Use hardware encoders (Vulkan Video, NVENC) when available.
     pub hardware: bool,
@@ -77,6 +80,8 @@ pub struct ExportSettings {
     /// Sequence frames to export; `None` for all.
     pub range: Option<Range<i64>>,
     pub audio: bool,
+    /// The audio codec; `None` for the container's usual one.
+    pub audio_codec: Option<AudioCodec>,
     /// SDR, or HDR10 (PQ) or HLG in BT.2020 (HEVC and ProRes only).
     pub encoding: nox_media::OutputEncoding,
     /// Peak of the mastering display written for HDR10, in nits.
@@ -191,11 +196,13 @@ pub fn export(
         height,
         frame_rate: fps,
         codec: settings.codec,
+        container: settings.container,
         quality: settings.quality,
         hardware: settings.hardware,
         encoder: settings.encoder.clone(),
         accel,
         audio_rate: with_audio.then_some(EXPORT_AUDIO_RATE),
+        audio_codec: settings.audio_codec,
         encoding: settings.encoding,
         peak_nits: settings.peak_nits,
     };

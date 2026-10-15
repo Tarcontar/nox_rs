@@ -33,7 +33,7 @@ impl AudioDecoder {
     /// Opens `path`; samples come out at `rate` Hz.
     pub fn open(path: &Path, rate: u32) -> Result<Self> {
         crate::init();
-        let input = format::input(path)?;
+        let mut input = format::input(path)?;
         let stream = input
             .streams()
             .best(media::Type::Audio)
@@ -46,6 +46,12 @@ impl AudioDecoder {
         };
         let context = codec::Context::from_parameters(stream.parameters())?;
         let decoder = context.decoder().audio()?;
+        // Only the audio is read: less to demux, and Matroska's seeks
+        // otherwise stop at video blocks ("keyframes not correctly marked").
+        for mut other in input.streams_mut().filter(|s| s.index() != stream_index) {
+            // SAFETY: the stream's own field, before reading packets.
+            unsafe { (*other.as_mut_ptr()).discard = ffi::AVDiscard::AVDISCARD_ALL };
+        }
         Ok(Self {
             input,
             decoder,

@@ -4,7 +4,7 @@
 #       build/flatpak packaging/flatpak/io.github.feliwir.Nox.yml
 #
 # FFmpeg is built here, with x264, x265 (8 and 10 bit), NVENC, Vulkan and
-# VAAPI. The runtime's codecs-extra FFmpeg would do, but its NVENC needs
+# VAAPI; dav1d, SVT-AV1, libvpx, libjxl, Opus and LAME come from the SDK. The runtime's codecs-extra FFmpeg would do, but its NVENC needs
 # NVIDIA's driver 610 or newer (nv-codec-headers 13.1); ours uses
 # nv-codec-headers 13.0 (driver 570 or newer). Crates are vendored from
 # cargo-sources.json (`cargo xtask flatpak-sources` after dependency
@@ -97,6 +97,11 @@ modules:
       - --enable-libx264
       - --enable-libx265
       - --enable-libdav1d
+      - --enable-libsvtav1
+      - --enable-libvpx
+      - --enable-libjxl
+      - --enable-libopus
+      - --enable-libmp3lame
       - --enable-ffnvcodec
       - --enable-nvenc
       - --enable-nvdec

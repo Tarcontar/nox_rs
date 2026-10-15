@@ -18,6 +18,11 @@ const THUMBNAIL_MIN_SECONDS: f64 = 1.0;
 pub fn thumbnail(path: &Path, max_width: u32, max_height: u32) -> Result<Image> {
     crate::init();
     let mut input = format::input(path)?;
+    // A photo in tiles (HEIC): the whole picture, not its first tile.
+    if let Some(grid) = crate::tiles::tile_grid(&input) {
+        let picture = grid.decode(&mut input)?;
+        return scale(&picture, max_width, max_height);
+    }
     let stream = input
         .streams()
         .best(media::Type::Video)

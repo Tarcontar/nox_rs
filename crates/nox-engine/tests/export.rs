@@ -62,11 +62,13 @@ fn settings(name: &str, codec: VideoCodec, hardware: bool) -> ExportSettings {
     ExportSettings {
         path: PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name),
         codec,
+        container: None,
         quality: EncodeQuality::High,
         hardware,
         encoder: None,
         range: None,
         audio: true,
+        audio_codec: None,
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
     }
@@ -123,7 +125,11 @@ fn check(name: &str, codec: VideoCodec, hardware: bool) -> Option<&'static str> 
     let mut samples = vec![0f32; 2 * 4800];
     audio.read(48_000, &mut samples).unwrap(); // 1.0–1.1 s: the tone
     let level = samples.iter().sum::<f32>() / samples.len() as f32;
-    assert!((level - 0.5).abs() < 0.02, "{name}: tone {level}");
+    // The tone is a constant level, which Opus (WebM) doesn't keep: lossy
+    // audio codecs drop DC. AAC and PCM do.
+    if codec != VideoCodec::Vp9 {
+        assert!((level - 0.5).abs() < 0.02, "{name}: tone {level}");
+    }
     audio.read(2 * 48_000 + 24_000, &mut samples).unwrap(); // 2.5 s: silence
     assert!(samples.iter().all(|s| s.abs() < 0.01), "{name}: silence");
     Some(summary.encoder)
@@ -139,6 +145,37 @@ fn hardware_export_is_zero_copy_when_possible() {
 fn software_export() {
     // `None`: skipped (no ffmpeg CLI for the test clips).
     if let Some(encoder) = check("export-sw.mp4", VideoCodec::H264, false) {
+        assert_eq!(encoder, "libx264");
+    }
+}
+
+/// WebM: VP9 with Opus audio.
+#[test]
+fn webm_export() {
+    if let Some(encoder) = check("export.webm", VideoCodec::Vp9, false) {
+        assert_eq!(encoder, "libvpx-vp9");
+    }
+}
+
+#[test]
+fn av1_export() {
+    if let Some(encoder) = check("export-av1.mp4", VideoCodec::Av1, false) {
+        assert_eq!(encoder, "libsvtav1");
+    }
+}
+
+/// Matroska: HEVC with AAC audio.
+#[test]
+fn mkv_export() {
+    if let Some(encoder) = check("export.mkv", VideoCodec::Hevc, false) {
+        assert_eq!(encoder, "libx265");
+    }
+}
+
+/// AVI: H.264 with PCM audio.
+#[test]
+fn avi_export() {
+    if let Some(encoder) = check("export.avi", VideoCodec::H264, false) {
         assert_eq!(encoder, "libx264");
     }
 }

@@ -139,9 +139,12 @@ jobs:
     needs: [linux-zip, flatpak, windows, macos]
     runs-on: ubuntu-24.04
     steps:
+      # Our packages only, not other jobs' artifacts (e.g. Docker build
+      # records).
       - uses: actions/download-artifact@v4
         with:
           path: packages
+          pattern: '{linux-zip,flatpak,windows-*,macos-*}'
           merge-multiple: true
       - name: Checksums
         working-directory: packages

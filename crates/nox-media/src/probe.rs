@@ -62,7 +62,13 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
         .collect::<Result<Vec<_>>>()?;
 
     let container = input.format().name().to_owned();
-    let is_image = is_image_demuxer(&container);
+    // Photos in tiles (HEIC): the picture's size, not a tile's.
+    let grid = crate::tiles::tile_grid(&input);
+    if let (Some(video), Some(grid)) = (video.as_mut(), &grid) {
+        video.width = grid.width;
+        video.height = grid.height;
+    }
+    let is_image = is_image_demuxer(&container) || grid.is_some();
     if let Some(video) = video.as_mut().filter(|_| is_image) {
         video.frame_rate = None;
     }

@@ -43,6 +43,18 @@ msgstr "ProRes 422 HQ (zum Schneiden)"
 msgid "Review copy (small)"
 msgstr "Vorschaukopie (klein)"
 
+#: src/export_dialog.rs
+msgid "Web, smallest files (AV1)"
+msgstr "Web, kleinste Dateien (AV1)"
+
+#: src/export_dialog.rs
+msgid "Encodes AV1 on the processor: much smaller files than H.264 at the same quality, for the web, but slower to encode, and older devices may not play them."
+msgstr "Kodiert AV1 auf dem Prozessor: viel kleinere Dateien als H.264 bei gleicher Qualität, für das Web, aber langsamer, und ältere Geräte spielen sie eventuell nicht ab."
+
+#: src/export_dialog.rs
+msgid "Encodes VP9 on the processor, for WebM files that every browser plays: smaller than H.264, but slow to encode."
+msgstr "Kodiert VP9 auf dem Prozessor, für WebM-Dateien, die jeder Browser abspielt: kleiner als H.264, aber langsam beim Kodieren."
+
 #: src/export_dialog.rs:35 src/settings_dialog.rs:124
 msgid "Custom"
 msgstr "Benutzerdefiniert"
@@ -572,8 +584,12 @@ msgid "_Browse…"
 msgstr "Durch_suchen …"
 
 #: resources/ui/export-dialog.ui:86
-msgid "Fo_rmat"
-msgstr "_Format"
+msgid "Con_tainer"
+msgstr "Con_tainer"
+
+#: resources/ui/export-dialog.ui:102
+msgid "_Video codec"
+msgstr "_Videocodec"
 
 #: resources/ui/export-dialog.ui:102
 msgid "_Quality"
@@ -620,8 +636,20 @@ msgid "Uses the fastest encoder that works, now {encoder}."
 msgstr "Verwendet den schnellsten Encoder, der funktioniert, derzeit {encoder}."
 
 #: src/export_dialog.rs
-msgid "No encoder for this format works on this computer."
-msgstr "Kein Encoder für dieses Format funktioniert auf diesem Computer."
+msgid "No encoder for this codec works on this computer."
+msgstr "Kein Encoder für diesen Codec funktioniert auf diesem Computer."
+
+#: resources/ui/export-dialog.ui
+msgid "A_udio codec"
+msgstr "A_udiocodec"
+
+#: src/export_dialog.rs
+msgid "{codec} (lossless)"
+msgstr "{codec} (verlustfrei)"
+
+#: src/export_dialog.rs
+msgid "{codec} (uncompressed)"
+msgstr "{codec} (unkomprimiert)"
 
 #: src/export_dialog.rs
 msgid "Frames go through system memory on the way, which is slower."

@@ -44,6 +44,18 @@ msgstr ""
 msgid "Review copy (small)"
 msgstr ""
 
+#: src/export_dialog.rs
+msgid "Web, smallest files (AV1)"
+msgstr ""
+
+#: src/export_dialog.rs
+msgid "Encodes AV1 on the processor: much smaller files than H.264 at the same quality, for the web, but slower to encode, and older devices may not play them."
+msgstr ""
+
+#: src/export_dialog.rs
+msgid "Encodes VP9 on the processor, for WebM files that every browser plays: smaller than H.264, but slow to encode."
+msgstr ""
+
 #: src/export_dialog.rs:35 src/settings_dialog.rs:124
 msgid "Custom"
 msgstr ""
@@ -573,7 +585,11 @@ msgid "_Browse…"
 msgstr ""
 
 #: resources/ui/export-dialog.ui:86
-msgid "Fo_rmat"
+msgid "Con_tainer"
+msgstr ""
+
+#: resources/ui/export-dialog.ui:102
+msgid "_Video codec"
 msgstr ""
 
 #: resources/ui/export-dialog.ui:102
@@ -621,7 +637,19 @@ msgid "Uses the fastest encoder that works, now {encoder}."
 msgstr ""
 
 #: src/export_dialog.rs
-msgid "No encoder for this format works on this computer."
+msgid "No encoder for this codec works on this computer."
+msgstr ""
+
+#: resources/ui/export-dialog.ui
+msgid "A_udio codec"
+msgstr ""
+
+#: src/export_dialog.rs
+msgid "{codec} (lossless)"
+msgstr ""
+
+#: src/export_dialog.rs
+msgid "{codec} (uncompressed)"
 msgstr ""
 
 #: src/export_dialog.rs

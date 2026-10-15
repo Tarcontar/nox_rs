@@ -17,7 +17,7 @@ pub use export::{
 pub use nox_gpu::{
     DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F, Image, ScopeImages, scope_sizes,
 };
-pub use nox_media::{EncodeQuality, EncoderProbe, VideoCodec};
+pub use nox_media::{AudioCodec, Container, EncodeQuality, EncoderProbe, VideoCodec};
 
 /// Display-referred RGBA at the requested output size.
 #[derive(Debug)]

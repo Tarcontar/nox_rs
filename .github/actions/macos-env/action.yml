@@ -10,7 +10,8 @@ runs:
       shell: bash
       run: |
         brew install gtk4 librsvg adwaita-icon-theme gettext glslang pkgconf \
-            x264 x265 dav1d nasm molten-vk vulkan-loader vulkan-headers
+            x264 x265 dav1d svt-av1 libvpx jpeg-xl opus lame nasm \
+            molten-vk vulkan-loader vulkan-headers
     - name: FFmpeg cache
       id: ffmpeg
       uses: actions/cache@v4

@@ -2,12 +2,14 @@
 # Builds the FFmpeg Nox ships, the same everywhere (the Flatpak manifest
 # mirrors these options): FFmpeg 9.0.2 with x264, x265, dav1d and the
 # platform's hardware APIs, NVENC for drivers from 570 on (nv-codec-headers
-# 13.0; FFmpeg's newest headers would need 610).
+# 13.0; FFmpeg's newest headers would need 610). Besides FFmpeg's own
+# codecs: x264, x265, dav1d (AV1 decoding), SVT-AV1 (AV1 encoding), libvpx
+# (VP8/VP9 encoding), libjxl (JPEG XL), Opus and LAME (MP3 encoding).
 #
 #   packaging/ffmpeg/build.sh PREFIX
 #
-# Needs a C compiler, make, nasm, pkg-config and git, with x264, x265 and
-# dav1d (and on Linux libva, Vulkan headers) where pkg-config finds them.
+# Needs a C compiler, make, nasm, pkg-config and git, with those libraries
+# (and on Linux libva, Vulkan headers) where pkg-config finds them.
 # Used by the Linux build image, CI's Windows (MSYS2) and macOS jobs.
 set -eu
 
@@ -23,7 +25,9 @@ cd "$work"
 # The ffmpeg CLI too: tests make their clips with it (packages don't
 # include it).
 options="--prefix=$PREFIX --enable-shared --disable-static --disable-ffplay
-    --disable-doc --enable-gpl --enable-libx264 --enable-libx265 --enable-libdav1d"
+    --disable-doc --enable-gpl --enable-libx264 --enable-libx265 --enable-libdav1d
+    --enable-libsvtav1 --enable-libvpx --enable-libjxl --enable-libopus
+    --enable-libmp3lame"
 case "$(uname -s)" in
     Linux)
         options="$options --enable-vulkan --enable-vaapi"

@@ -1,13 +1,17 @@
-//! The export dialog (`resources/ui/export-dialog.ui`): where to, in which
-//! format and quality, the encoder, the whole timeline or the In to Out
+//! The export dialog (`resources/ui/export-dialog.ui`): where to, the
+//! container (in step with the file's extension, both ways), the video
+//! codecs and audio codecs it holds, quality, the encoder, the whole timeline or the In to Out
 //! range, then a progress bar while the timeline renders on its own thread.
 //!
 //! The encoder list offers only encoders that work on this system for the
-//! chosen format and dynamic range (`nox_engine::available_encoders`, probed
+//! chosen codec and dynamic range (`nox_engine::available_encoders`, probed
 //! on a thread when the dialog first opens), each with what it's good at.
 
 use gtk::{CompositeTemplate, gio, glib, prelude::*, subclass::prelude::*};
-use nox_engine::{EncodeQuality, EncoderProbe, Export, ExportEvent, ExportSettings, VideoCodec};
+use nox_engine::{
+    AudioCodec, Container, EncodeQuality, EncoderProbe, Export, ExportEvent, ExportSettings,
+    VideoCodec,
+};
 use nox_media::OutputEncoding;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -17,12 +21,13 @@ use std::sync::Arc;
 use crate::i18n::{fill, gettext, n_, ngettext};
 use crate::project::Project;
 
-/// Formats offered: label and codec (the container follows the codec).
-const FORMATS: &[(&str, VideoCodec)] = &[
-    ("MP4 – H.264", VideoCodec::H264),
-    ("MP4 – HEVC (H.265)", VideoCodec::Hevc),
-    ("QuickTime – ProRes 422", VideoCodec::ProRes),
-];
+/// How the codec list names a codec.
+fn codec_label(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::Hevc => "HEVC (H.265)",
+        codec => codec.name(),
+    }
+}
 const QUALITIES: &[(&str, EncodeQuality)] = &[
     (n_("High"), EncodeQuality::High),
     (n_("Medium"), EncodeQuality::Medium),
@@ -36,39 +41,60 @@ const RANGES: &[(&str, OutputEncoding)] = &[
     (n_("HLG (Rec. 2020)"), OutputEncoding::Hlg),
 ];
 
+/// How the audio codec list names a codec.
+fn audio_label(codec: AudioCodec) -> String {
+    match codec {
+        AudioCodec::Flac => fill(&gettext("{codec} (lossless)"), &[("codec", &codec.name())]),
+        AudioCodec::Pcm16 | AudioCodec::Pcm24 => fill(
+            &gettext("{codec} (uncompressed)"),
+            &[("codec", &codec.name())],
+        ),
+        codec => codec.name().to_owned(),
+    }
+}
+
 /// Presets, as other editors lead with (Resolve's Deliver page, Shotcut's
-/// preset list): name, format index, quality index, dynamic range index.
-/// Presets pick the encoder automatically. "Custom" is selected when the
-/// settings below are changed by hand.
-const PRESETS: &[(&str, usize, usize, usize)] = &[
-    (n_("H.264 Master"), 0, 0, 0),
-    (n_("YouTube / Web (H.264)"), 0, 1, 0),
-    (n_("HEVC (smaller files)"), 1, 0, 0),
-    (n_("HDR10 Master (HEVC)"), 1, 0, 1),
-    (n_("HLG for broadcast and phones (HEVC)"), 1, 0, 2),
-    (n_("ProRes 422 HQ (for editing)"), 2, 0, 0),
-    (n_("Review copy (small)"), 0, 2, 0),
-    (n_("Custom"), usize::MAX, usize::MAX, 0),
-];
+/// preset list): name, then container, codec, quality index and dynamic
+/// range index (`None` for Custom). Presets pick the encoder automatically.
+/// "Custom" is selected when the settings below are changed by hand.
+type Preset = (Container, VideoCodec, u32, u32);
+const PRESETS: &[(&str, Option<Preset>)] = {
+    use Container::{Mov, Mp4};
+    use VideoCodec::{Av1, H264, Hevc, ProRes};
+    &[
+        (n_("H.264 Master"), Some((Mp4, H264, 0, 0))),
+        (n_("YouTube / Web (H.264)"), Some((Mp4, H264, 1, 0))),
+        (n_("HEVC (smaller files)"), Some((Mp4, Hevc, 0, 0))),
+        (n_("HDR10 Master (HEVC)"), Some((Mp4, Hevc, 0, 1))),
+        (
+            n_("HLG for broadcast and phones (HEVC)"),
+            Some((Mp4, Hevc, 0, 2)),
+        ),
+        (n_("ProRes 422 HQ (for editing)"), Some((Mov, ProRes, 0, 0))),
+        (n_("Review copy (small)"), Some((Mp4, H264, 2, 0))),
+        (n_("Web, smallest files (AV1)"), Some((Mp4, Av1, 1, 0))),
+        (n_("Custom"), None),
+    ]
+};
 
 /// How the encoder list names an FFmpeg encoder, and what it's good at
 /// (empty if unknown). Product names stay as they are; encoders without an
 /// entry show FFmpeg's name.
 fn encoder_text(name: &'static str) -> (&'static str, &'static str) {
     match name {
-        "h264_vulkan" | "hevc_vulkan" => (
+        "h264_vulkan" | "hevc_vulkan" | "av1_vulkan" => (
             "Vulkan Video (GPU)",
             n_(
                 "Encodes on the graphics card's video engine, and the frames never leave the card: the fastest choice, on AMD, Intel and NVIDIA cards. Files are somewhat larger than from a software encoder at the same quality.",
             ),
         ),
-        "h264_nvenc" | "hevc_nvenc" => (
+        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => (
             "NVENC (NVIDIA GPU)",
             n_(
                 "NVIDIA's video engine: very fast, with better quality for the size than most hardware encoders. NVIDIA cards only.",
             ),
         ),
-        "h264_vaapi" | "hevc_vaapi" => (
+        "h264_vaapi" | "hevc_vaapi" | "av1_vaapi" | "vp9_vaapi" => (
             "VAAPI (GPU)",
             n_(
                 "The graphics card's video engine through VAAPI, Linux's video interface for AMD and Intel cards: fast, and the frames never leave the card. Files are somewhat larger than from a software encoder at the same quality.",
@@ -92,13 +118,21 @@ fn encoder_text(name: &'static str) -> (&'static str, &'static str) {
                 "Encodes on the processor: large files that decode easily, made for editing and grading in other applications rather than for watching.",
             ),
         ),
+        "libsvtav1" => (
+            "SVT-AV1 (CPU)",
+            n_(
+                "Encodes AV1 on the processor: much smaller files than H.264 at the same quality, for the web, but slower to encode, and older devices may not play them.",
+            ),
+        ),
+        "libvpx-vp9" => (
+            "libvpx (CPU)",
+            n_(
+                "Encodes VP9 on the processor, for WebM files that every browser plays: smaller than H.264, but slow to encode.",
+            ),
+        ),
         _ => (name, ""),
     }
 }
-
-/// Index of H.264 in `FORMATS` (SDR only) and of HEVC (HDR's default).
-const H264: u32 = 0;
-const HEVC: u32 = 1;
 
 fn string_list<'a>(names: impl Iterator<Item = &'a str>, translate: bool) -> gtk::StringList {
     let names: Vec<String> = names
@@ -121,7 +155,9 @@ mod imp {
         #[template_child]
         pub path: TemplateChild<gtk::Entry>,
         #[template_child]
-        pub format: TemplateChild<gtk::DropDown>,
+        pub container: TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub codec: TemplateChild<gtk::DropDown>,
         #[template_child]
         pub dynamic_range: TemplateChild<gtk::DropDown>,
         #[template_child]
@@ -138,6 +174,8 @@ mod imp {
         pub encoder_info: TemplateChild<gtk::Label>,
         #[template_child]
         pub audio: TemplateChild<gtk::CheckButton>,
+        #[template_child]
+        pub audio_codec: TemplateChild<gtk::DropDown>,
         #[template_child]
         pub range: TemplateChild<gtk::DropDown>,
         #[template_child]
@@ -163,6 +201,12 @@ mod imp {
         pub applying: Cell<bool>,
         /// Set while the encoder list is refilled.
         pub listing: Cell<bool>,
+        /// The codecs listed: those the container holds.
+        pub codecs: RefCell<Vec<VideoCodec>>,
+        /// The audio codecs listed: those the container holds.
+        pub audio_codecs: RefCell<Vec<AudioCodec>>,
+        /// Set while the codec list is refilled.
+        pub refilling: Cell<bool>,
         /// The encoders listed after "Automatic"; `None` while they're
         /// being probed.
         pub encoders: RefCell<Option<Vec<EncoderProbe>>>,
@@ -235,23 +279,38 @@ impl ExportDialog {
         let imp = self.imp();
         imp.preset
             .set_model(Some(&string_list(PRESETS.iter().map(|p| p.0), true)));
-        // Format names are technical and stay as they are.
-        imp.format
-            .set_model(Some(&string_list(FORMATS.iter().map(|f| f.0), false)));
+        // Container and codec names are technical and stay as they are.
+        imp.container.set_model(Some(&string_list(
+            Container::ALL.iter().map(|c| c.name()),
+            false,
+        )));
         imp.quality
             .set_model(Some(&string_list(QUALITIES.iter().map(|q| q.0), true)));
         imp.dynamic_range
             .set_model(Some(&string_list(RANGES.iter().map(|r| r.0), true)));
+        self.list_codecs();
+        self.list_audio_codecs(true);
         self.show_peak();
-        // HDR needs HEVC or ProRes: choosing HDR leaves H.264, and choosing
+        // HDR needs a codec that carries it (not H.264): choosing HDR
+        // leaves H.264 (and AVI, which holds nothing else), and choosing
         // H.264 goes back to SDR.
         imp.dynamic_range.connect_selected_notify(glib::clone!(
             #[weak(rename_to = dialog)]
             self,
             move |range| {
-                let imp = dialog.imp();
-                if range.selected() != 0 && imp.format.selected() == H264 {
-                    imp.format.set_selected(HEVC);
+                if range.selected() != 0 && !dialog.codec().does_hdr() {
+                    if !dialog.container().codecs().iter().any(|c| c.does_hdr()) {
+                        dialog.set_container(Container::Mp4);
+                    }
+                    let hdr = dialog
+                        .container()
+                        .codecs()
+                        .iter()
+                        .copied()
+                        .find(|c| c.does_hdr());
+                    if let Some(codec) = hdr {
+                        dialog.set_codec(codec);
+                    }
                 }
                 dialog.show_peak();
                 dialog.list_encoders();
@@ -265,20 +324,49 @@ impl ExportDialog {
             move |_| dialog.to_custom()
         ));
 
-        // Keep the extension in step with the format.
-        imp.format.connect_selected_notify(glib::clone!(
+        // The extension follows the container, and the codecs are the
+        // ones it holds.
+        imp.container.connect_selected_notify(glib::clone!(
             #[weak(rename_to = dialog)]
             self,
-            move |format| {
-                let codec = FORMATS[format.selected() as usize].1;
+            move |_| {
+                let container = dialog.container();
+                let entry = &dialog.imp().path;
+                let mut path = PathBuf::from(entry.text().as_str());
+                // .m4v stays .m4v: it's MP4 already.
+                if Container::for_path(&path) != Some(container) {
+                    path.set_extension(container.extension());
+                    entry.set_text(&path.to_string_lossy());
+                }
+                dialog.list_codecs();
+                dialog.list_audio_codecs(false);
+                dialog.list_encoders();
+                dialog.to_custom();
+            }
+        ));
+        // And the container follows the extension typed or browsed to.
+        imp.path.connect_changed(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |entry| {
+                if let Some(container) = Container::for_path(entry.text().as_str().as_ref())
+                    && container != dialog.container()
+                {
+                    dialog.set_container(container);
+                }
+            }
+        ));
+        imp.codec.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| {
                 let imp = dialog.imp();
-                if format.selected() == H264 && imp.dynamic_range.selected() != 0 {
+                if imp.refilling.get() {
+                    return;
+                }
+                if !dialog.codec().does_hdr() && imp.dynamic_range.selected() != 0 {
                     imp.dynamic_range.set_selected(0);
                 }
-                let entry = &imp.path;
-                let mut path = PathBuf::from(entry.text().as_str());
-                path.set_extension(codec.extension());
-                entry.set_text(&path.to_string_lossy());
                 dialog.list_encoders();
                 dialog.to_custom();
             }
@@ -288,12 +376,35 @@ impl ExportDialog {
             self,
             move |_| dialog.to_custom()
         ));
+        imp.audio_codec.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| {
+                if !dialog.imp().refilling.get() {
+                    dialog.to_custom();
+                }
+            }
+        ));
+        // No audio, no codec for it.
+        for property in ["active", "sensitive"] {
+            imp.audio.connect_notify_local(
+                Some(property),
+                glib::clone!(
+                    #[weak(rename_to = dialog)]
+                    self,
+                    move |audio, _| dialog
+                        .imp()
+                        .audio_codec
+                        .set_sensitive(audio.is_active() && audio.is_sensitive())
+                ),
+            );
+        }
         imp.encoder.connect_selected_notify(glib::clone!(
             #[weak(rename_to = dialog)]
             self,
             move |_| {
                 dialog.explain_encoder();
-                // Following a format change isn't a choice.
+                // Following a codec change isn't a choice.
                 if !dialog.imp().listing.get() {
                     dialog.to_custom();
                 }
@@ -319,31 +430,115 @@ impl ExportDialog {
             #[weak(rename_to = dialog)]
             self,
             move |preset| {
-                let (_, f, q, r) = PRESETS[preset.selected() as usize];
-                if f == usize::MAX {
+                let Some((container, codec, quality, range)) =
+                    PRESETS[preset.selected() as usize].1
+                else {
                     return;
-                }
+                };
                 let imp = dialog.imp();
                 imp.applying.set(true);
-                // The range first: an HDR range moves the format off H.264.
-                imp.dynamic_range.set_selected(r as u32);
-                imp.format.set_selected(f as u32);
-                imp.quality.set_selected(q as u32);
+                // The range first: an HDR range moves the codec off H.264.
+                imp.dynamic_range.set_selected(range);
+                dialog.set_container(container);
+                dialog.set_codec(codec);
+                dialog.list_audio_codecs(true);
+                imp.quality.set_selected(quality);
                 imp.encoder.set_selected(0);
                 imp.applying.set(false);
             }
         ));
     }
 
+    fn container(&self) -> Container {
+        Container::ALL[self.imp().container.selected() as usize]
+    }
+
+    fn set_container(&self, container: Container) {
+        let index = Container::ALL.iter().position(|&c| c == container);
+        self.imp().container.set_selected(index.unwrap_or(0) as u32);
+    }
+
     fn codec(&self) -> VideoCodec {
-        FORMATS[self.imp().format.selected() as usize].1
+        let imp = self.imp();
+        let codecs = imp.codecs.borrow();
+        codecs
+            .get(imp.codec.selected() as usize)
+            .or(codecs.first())
+            .copied()
+            .unwrap_or(VideoCodec::H264)
+    }
+
+    fn set_codec(&self, codec: VideoCodec) {
+        let imp = self.imp();
+        let index = imp.codecs.borrow().iter().position(|&c| c == codec);
+        if let Some(index) = index {
+            imp.codec.set_selected(index as u32);
+        }
+    }
+
+    fn audio_codec(&self) -> AudioCodec {
+        let imp = self.imp();
+        let codecs = imp.audio_codecs.borrow();
+        codecs
+            .get(imp.audio_codec.selected() as usize)
+            .copied()
+            .unwrap_or_else(|| self.container().default_audio(self.codec()))
+    }
+
+    /// Lists the audio codecs the container holds, keeping the chosen one
+    /// if it's there (unless `usual`), else the one that usually goes with
+    /// the video codec.
+    fn list_audio_codecs(&self, usual: bool) {
+        let imp = self.imp();
+        let previous =
+            (!usual && !imp.audio_codecs.borrow().is_empty()).then(|| self.audio_codec());
+        let container = self.container();
+        let codecs = container.audio_codecs();
+        let wanted = previous
+            .filter(|&c| container.holds_audio(c))
+            .unwrap_or_else(|| container.default_audio(self.codec()));
+        let labels: Vec<String> = codecs.iter().map(|&c| audio_label(c)).collect();
+        imp.refilling.set(true);
+        imp.audio_codecs.replace(codecs.to_vec());
+        imp.audio_codec
+            .set_model(Some(&string_list(labels.iter().map(String::as_str), false)));
+        let index = codecs.iter().position(|&c| c == wanted).unwrap_or(0);
+        imp.audio_codec.set_selected(index as u32);
+        imp.refilling.set(false);
+    }
+
+    /// Lists the codecs the container holds, keeping the chosen one if
+    /// it's there, else its usual one (one that carries HDR when that's
+    /// chosen).
+    fn list_codecs(&self) {
+        let imp = self.imp();
+        let previous = self.codec();
+        let codecs = self.container().codecs();
+        let hdr = imp.dynamic_range.selected() != 0;
+        let selected = codecs
+            .iter()
+            .position(|&c| c == previous)
+            .or_else(|| codecs.iter().position(|c| !hdr || c.does_hdr()))
+            .unwrap_or(0);
+        imp.refilling.set(true);
+        imp.codecs.replace(codecs.to_vec());
+        imp.codec.set_model(Some(&string_list(
+            codecs.iter().map(|&c| codec_label(c)),
+            false,
+        )));
+        imp.codec.set_selected(selected as u32);
+        imp.refilling.set(false);
+        // AVI holds H.264 only, which is SDR.
+        if hdr && !self.codec().does_hdr() {
+            imp.dynamic_range.set_selected(0);
+        }
     }
 
     fn encoding(&self) -> OutputEncoding {
         RANGES[self.imp().dynamic_range.selected() as usize].1
     }
 
-    /// Lists the encoders that work for the format and dynamic range,
+    /// Lists the encoders that work for the codec and dynamic range,
     /// keeping the chosen one if it's still there.
     fn list_encoders(&self) {
         let imp = self.imp();
@@ -385,7 +580,7 @@ impl ExportDialog {
                     &gettext("Uses the fastest encoder that works, now {encoder}."),
                     &[("encoder", &encoder_text(best.name).0)],
                 ),
-                None => gettext("No encoder for this format works on this computer."),
+                None => gettext("No encoder for this codec works on this computer."),
             },
             (Some(_), Some(chosen)) => {
                 // gettext("") would be the catalog's header.
@@ -588,12 +783,14 @@ impl ExportDialog {
         }
         let settings = ExportSettings {
             path,
-            codec: FORMATS[imp.format.selected() as usize].1,
+            codec: self.codec(),
+            container: Some(self.container()),
             quality: QUALITIES[imp.quality.selected() as usize].1,
             hardware: true,
             encoder: self.chosen_encoder().map(|e| e.name.to_owned()),
             range: Some(self.range()),
             audio: imp.audio.is_active(),
+            audio_codec: Some(self.audio_codec()),
             encoding: RANGES[imp.dynamic_range.selected() as usize].1,
             peak_nits: imp.peak.value() as f32,
         };

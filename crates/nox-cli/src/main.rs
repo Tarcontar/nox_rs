@@ -1,4 +1,4 @@
-use nox_engine::{EncodeQuality, ExportSettings, VideoCodec};
+use nox_engine::{AudioCodec, Container, EncodeQuality, ExportSettings, VideoCodec};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,8 +11,11 @@ commands:
   encoders         list the encoders that work on this system
   render <project.otio> <output> [options]
                    render a timeline to a file (container from the
-                   extension: .mp4, .mov, .mkv)
-    --codec h264|hevc|prores   (default: h264, or prores for .mov)
+                   extension: .mp4, .mov, .mkv, .webm, .avi)
+    --codec h264|hevc|prores|av1|vp9
+                               (default: h264; prores for .mov, vp9 for .webm)
+    --audio aac|opus|mp3|flac|pcm16|pcm24
+                               audio codec (default: the container's usual)
     --quality high|medium|low  (default: high)
     --software                 no hardware encoders
     --encoder NAME             this encoder (see `encoders`), e.g. hevc_nvenc
@@ -116,21 +119,18 @@ fn print_info(info: &nox_media::MediaInfo) {
 fn render(args: &[String]) -> Result<(), String> {
     let project = Path::new(&args[0]);
     let output = PathBuf::from(&args[1]);
-    let is_mov = output
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mov"));
+    let container = Container::for_path(&output);
     let mut settings = ExportSettings {
         path: output.clone(),
-        codec: if is_mov {
-            VideoCodec::ProRes
-        } else {
-            VideoCodec::H264
-        },
+        // The container's usual codec.
+        codec: container.map_or(VideoCodec::H264, |c| c.codecs()[0]),
+        container,
         quality: EncodeQuality::High,
         hardware: true,
         encoder: None,
         range: None,
         audio: true,
+        audio_codec: None,
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
     };
@@ -146,8 +146,21 @@ fn render(args: &[String]) -> Result<(), String> {
                     "h264" => VideoCodec::H264,
                     "hevc" => VideoCodec::Hevc,
                     "prores" => VideoCodec::ProRes,
+                    "av1" => VideoCodec::Av1,
+                    "vp9" => VideoCodec::Vp9,
                     other => return Err(format!("unknown codec {other}")),
                 }
+            }
+            "--audio" => {
+                settings.audio_codec = Some(match value()?.as_str() {
+                    "aac" => AudioCodec::Aac,
+                    "opus" => AudioCodec::Opus,
+                    "mp3" => AudioCodec::Mp3,
+                    "flac" => AudioCodec::Flac,
+                    "pcm16" => AudioCodec::Pcm16,
+                    "pcm24" => AudioCodec::Pcm24,
+                    other => return Err(format!("unknown audio codec {other}")),
+                })
             }
             "--quality" => {
                 settings.quality = match value()?.as_str() {
@@ -189,7 +202,7 @@ fn render(args: &[String]) -> Result<(), String> {
         }
     }
     // HDR is HEVC unless the codec was chosen (H.264 is SDR only).
-    if settings.encoding.is_hdr() && !codec_given && settings.codec == VideoCodec::H264 {
+    if settings.encoding.is_hdr() && !codec_given && !settings.codec.does_hdr() {
         settings.codec = VideoCodec::Hevc;
     }
     let timeline =

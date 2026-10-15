@@ -10,13 +10,14 @@ mod hw;
 mod hwaccel;
 mod probe;
 mod thumbnail;
+mod tiles;
 pub mod waveform;
 
 pub use audio::{AudioDecoder, CHANNELS};
 pub use decode::{HwDecode, VideoDecoder};
 pub use encode::{
-    EncoderProbe, MediaWriter, OutputSettings, Quality as EncodeQuality, VideoCodec, container_for,
-    probe_encoders,
+    AudioCodec, Container, EncoderProbe, MediaWriter, OutputSettings, Quality as EncodeQuality,
+    VideoCodec, container_for, probe_encoders,
 };
 pub use ffmpeg;
 pub use frames::{

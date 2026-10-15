@@ -3,8 +3,8 @@
 mod common;
 
 use nox_media::{
-    AudioDecoder, EncodeQuality, Image, MediaWriter, OutputSettings, VideoCodec, VideoDecoder,
-    probe,
+    AudioCodec, AudioDecoder, Container, EncodeQuality, Image, MediaWriter, OutputSettings,
+    VideoCodec, VideoDecoder, probe,
 };
 use nox_project::Rational;
 use std::path::PathBuf;
@@ -42,11 +42,13 @@ fn round_trip(
         height: 180,
         frame_rate: Rational::new(25, 1),
         codec,
+        container: None,
         quality: EncodeQuality::High,
         hardware,
         encoder: None,
         accel: None,
         audio_rate: Some(RATE),
+        audio_codec: None,
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
     };
@@ -125,6 +127,78 @@ fn prores_with_pcm_audio() {
     );
 }
 
+/// Every audio codec in every container that holds it: written, read
+/// back as that codec, at the level that went in.
+#[test]
+fn audio_codecs_in_every_container() {
+    let (codec_names, mut skipped) = (
+        |codec| match codec {
+            AudioCodec::Aac => "aac",
+            AudioCodec::Opus => "opus",
+            AudioCodec::Mp3 => "mp3",
+            AudioCodec::Flac => "flac",
+            AudioCodec::Pcm16 => "pcm_s16le",
+            AudioCodec::Pcm24 => "pcm_s24le",
+        },
+        Vec::new(),
+    );
+    for container in Container::ALL {
+        for &audio_codec in container.audio_codecs() {
+            let name = format!("audio-{:?}.{}", audio_codec, container.extension());
+            let path = out(&name);
+            let settings = OutputSettings {
+                path: path.clone(),
+                width: 64,
+                height: 64,
+                frame_rate: Rational::new(25, 1),
+                codec: container.codecs()[0],
+                container: Some(container),
+                quality: EncodeQuality::Low,
+                hardware: false,
+                encoder: None,
+                accel: None,
+                audio_rate: Some(RATE),
+                audio_codec: Some(audio_codec),
+                encoding: nox_media::OutputEncoding::Sdr,
+                peak_nits: 1000.0,
+            };
+            let mut writer = match MediaWriter::create(&settings) {
+                Ok(writer) => writer,
+                // Encoders missing from this FFmpeg.
+                Err(err) => {
+                    skipped.push(format!("{name}: {err}"));
+                    continue;
+                }
+            };
+            // A 1 kHz sine at half scale (lossy codecs drop DC).
+            let samples: Vec<f32> = (0..RATE as usize)
+                .flat_map(|i| {
+                    let v = 0.5 * (i as f32 * 1000.0 * std::f32::consts::TAU / RATE as f32).sin();
+                    [v, v]
+                })
+                .collect();
+            let per_frame = RATE as usize / 25 * 2;
+            for (index, chunk) in samples.chunks(per_frame).enumerate() {
+                writer.write_video(&frame(index as i64, 64, 64)).unwrap();
+                writer.write_audio(chunk).unwrap();
+            }
+            writer.finish().unwrap();
+
+            let info = probe(&path).unwrap();
+            assert_eq!(info.audio[0].codec, codec_names(audio_codec), "{name}");
+            let mut audio = AudioDecoder::open(&path, RATE).unwrap();
+            let mut read = vec![0f32; 2 * 4800];
+            audio.read(24_000, &mut read).unwrap();
+            let rms = (read.iter().map(|s| s * s).sum::<f32>() / read.len() as f32).sqrt();
+            // 0.5 / √2.
+            assert!((rms - 0.354).abs() < 0.02, "{name}: level {rms}");
+        }
+    }
+    if !skipped.is_empty() {
+        eprintln!("skipped:\n{}", skipped.join("\n"));
+    }
+}
+
 #[test]
 fn odd_sizes_are_rejected() {
     let settings = OutputSettings {
@@ -133,11 +207,13 @@ fn odd_sizes_are_rejected() {
         height: 180,
         frame_rate: Rational::new(25, 1),
         codec: VideoCodec::H264,
+        container: None,
         quality: EncodeQuality::Medium,
         hardware: false,
         encoder: None,
         accel: None,
         audio_rate: None,
+        audio_codec: None,
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
     };
@@ -179,11 +255,13 @@ fn gpu_encode(encoder: &str, name: &str) {
         height: 180,
         frame_rate: Rational::new(25, 1),
         codec: VideoCodec::H264,
+        container: None,
         quality: EncodeQuality::High,
         hardware: true,
         encoder: Some(encoder.into()),
         accel: Some(accel.clone()),
         audio_rate: None,
+        audio_codec: None,
         encoding: nox_media::OutputEncoding::Sdr,
         peak_nits: 1000.0,
     };

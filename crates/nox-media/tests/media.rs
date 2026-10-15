@@ -154,3 +154,42 @@ fn image_thumbnails() {
         assert_eq!((image.width, image.height), (64, 48), "{name}");
     }
 }
+
+/// Photos in tiles (HEIC, as phones store them) come out whole: the six
+/// tiles of `tests/data/tiled.heic` (FFmpeg's testsrc2 at 640×480 in
+/// 256×256 tiles, made with libheif's `heif-enc -q 95 --cut-tiles 256`),
+/// put together and cropped to the picture, match the pattern.
+#[test]
+fn tiled_heic_photos_are_whole() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tiled.heic");
+    let info = probe(&path).unwrap();
+    let video = info.video.unwrap();
+    assert_eq!((video.width, video.height), (640, 480));
+    assert!(info.duration.is_none(), "a still");
+    let mut decoder = nox_media::VideoDecoder::open(&path, None).unwrap();
+    assert!(decoder.is_still());
+    let frame = decoder.frame_at(30).unwrap();
+    assert_eq!((frame.width(), frame.height()), (640, 480));
+    // The media pool's thumbnail shows the whole photo too (4:3).
+    let small = thumbnail(&path, 160, 160).unwrap();
+    assert_eq!((small.width, small.height), (160, 120));
+    let photo = nox_media::rgba_cpu(&frame, 640, 480).unwrap();
+    #[rustfmt::skip]
+    let args = ["-f", "lavfi", "-i", "testsrc2=size=640x480:duration=1", "-frames:v", "1"];
+    let Some(pattern) = fixture("tiled-reference.png", &args) else {
+        return;
+    };
+    let pattern = nox_media::VideoDecoder::open(&pattern, None)
+        .unwrap()
+        .frame_at(0)
+        .unwrap();
+    let pattern = nox_media::rgba_cpu(&pattern, 640, 480).unwrap();
+    let difference = photo
+        .data
+        .iter()
+        .zip(&pattern.data)
+        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+        .sum::<u64>() as f64
+        / photo.data.len() as f64;
+    assert!(difference < 4.0, "mean difference {difference}");
+}

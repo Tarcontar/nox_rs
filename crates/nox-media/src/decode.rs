@@ -100,8 +100,15 @@ impl VideoDecoder {
     /// Opens `path`, decoding as `hw` says (where `accel` and FFmpeg can).
     pub fn open_with(path: &Path, accel: Option<&Accel>, hw: HwDecode) -> Result<Self> {
         crate::init();
-        let input = format::input(path)?;
-        let still = crate::probe::is_image_demuxer(input.format().name());
+        let mut input = format::input(path)?;
+        let mut still = crate::probe::is_image_demuxer(input.format().name());
+        // A photo in tiles (HEIC): assembled once, then shown throughout.
+        let mut tiled = None;
+        if let Some(grid) = crate::tiles::tile_grid(&input) {
+            tiled = Some(grid.decode(&mut input)?);
+            still = true;
+            input = format::input(path)?;
+        }
         let stream = input
             .streams()
             .best(media::Type::Video)
@@ -154,7 +161,7 @@ impl VideoDecoder {
             frame_rate,
             start,
             eof: false,
-            last: None,
+            last: tiled.map(|picture| (0, picture)),
             pending: None,
             logged_path: false,
             still,

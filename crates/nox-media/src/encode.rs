@@ -1,8 +1,9 @@
 //! Writing media files: encodes rendered RGBA frames and mixed audio, and
-//! muxes them into a container chosen by the file extension.
+//! muxes them into a container (`Container`: chosen, or by the file
+//! extension).
 //!
 //! Video is SDR, tagged BT.709, or HDR (`OutputEncoding::Pq`, `Hlg`): 10-bit
-//! BT.2020 with PQ or HLG, for HEVC (Main 10) and ProRes, with the mastering
+//! BT.2020 with PQ or HLG, for HEVC (Main 10), AV1, VP9 and ProRes, with the mastering
 //! display in the file for PQ (HDR10). Encoders are tried in order:
 //!
 //! 1. Vulkan Video (`h264_vulkan`, `hevc_vulkan`) on the device Nox renders
@@ -12,7 +13,7 @@
 //! 3. VAAPI (`h264_vaapi`, `hevc_vaapi`; Linux, AMD and Intel) on the GPU
 //!    Nox renders with: the compositor writes into its surfaces, mapped to
 //!    Vulkan.
-//! 4. Software (x264, x265; ProRes is always software).
+//! 4. Software (x264, x265, SVT-AV1, libvpx; ProRes is always software).
 //!
 //! Hardware encoders that take frames on the GPU (`hwaccel`) are written by
 //! the compositor directly (`write_gpu`), no copies; frames in system
@@ -34,16 +35,22 @@ pub enum VideoCodec {
     Hevc,
     /// ProRes 422 (HQ, standard or LT by quality), 10 bit.
     ProRes,
+    /// AV1: the smallest files, for the web.
+    Av1,
+    /// VP9: for the web (WebM).
+    Vp9,
 }
 
 impl VideoCodec {
-    pub const ALL: [VideoCodec; 3] = [Self::H264, Self::Hevc, Self::ProRes];
+    pub const ALL: [VideoCodec; 5] = [Self::H264, Self::Hevc, Self::ProRes, Self::Av1, Self::Vp9];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::H264 => "H.264",
             Self::Hevc => "HEVC",
             Self::ProRes => "ProRes 422",
+            Self::Av1 => "AV1",
+            Self::Vp9 => "VP9",
         }
     }
 
@@ -55,14 +62,207 @@ impl VideoCodec {
             (Self::Hevc, true) => &["hevc_vulkan", "hevc_nvenc", "hevc_vaapi", "libx265"],
             (Self::Hevc, false) => &["libx265"],
             (Self::ProRes, _) => &["prores_ks"],
+            (Self::Av1, true) => &["av1_vulkan", "av1_nvenc", "av1_vaapi", "libsvtav1"],
+            (Self::Av1, false) => &["libsvtav1"],
+            (Self::Vp9, true) => &["vp9_vaapi", "libvpx-vp9"],
+            (Self::Vp9, false) => &["libvpx-vp9"],
+        }
+    }
+
+    /// The usual container.
+    pub fn container(self) -> Container {
+        match self {
+            Self::ProRes => Container::Mov,
+            Self::Vp9 => Container::Webm,
+            _ => Container::Mp4,
         }
     }
 
     /// The usual file extension.
     pub fn extension(self) -> &'static str {
+        self.container().extension()
+    }
+
+    /// Whether the codec carries HDR (10-bit BT.2020).
+    pub fn does_hdr(self) -> bool {
+        self != Self::H264
+    }
+}
+
+/// Audio codecs Nox can export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodec {
+    /// AAC, 320 kb/s: plays everywhere.
+    Aac,
+    /// Opus, 192 kb/s: for the web (WebM).
+    Opus,
+    /// MP3, 320 kb/s.
+    Mp3,
+    /// FLAC, 24 bit: lossless, about half of PCM's size.
+    Flac,
+    /// Uncompressed 16-bit PCM.
+    Pcm16,
+    /// Uncompressed 24-bit PCM, as in post-production.
+    Pcm24,
+}
+
+impl AudioCodec {
+    pub const ALL: [AudioCodec; 6] = [
+        Self::Aac,
+        Self::Opus,
+        Self::Mp3,
+        Self::Flac,
+        Self::Pcm16,
+        Self::Pcm24,
+    ];
+
+    pub fn name(self) -> &'static str {
         match self {
-            Self::ProRes => "mov",
-            _ => "mp4",
+            Self::Aac => "AAC",
+            Self::Opus => "Opus",
+            Self::Mp3 => "MP3",
+            Self::Flac => "FLAC",
+            Self::Pcm16 => "PCM 16 bit",
+            Self::Pcm24 => "PCM 24 bit",
+        }
+    }
+
+    /// Whether it keeps the audio exactly.
+    pub fn lossless(self) -> bool {
+        matches!(self, Self::Flac | Self::Pcm16 | Self::Pcm24)
+    }
+
+    /// FFmpeg's encoder, the sample format it takes and whether that's
+    /// planar.
+    fn encoder(self) -> (&'static str, format::Sample, bool) {
+        use format::sample::Type::{Packed, Planar};
+        match self {
+            Self::Aac => ("aac", format::Sample::F32(Planar), true),
+            Self::Opus => ("libopus", format::Sample::F32(Packed), false),
+            Self::Mp3 => ("libmp3lame", format::Sample::F32(Planar), true),
+            Self::Flac => ("flac", format::Sample::I32(Packed), false),
+            Self::Pcm16 => ("pcm_s16le", format::Sample::I16(Packed), false),
+            Self::Pcm24 => ("pcm_s24le", format::Sample::I32(Packed), false),
+        }
+    }
+
+    fn bit_rate(self) -> Option<usize> {
+        match self {
+            Self::Aac | Self::Mp3 => Some(320_000),
+            Self::Opus => Some(192_000),
+            _ => None,
+        }
+    }
+}
+
+/// File formats Nox can export to. Each holds some of the video codecs
+/// and audio codecs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Container {
+    /// MP4: plays everywhere.
+    Mp4,
+    /// QuickTime: for post-production.
+    Mov,
+    /// Matroska: holds every codec.
+    Mkv,
+    /// WebM (Matroska for the web): AV1 or VP9 with Opus audio.
+    Webm,
+    /// AVI: H.264 with 16-bit PCM audio, for old players and devices.
+    Avi,
+}
+
+impl Container {
+    pub const ALL: [Container; 5] = [Self::Mp4, Self::Mov, Self::Mkv, Self::Webm, Self::Avi];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mp4 => "MP4",
+            Self::Mov => "QuickTime (MOV)",
+            Self::Mkv => "Matroska (MKV)",
+            Self::Webm => "WebM",
+            Self::Avi => "AVI",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::Mkv => "mkv",
+            Self::Webm => "webm",
+            Self::Avi => "avi",
+        }
+    }
+
+    /// The container files with `extension` are in.
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        match extension.to_ascii_lowercase().as_str() {
+            "mp4" | "m4v" => Some(Self::Mp4),
+            "mov" | "qt" => Some(Self::Mov),
+            "mkv" => Some(Self::Mkv),
+            "webm" => Some(Self::Webm),
+            "avi" => Some(Self::Avi),
+            _ => None,
+        }
+    }
+
+    /// The container `path`'s extension names.
+    pub fn for_path(path: &Path) -> Option<Self> {
+        Self::from_extension(path.extension()?.to_str()?)
+    }
+
+    /// FFmpeg's muxer.
+    fn muxer(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::Mkv => "matroska",
+            Self::Webm => "webm",
+            Self::Avi => "avi",
+        }
+    }
+
+    /// The video codecs it holds, the usual first.
+    pub fn codecs(self) -> &'static [VideoCodec] {
+        use VideoCodec::*;
+        match self {
+            Self::Mp4 => &[H264, Hevc, Av1, Vp9],
+            Self::Mov => &[ProRes, H264, Hevc],
+            Self::Mkv => &[H264, Hevc, Av1, Vp9, ProRes],
+            Self::Webm => &[Vp9, Av1],
+            Self::Avi => &[H264],
+        }
+    }
+
+    pub fn holds(self, codec: VideoCodec) -> bool {
+        self.codecs().contains(&codec)
+    }
+
+    /// The audio codecs it holds, the usual first.
+    pub fn audio_codecs(self) -> &'static [AudioCodec] {
+        use AudioCodec::*;
+        match self {
+            Self::Mp4 => &[Aac, Opus, Mp3, Flac],
+            Self::Mov => &[Aac, Pcm24, Pcm16],
+            Self::Mkv => &[Aac, Opus, Mp3, Flac, Pcm24, Pcm16],
+            Self::Webm => &[Opus],
+            // Not MP3: its encoder delay shifts the video too, and AVI
+            // fills the gap with an empty frame.
+            Self::Avi => &[Pcm16],
+        }
+    }
+
+    pub fn holds_audio(self, codec: AudioCodec) -> bool {
+        self.audio_codecs().contains(&codec)
+    }
+
+    /// The audio codec that usually goes with `video` in it.
+    pub fn default_audio(self, video: VideoCodec) -> AudioCodec {
+        match (self, video) {
+            // ProRes goes with uncompressed audio, as in post-production.
+            (Self::Mov | Self::Mkv, VideoCodec::ProRes) => AudioCodec::Pcm24,
+            (Self::Mkv, VideoCodec::Av1 | VideoCodec::Vp9) => AudioCodec::Opus,
+            _ => self.audio_codecs()[0],
         }
     }
 }
@@ -86,6 +286,9 @@ pub struct OutputSettings {
     pub height: u32,
     pub frame_rate: Rational,
     pub codec: VideoCodec,
+    /// The file format; `None` for the one the extension names (else the
+    /// codec's usual one).
+    pub container: Option<Container>,
     pub quality: Quality,
     /// Try hardware encoders first.
     pub hardware: bool,
@@ -95,13 +298,25 @@ pub struct OutputSettings {
     /// The devices frames are rendered on; enables hardware encoding
     /// without copies.
     pub accel: Option<Accel>,
-    /// Stereo audio at this rate (AAC, or PCM in MOV), or no audio track.
+    /// Stereo audio at this rate, or no audio track.
     pub audio_rate: Option<u32>,
+    /// The audio codec; `None` for the container's usual one with `codec`.
+    pub audio_codec: Option<AudioCodec>,
     /// SDR, or HDR (PQ or HLG; HEVC and ProRes only). Frames from memory
     /// are then RGBA16 in this encoding.
     pub encoding: OutputEncoding,
     /// Peak of the mastering display in nits, written for PQ (HDR10).
     pub peak_nits: f32,
+}
+
+impl OutputSettings {
+    /// The container written: the chosen one, else the extension's, else
+    /// the codec's usual one.
+    pub fn container(&self) -> Container {
+        self.container
+            .or_else(|| Container::for_path(&self.path))
+            .unwrap_or_else(|| self.codec.container())
+    }
 }
 
 struct VideoOutput {
@@ -235,27 +450,42 @@ impl MediaWriter {
         }
         if settings.encoding.is_hdr() && settings.codec == VideoCodec::H264 {
             return Err(Error::Encode(
-                "HDR needs HEVC or ProRes (H.264 exports are SDR)".into(),
+                "HDR needs HEVC, AV1, VP9 or ProRes (H.264 exports are SDR)".into(),
             ));
         }
-        let mut output = format::output(&settings.path)?;
+        let container = settings.container();
+        if !container.holds(settings.codec) {
+            return Err(Error::Encode(format!(
+                "{} files can't hold {}",
+                container.name(),
+                settings.codec.name()
+            )));
+        }
+        let audio_codec = settings
+            .audio_codec
+            .unwrap_or_else(|| container.default_audio(settings.codec));
+        if settings.audio_rate.is_some() && !container.holds_audio(audio_codec) {
+            return Err(Error::Encode(format!(
+                "{} files can't hold {} audio",
+                container.name(),
+                audio_codec.name()
+            )));
+        }
+        let mut output = format::output_as(&settings.path, container.muxer())?;
         let global_header = output
             .format()
             .flags()
             .contains(format::Flags::GLOBAL_HEADER);
         let video = open_video(&mut output, settings, global_header)?;
         let audio = match settings.audio_rate {
-            Some(rate) => Some(open_audio(
-                &mut output,
-                rate,
-                global_header,
-                settings.codec,
-            )?),
+            Some(rate) => Some(open_audio(&mut output, rate, global_header, audio_codec)?),
             None => None,
         };
         let mut options = Dictionary::new();
         // MP4/MOV: index at the front, so files play while downloading.
-        options.set("movflags", "+faststart");
+        if matches!(container, Container::Mp4 | Container::Mov) {
+            options.set("movflags", "+faststart");
+        }
         output.write_header_with(options)?;
         tracing::info!(
             "writing {} ({}×{}, {} with {}, frames from {}{})",
@@ -268,7 +498,10 @@ impl MediaWriter {
                 VideoInput::Gpu(frames) => frames.api(),
                 VideoInput::Memory { .. } => "memory",
             },
-            if audio.is_some() { ", AAC audio" } else { "" }
+            match &audio {
+                Some(audio) => format!(", {} audio", audio.encoder.id().name()),
+                None => String::new(),
+            }
         );
         Ok(Self {
             output,
@@ -391,7 +624,8 @@ impl MediaWriter {
         self.video.encoder.send_eof()?;
         self.drain_video()?;
         // MP4 and MOV write their header (`moov`, with `clli`) last, so the
-        // measured light levels still get in. Light levels are only written
+        // measured light levels still get in (Matroska rewrites its track
+        // header at the end too). Light levels are only written
         // when every frame was measured.
         let frames = self.frames;
         if let Some(light) = self
@@ -614,6 +848,17 @@ fn find_encoder(name: &str, settings: &OutputSettings) -> Result<ffmpeg::Codec> 
     {
         return Err(Error::Encode("not used for HDR".into()));
     }
+    // FFmpeg 9's Vulkan AV1 encoder writes undecodable streams on NVIDIA
+    // 580 at any quantizer but its default (18, far too large files), and
+    // FFmpeg 8's loses the device. Off unless NOX_AV1_VULKAN_ENCODE=1.
+    if name == "av1_vulkan" && std::env::var_os("NOX_AV1_VULKAN_ENCODE").is_none() {
+        return Err(Error::Encode("off (broken output)".into()));
+    }
+    // FFmpeg 8's AV1 Vulkan encoder loses the device on NVIDIA 580
+    // (VK_ERROR_DEVICE_LOST on the first frame); FFmpeg 9's works.
+    if name == "av1_vulkan" && ffmpeg::codec::version() >> 16 < 63 {
+        return Err(Error::Encode("needs FFmpeg 9 (libavcodec 63)".into()));
+    }
     Ok(codec)
 }
 
@@ -648,11 +893,13 @@ pub fn probe_encoders(
         height: 1080,
         frame_rate: Rational::new(30, 1),
         codec,
+        container: None,
         quality: Quality::High,
         hardware: true,
         encoder: None,
         accel,
         audio_rate: None,
+        audio_codec: None,
         encoding,
         peak_nits: 1000.0,
     };
@@ -696,7 +943,7 @@ fn open_video_encoder(
     let pixel_format = match name {
         _ if let Some(frames) = gpu_frames => frames.pixel_format(),
         "prores_ks" => format::Pixel::YUV422P10LE,
-        "hevc_nvenc" if hdr => format::Pixel::P010LE,
+        "hevc_nvenc" | "av1_nvenc" if hdr => format::Pixel::P010LE,
         _ if hdr => format::Pixel::YUV420P10LE,
         _ => format::Pixel::YUV420P,
     };
@@ -711,8 +958,20 @@ fn open_video_encoder(
     video.set_frame_rate(Some(ffmpeg::Rational::new(fps.num as i32, fps.den as i32)));
     // Keyframes every 2 s: easy to seek, still efficient.
     video.set_gop((2.0 * fps.as_f64()).round() as u32);
+    // FFmpeg's own threads (all cores), as the ffmpeg tool uses: libvpx
+    // and ProRes depend on them (libvpx was ten times slower without);
+    // x264, x265 and SVT-AV1 run threads of their own.
+    video.set_threading(codec::threading::Config {
+        kind: codec::threading::Type::Slice,
+        count: 0,
+    });
     if global_header {
         video.set_flags(codec::Flags::GLOBAL_HEADER);
+    }
+    // AVI keeps no presentation times, so frames must come in display
+    // order: no B-frames.
+    if settings.container() == Container::Avi {
+        video.set_max_b_frames(0);
     }
     // SAFETY: plain field writes on an unopened context.
     unsafe {
@@ -760,6 +1019,34 @@ fn open_video_encoder(
                 options.set("profile", "main10");
             }
         }
+        "av1_nvenc" => {
+            options.set("rc", "vbr");
+            options.set("cq", level("24", "30", "36"));
+            options.set("preset", "p5");
+            options.set("b:v", "0");
+        }
+        "libsvtav1" => {
+            options.set("crf", level("24", "30", "36"));
+            // Fast enough for 4K, still far smaller than H.264.
+            options.set("preset", "8");
+        }
+        "libvpx-vp9" => {
+            // Constant quality.
+            options.set("crf", level("24", "31", "38"));
+            options.set("b:v", "0");
+            options.set("deadline", "good");
+            options.set("cpu-used", "4");
+            options.set("row-mt", "1");
+        }
+        // AV1 and VP9 quantizers run to 255.
+        "av1_vulkan" => {
+            options.set("rc_mode", "cqp");
+            options.set("qp", level("90", "130", "170"));
+        }
+        "av1_vaapi" | "vp9_vaapi" => {
+            options.set("rc_mode", "CQP");
+            options.set("global_quality", level("90", "130", "170"));
+        }
         "prores_ks" => {
             options.set("profile", level("3", "2", "1"));
         }
@@ -780,21 +1067,9 @@ fn open_audio(
     output: &mut format::context::Output,
     rate: u32,
     global_header: bool,
-    video_codec: VideoCodec,
+    audio_codec: AudioCodec,
 ) -> Result<AudioOutput> {
-    // ProRes goes with uncompressed audio in MOV, as in post-production.
-    let (name, sample_format, planar) = match video_codec {
-        VideoCodec::ProRes => (
-            "pcm_s24le",
-            format::Sample::I32(format::sample::Type::Packed),
-            false,
-        ),
-        _ => (
-            "aac",
-            format::Sample::F32(format::sample::Type::Planar),
-            true,
-        ),
-    };
+    let (name, sample_format, planar) = audio_codec.encoder();
     let codec = encoder::find_by_name(name)
         .ok_or_else(|| Error::Encode(format!("{name} encoder not available")))?;
     let mut audio = codec::context::Context::new_with_codec(codec)
@@ -804,8 +1079,12 @@ fn open_audio(
     audio.set_channel_layout(ChannelLayout::STEREO);
     audio.set_format(sample_format);
     audio.set_time_base(ffmpeg::Rational::new(1, rate as i32));
-    if name == "aac" {
-        audio.set_bit_rate(320_000);
+    if let Some(rate) = audio_codec.bit_rate() {
+        audio.set_bit_rate(rate);
+    }
+    if audio_codec == AudioCodec::Flac {
+        // SAFETY: plain field write on an unopened context.
+        unsafe { (*audio.as_mut_ptr()).bits_per_raw_sample = 24 };
     }
     if global_header {
         audio.set_flags(codec::Flags::GLOBAL_HEADER);
@@ -836,21 +1115,37 @@ fn send_audio(audio: &mut AudioOutput, samples: &[f32]) -> Result<()> {
     let format = audio.encoder.format();
     let mut frame = frame::Audio::new(format, count, ChannelLayout::STEREO);
     frame.set_rate(audio.encoder.rate());
-    if audio.planar {
-        for channel in 0..CHANNELS {
-            let plane = frame.plane_mut::<f32>(channel);
-            for (dst, src) in plane
-                .iter_mut()
-                .zip(samples.iter().skip(channel).step_by(CHANNELS))
-            {
-                *dst = *src;
+    match format {
+        // AAC, MP3: a plane per channel.
+        _ if audio.planar => {
+            for channel in 0..CHANNELS {
+                let plane = frame.plane_mut::<f32>(channel);
+                for (dst, src) in plane
+                    .iter_mut()
+                    .zip(samples.iter().skip(channel).step_by(CHANNELS))
+                {
+                    *dst = *src;
+                }
             }
         }
-    } else {
-        // Packed 24-bit PCM in 32-bit containers.
-        let data = frame.plane_mut::<i32>(0);
-        for (dst, src) in data.iter_mut().zip(samples) {
-            *dst = (src.clamp(-1.0, 1.0) * i32::MAX as f32) as i32;
+        // Opus: interleaved floats, as mixed.
+        format::Sample::F32(_) => {
+            frame.plane_mut::<f32>(0)[..samples.len()].copy_from_slice(samples);
+        }
+        // 16-bit PCM (AVI).
+        format::Sample::I16(_) => {
+            let data = frame.plane_mut::<i16>(0);
+            for (dst, src) in data.iter_mut().zip(samples) {
+                *dst = (src.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+            }
+        }
+        // 24-bit PCM and FLAC: packed, in 32-bit containers (the low
+        // byte is dropped).
+        _ => {
+            let data = frame.plane_mut::<i32>(0);
+            for (dst, src) in data.iter_mut().zip(samples) {
+                *dst = (src.clamp(-1.0, 1.0) * i32::MAX as f32) as i32;
+            }
         }
     }
     frame.set_pts(Some(audio.next_pts));
