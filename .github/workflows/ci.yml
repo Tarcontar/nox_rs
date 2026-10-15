@@ -40,7 +40,7 @@ jobs:
         run: .github/scripts/in-linux-env.sh cargo clippy --workspace --all-targets --locked
 
       - name: Test
-        run: .github/scripts/in-linux-env.sh cargo test --workspace --locked -- --test-threads=1
+        run: .github/scripts/in-linux-env.sh cargo test --workspace --locked --no-fail-fast -- --test-threads=1
 
   windows:
     name: Windows x64 (build, lint, test)
@@ -55,7 +55,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked
       - name: Test
         shell: msys2 {0}
-        run: cargo test --workspace --locked -- --test-threads=1
+        run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
 
   macos:
     name: macOS (build, lint, test)
@@ -66,15 +66,27 @@ jobs:
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked
       - name: Test
-        run: cargo test --workspace --locked -- --test-threads=1
+        run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
 
   flatpak:
     name: Flatpak
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
-      options: --privileged
+      # The runner's preinstalled SDKs, mounted to be deleted: the build
+      # (GNOME SDK, LLVM and Rust extensions, FFmpeg, Rust) needs the room.
+      options: >-
+        --privileged
+        -v /usr/share/dotnet:/host/dotnet
+        -v /usr/local/lib/android:/host/android
+        -v /opt/ghc:/host/ghc
+        -v /opt/hostedtoolcache:/host/toolcache
     steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/toolcache/*
+          df -h /
       - uses: actions/checkout@v5
       - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
         with:

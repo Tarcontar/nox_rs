@@ -96,8 +96,20 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
-      options: --privileged
+      # The runner's preinstalled SDKs, mounted to be deleted: the build
+      # (GNOME SDK, LLVM and Rust extensions, FFmpeg, Rust) needs the room.
+      options: >-
+        --privileged
+        -v /usr/share/dotnet:/host/dotnet
+        -v /usr/local/lib/android:/host/android
+        -v /opt/ghc:/host/ghc
+        -v /opt/hostedtoolcache:/host/toolcache
     steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/toolcache/*
+          df -h /
       - uses: actions/checkout@v5
       - name: Bundle name
         id: name

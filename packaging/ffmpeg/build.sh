@@ -20,7 +20,9 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$work"
 
-options="--prefix=$PREFIX --enable-shared --disable-static --disable-programs
+# The ffmpeg CLI too: tests make their clips with it (packages don't
+# include it).
+options="--prefix=$PREFIX --enable-shared --disable-static --disable-ffplay
     --disable-doc --enable-gpl --enable-libx264 --enable-libx265 --enable-libdav1d"
 case "$(uname -s)" in
     Linux)
@@ -31,7 +33,10 @@ case "$(uname -s)" in
         # to; another one on PATH (CI's runner has MinGW's) can't link
         # against MSYS2's libraries.
         options="$options --cc=clang --cxx=clang++"
-        options="$options --enable-vulkan --enable-d3d11va --enable-d3d12va"
+        # gfxcapture (C++) includes <version>, which finds FFmpeg's VERSION
+        # file on case-insensitive file systems; Nox doesn't need it.
+        options="$options --enable-vulkan --enable-d3d11va --enable-d3d12va
+            --disable-filter=gfxcapture"
         # NVENC exists for x86-64 only.
         [ "$(uname -m)" = x86_64 ] && with_nvenc=yes || with_nvenc=no ;;
     Darwin)

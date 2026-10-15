@@ -30,6 +30,8 @@ runs:
           # Our FFmpeg before any other on the link path.
           echo "RUSTFLAGS=-L native=$HOME/ffmpeg/lib"
         } >> "$GITHUB_ENV"
+        # The ffmpeg CLI, for the tests' clips.
+        echo "$HOME/ffmpeg/bin" >> "$GITHUB_PATH"
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy

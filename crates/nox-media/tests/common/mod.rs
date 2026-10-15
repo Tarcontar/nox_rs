@@ -17,7 +17,12 @@ pub fn fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
         .output();
     match output {
         Ok(output) if output.status.success() => Some(path),
-        Ok(output) if String::from_utf8_lossy(&output.stderr).contains("Unknown encoder") => {
+        // FFmpeg without that encoder (e.g. builds without libwebp).
+        Ok(output)
+            if ["Unknown encoder", "Encoder not found"]
+                .iter()
+                .any(|m| String::from_utf8_lossy(&output.stderr).contains(m)) =>
+        {
             eprintln!("skipping: encoder not available for {name}");
             None
         }
