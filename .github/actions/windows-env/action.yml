@@ -21,12 +21,16 @@ runs:
     - name: Packages
       shell: msys2 {0}
       run: |
+        # The environment's packages (mingw-w64-clang-x86_64-…, or
+        # -aarch64-…), named with its prefix.
+        packages=""
+        for name in toolchain clang pkgconf gtk4 librsvg adwaita-icon-theme gettext \
+            glslang x264 x265 dav1d vulkan-headers libjxl svt-av1 libvpx opus lame; do
+          packages="$packages $MINGW_PACKAGE_PREFIX-$name"
+        done
         for attempt in 1 2 3; do
-          pacman -S --needed --noconfirm git make curl diffutils &&
-            pacboy -S --needed --noconfirm toolchain:p clang:p pkgconf:p gtk4:p \
-              librsvg:p adwaita-icon-theme:p gettext:p glslang:p x264:p x265:p \
-              dav1d:p vulkan-headers:p &&
-            exit 0
+          # shellcheck disable=SC2086 # a list of package names
+          pacman -S --needed --noconfirm git make curl diffutils $packages && exit 0
           echo "attempt $attempt failed; retrying in 30 s"
           sleep 30
         done
