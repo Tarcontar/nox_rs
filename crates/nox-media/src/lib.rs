@@ -21,13 +21,13 @@ pub use encode::{
 };
 pub use ffmpeg;
 pub use frames::{
-    color_tags, display_size, input_transform, rgba_cpu, solid_frame, to_software, tone_mapping,
-    with_cpu_frame,
+    color_tags, display_size, input_transform, orientation, rgba_cpu, solid_frame, to_software,
+    tone_mapping, with_cpu_frame,
 };
 pub use hw::HwDevice;
 pub use hwaccel::{Accel, with_gpu_input};
 pub use nox_color::OutputEncoding;
-pub use nox_gpu::Image;
+pub use nox_gpu::{Image, Orientation};
 pub use probe::{AudioInfo, MediaInfo, VideoInfo, probe};
 pub use thumbnail::{ThumbnailReader, thumbnail};
 

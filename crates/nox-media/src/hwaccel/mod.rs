@@ -151,6 +151,7 @@ pub fn with_gpu_input<R>(
                     matrix: picture.matrix,
                     chroma_offset: picture.chroma_offset,
                     color: picture.color,
+                    orientation: crate::frames::orientation(frame),
                 };
                 return Ok(f(Input::Buffer(&input)));
             }

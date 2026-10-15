@@ -15,8 +15,8 @@ pub use compositor::{
     BlendMode, Compositor, LayerStyle, MAX_LAYERS, Placement, Rect, Transform, YuvTarget,
 };
 pub use converter::{
-    BufferFrame, Converter, CpuFrame, ImageSync, Input, Layout, Plane, PlaneFormat, VkFrame,
-    VkPlane,
+    BufferFrame, Converter, CpuFrame, ImageSync, Input, Layout, Orientation, Plane, PlaneFormat,
+    VkFrame, VkPlane,
 };
 pub use device::{ExternalDevice, GpuDevice, QueueLock};
 pub use export::{DmabufFd, DmabufFormat, DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F};

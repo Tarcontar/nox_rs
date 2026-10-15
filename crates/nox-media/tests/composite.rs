@@ -585,6 +585,7 @@ fn linear_buffers_round_trip() {
                     // The compositor writes left-sited chroma.
                     chroma_offset: [0.5, 0.0],
                     color: InputTransform::default(),
+                    orientation: Default::default(),
                 },
                 64,
                 36,

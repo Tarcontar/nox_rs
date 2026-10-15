@@ -94,6 +94,58 @@ pub struct Plane<'a> {
     pub stride: usize,
 }
 
+/// How a picture is turned to be shown upright: stored pictures are
+/// rotated clockwise by `quarter_turns` × 90°, then mirrored left to right
+/// if `mirror` is set (e.g. phone videos shot upright, which are stored
+/// landscape with a rotation in the container).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Orientation {
+    /// 0–3.
+    pub quarter_turns: u8,
+    pub mirror: bool,
+}
+
+impl Orientation {
+    pub const UPRIGHT: Self = Self {
+        quarter_turns: 0,
+        mirror: false,
+    };
+
+    /// Whether width and height trade places.
+    pub fn swaps_axes(self) -> bool {
+        self.quarter_turns % 2 == 1
+    }
+
+    /// The displayed size of a `width` × `height` stored picture.
+    pub fn display_size(self, width: u32, height: u32) -> (u32, u32) {
+        if self.swaps_axes() {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    /// For the shader: quarter turns in bits 0–1, mirror in bit 2.
+    fn code(self) -> i32 {
+        i32::from(self.quarter_turns % 4) | (i32::from(self.mirror) << 2)
+    }
+
+    /// The stored pixel shown at displayed pixel (`x`, `y`) of a picture
+    /// stored `width` × `height`.
+    pub fn source_pixel(self, x: u32, y: u32, width: u32, height: u32) -> (u32, u32) {
+        let (display_w, _) = self.display_size(width, height);
+        let x = if self.mirror { display_w - 1 - x } else { x };
+        match self.quarter_turns % 4 {
+            0 => (x, y),
+            // Clockwise: the displayed top row is the stored left column,
+            // read bottom to top.
+            1 => (y, height - 1 - x),
+            2 => (width - 1 - x, height - 1 - y),
+            _ => (width - 1 - y, x),
+        }
+    }
+}
+
 /// A decoded frame in system memory, described for the GPU.
 pub struct CpuFrame<'a> {
     pub width: u32,
@@ -108,6 +160,9 @@ pub struct CpuFrame<'a> {
     pub chroma_offset: [f32; 2],
     /// Transfer, primaries and HDR tone mapping.
     pub color: InputTransform,
+    /// How the picture is turned for display; outputs are in display
+    /// orientation.
+    pub orientation: Orientation,
     pub planes: Vec<Plane<'a>>,
 }
 
@@ -149,6 +204,8 @@ pub struct VkFrame {
     pub matrix: Matrix3x4,
     pub chroma_offset: [f32; 2],
     pub color: InputTransform,
+    /// See `CpuFrame::orientation`.
+    pub orientation: Orientation,
     pub planes: Vec<VkPlane>,
     /// One entry per distinct image used by `planes`.
     pub images: Vec<ImageSync>,
@@ -171,6 +228,8 @@ pub struct BufferFrame<'b> {
     /// See `CpuFrame::chroma_offset`.
     pub chroma_offset: [f32; 2],
     pub color: InputTransform,
+    /// See `CpuFrame::orientation`.
+    pub orientation: Orientation,
 }
 
 impl BufferFrame<'_> {
@@ -227,6 +286,7 @@ struct Params {
     matrix: Matrix3x4,
     chroma_offset: [f32; 2],
     color: InputTransform,
+    orientation: Orientation,
 }
 
 impl Input<'_, '_> {
@@ -241,6 +301,7 @@ impl Input<'_, '_> {
                 matrix: f.matrix,
                 chroma_offset: f.chroma_offset,
                 color: f.color,
+                orientation: f.orientation,
             },
             Input::Vulkan(f) => Params {
                 width: f.width,
@@ -251,6 +312,7 @@ impl Input<'_, '_> {
                 matrix: f.matrix,
                 chroma_offset: f.chroma_offset,
                 color: f.color,
+                orientation: f.orientation,
             },
             Input::Buffer(f) => Params {
                 width: f.width,
@@ -261,6 +323,7 @@ impl Input<'_, '_> {
                 matrix: f.matrix,
                 chroma_offset: f.chroma_offset,
                 color: f.color,
+                orientation: f.orientation,
             },
         }
     }
@@ -281,6 +344,7 @@ struct PushConstants {
     transfer: i32,
     primaries: i32,
     keep_hdr: i32,
+    orientation: i32,
 }
 
 pub(crate) struct GpuImage {
@@ -922,6 +986,7 @@ impl Converter {
                 transfer: params.color.transfer as i32,
                 primaries: params.color.primaries as i32,
                 keep_hdr: self.keep_hdr.into(),
+                orientation: params.orientation.code(),
             };
             device.cmd_push_constants(
                 cmd,

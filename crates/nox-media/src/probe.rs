@@ -6,7 +6,7 @@ use nox_project::{Rational, Time, timecode};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::{Result, rational};
+use crate::{Orientation, Result, rational};
 
 #[derive(Debug, Clone)]
 pub struct MediaInfo {
@@ -29,8 +29,12 @@ impl MediaInfo {
 pub struct VideoInfo {
     pub stream_index: usize,
     pub codec: String,
+    /// Displayed size: turned by `orientation` (a phone video stored
+    /// 1920×1080 and shot upright is 1080×1920 here).
     pub width: u32,
     pub height: u32,
+    /// How the stored picture is turned for display.
+    pub orientation: Orientation,
     pub frame_rate: Option<Rational>,
     pub pixel_format: String,
     /// Bits per component, if the container or codec reports it.
@@ -71,6 +75,16 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
     let is_image = is_image_demuxer(&container) || grid.is_some();
     if let Some(video) = video.as_mut().filter(|_| is_image) {
         video.frame_rate = None;
+        // Photos keep their orientation in EXIF, which FFmpeg reads while
+        // decoding.
+        if video.orientation == Orientation::UPRIGHT
+            && let Some(orientation) = first_frame_orientation(path, video.stream_index)
+        {
+            video.orientation = orientation;
+        }
+    }
+    if let Some(video) = video.as_mut() {
+        (video.width, video.height) = video.orientation.display_size(video.width, video.height);
     }
     Ok(MediaInfo {
         path: path.to_owned(),
@@ -96,8 +110,50 @@ fn is_cover_art(stream: &format::stream::Stream) -> bool {
         .contains(format::stream::Disposition::ATTACHED_PIC)
 }
 
+/// The orientation of the first decoded frame of stream `index`.
+fn first_frame_orientation(path: &Path, index: usize) -> Option<Orientation> {
+    let mut input = format::input(path).ok()?;
+    let parameters = input.stream(index)?.parameters();
+    let mut decoder = codec::Context::from_parameters(parameters)
+        .ok()?
+        .decoder()
+        .video()
+        .ok()?;
+    let mut frame = ffmpeg::frame::Video::empty();
+    for (stream, packet) in input.packets() {
+        if stream.index() == index
+            && decoder.send_packet(&packet).is_ok()
+            && decoder.receive_frame(&mut frame).is_ok()
+        {
+            return Some(crate::frames::orientation(&frame));
+        }
+    }
+    decoder.send_eof().ok()?;
+    decoder.receive_frame(&mut frame).ok()?;
+    Some(crate::frames::orientation(&frame))
+}
+
+/// The orientation the container gives the stream (its display matrix).
+fn stream_orientation(parameters: &codec::Parameters) -> Orientation {
+    // SAFETY: the stream's live parameters; a display matrix is nine
+    // 32-bit values.
+    unsafe {
+        let par = parameters.as_ptr();
+        let data = ffi::av_packet_side_data_get(
+            (*par).coded_side_data,
+            (*par).nb_coded_side_data,
+            ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+        );
+        if data.is_null() || (*data).size < 36 {
+            return Orientation::UPRIGHT;
+        }
+        crate::frames::orientation_of_matrix(&*(*data).data.cast::<[i32; 9]>())
+    }
+}
+
 fn video_info(stream: &format::stream::Stream) -> Result<VideoInfo> {
     let parameters = stream.parameters();
+    let orientation = stream_orientation(&parameters);
     // SAFETY: `parameters` points to the stream's live AVCodecParameters.
     let bits = unsafe { (*parameters.as_ptr()).bits_per_raw_sample };
     let decoder = codec::Context::from_parameters(parameters)?
@@ -110,6 +166,7 @@ fn video_info(stream: &format::stream::Stream) -> Result<VideoInfo> {
         codec: decoder.id().name().to_owned(),
         width: decoder.width(),
         height: decoder.height(),
+        orientation,
         frame_rate,
         pixel_format: decoder
             .format()
@@ -183,9 +240,17 @@ impl fmt::Display for MediaInfo {
                 .frame_rate
                 .map_or(String::new(), |r| format!(" {:.3} fps", r.as_f64()));
             let depth = v.bit_depth.map_or(String::new(), |b| format!(", {b} bit"));
+            let turned = match v.orientation {
+                o if o == Orientation::UPRIGHT => String::new(),
+                o => format!(
+                    " (turned {}°{})",
+                    u32::from(o.quarter_turns) * 90,
+                    if o.mirror { ", mirrored" } else { "" }
+                ),
+            };
             writeln!(
                 f,
-                "video #{}   {} {}x{}{fps}, {}{depth}",
+                "video #{}   {} {}x{}{turned}{fps}, {}{depth}",
                 v.stream_index, v.codec, v.width, v.height, v.pixel_format
             )?;
             writeln!(f, "color      {}", v.color)?;

@@ -109,6 +109,7 @@ impl DecodedFrame {
                 matrix,
                 chroma_offset,
                 color,
+                orientation: crate::frames::orientation(frame),
                 planes: vk_planes(frames_ctx, vk_frame, &planes),
                 images: Vec::new(),
             };

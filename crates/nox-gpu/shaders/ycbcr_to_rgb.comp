@@ -44,6 +44,10 @@ layout(push_constant) uniform Params {
     // For HDR outputs: HDR sources keep their light (relative to SDR
     // white) instead of being tone-mapped (InputTransform::apply_hdr).
     int keep_hdr;
+    // How the picture is turned for display (nox_gpu::Orientation):
+    // clockwise quarter turns in bits 0-1, mirrored left to right in bit 2.
+    // The output is in display orientation.
+    int orientation;
 } p;
 
 const int HDR_NONE = 0;
@@ -145,7 +149,19 @@ void main() {
     // All planes are sampled bilinearly at the output pixel center, which
     // scales to the output size (non-square pixels, preview downscaling).
     // At 1:1 this returns the exact texels.
-    vec2 uv = (vec2(pos) + 0.5) / vec2(p.size) * p.uv_scale;
+    vec2 shown = (vec2(pos) + 0.5) / vec2(p.size);
+    if ((p.orientation & 4) != 0) {
+        shown.x = 1.0 - shown.x;
+    }
+    // Where the shown point is in the stored picture (undoing the turns).
+    vec2 stored;
+    switch (p.orientation & 3) {
+    case 1: stored = vec2(shown.y, 1.0 - shown.x); break;
+    case 2: stored = 1.0 - shown; break;
+    case 3: stored = vec2(1.0 - shown.y, shown.x); break;
+    default: stored = shown; break;
+    }
+    vec2 uv = stored * p.uv_scale;
     vec2 chroma_uv = uv + p.chroma_offset;
 
     vec3 samples;

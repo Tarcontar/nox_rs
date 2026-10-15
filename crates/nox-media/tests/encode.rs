@@ -288,6 +288,7 @@ fn gpu_encode(encoder: &str, name: &str) {
             matrix: nox_color::ycbcr::rgb_to_rgb(nox_color::Quantization::eight_bit(true)),
             chroma_offset: [0.0, 0.0],
             color: Default::default(),
+            orientation: Default::default(),
             planes: vec![Plane {
                 format: PlaneFormat::Rgba8,
                 width: 320,

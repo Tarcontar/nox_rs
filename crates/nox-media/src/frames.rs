@@ -3,20 +3,76 @@
 
 use ffmpeg::{ffi, format, frame, software::scaling};
 use nox_color::{Cicp, InputTransform, Matrix3x4, Quantization, ToneMapping, ycbcr};
-use nox_gpu::{CpuFrame, Image, Layout, Plane, PlaneFormat};
+use nox_gpu::{CpuFrame, Image, Layout, Orientation, Plane, PlaneFormat};
 
 use crate::Result;
 
 /// Size at which the frame should be displayed, honoring the sample aspect
-/// ratio (e.g. 720×576 with 16:15 pixels → 768×576).
+/// ratio (e.g. 720×576 with 16:15 pixels → 768×576) and the orientation
+/// (a phone video stored 1920×1080 and shot upright shows 1080×1920).
 pub fn display_size(frame: &frame::Video) -> (u32, u32) {
     let sar = frame.aspect_ratio();
     let (w, h) = (frame.width(), frame.height());
-    if sar.numerator() > 0 && sar.denominator() > 0 && sar.numerator() != sar.denominator() {
-        let width = (f64::from(w) * f64::from(sar)).round() as u32;
-        (width.max(1), h)
+    let size =
+        if sar.numerator() > 0 && sar.denominator() > 0 && sar.numerator() != sar.denominator() {
+            let width = (f64::from(w) * f64::from(sar)).round() as u32;
+            (width.max(1), h)
+        } else {
+            (w, h)
+        };
+    orientation(frame).display_size(size.0, size.1)
+}
+
+/// How `frame` is turned for display: its display matrix, which FFmpeg
+/// takes from the container (the rotation phones record instead of turning
+/// the picture) or from a photo's EXIF orientation.
+pub fn orientation(frame: &frame::Video) -> Orientation {
+    // SAFETY: a valid frame; side data, if any, is the frame's own, and a
+    // display matrix is nine 32-bit values.
+    unsafe {
+        let data = ffi::av_frame_get_side_data(
+            frame.as_ptr(),
+            ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX,
+        );
+        if data.is_null() || (*data).size < 36 {
+            return Orientation::UPRIGHT;
+        }
+        orientation_of_matrix(&*(*data).data.cast::<[i32; 9]>())
+    }
+}
+
+/// The orientation a display matrix describes, read as the `ffmpeg` tool
+/// does when it rotates automatically. Angles that aren't a multiple of 90°
+/// (which cameras don't write) round to the nearest one.
+pub(crate) fn orientation_of_matrix(matrix: &[i32; 9]) -> Orientation {
+    // SAFETY: nine values, as av_display_rotation_get reads.
+    let counterclockwise = unsafe { ffi::av_display_rotation_get(matrix.as_ptr()) };
+    if !counterclockwise.is_finite() {
+        return Orientation::UPRIGHT;
+    }
+    // Clockwise, in [0, 360).
+    let mut theta = -counterclockwise.round();
+    theta -= 360.0 * (theta / 360.0 + 0.9 / 360.0).floor();
+    let turned = |quarter_turns, mirror| Orientation {
+        quarter_turns,
+        mirror,
+    };
+    let near = |angle: f64| (theta - angle).abs() < 1.0;
+    if near(90.0) {
+        turned(1, matrix[3] > 0)
+    } else if near(180.0) {
+        match (matrix[0] < 0, matrix[4] < 0) {
+            (true, false) => turned(0, true),
+            (false, true) => turned(2, true),
+            _ => turned(2, false),
+        }
+    } else if near(270.0) {
+        turned(3, matrix[3] < 0)
+    } else if near(0.0) || near(360.0) {
+        // Flipped upside down only.
+        turned(if matrix[4] < 0 { 2 } else { 0 }, matrix[4] < 0)
     } else {
-        (w, h)
+        turned(((theta / 90.0).round() as u8) % 4, false)
     }
 }
 
@@ -131,6 +187,7 @@ pub fn with_cpu_frame<R>(frame: &frame::Video, f: impl FnOnce(&CpuFrame<'_>) -> 
         matrix: ycbcr::rgb_to_rgb(quantization),
         chroma_offset: [0.0, 0.0],
         color: input_transform(frame),
+        orientation: orientation(frame),
         planes: vec![plane(
             &rgba,
             0,
@@ -160,8 +217,33 @@ pub fn solid_frame(rgb: [u8; 3]) -> frame::Video {
     frame
 }
 
-/// Converts to 8-bit RGBA at `width` × `height` on the CPU.
+/// Converts to 8-bit RGBA at `width` × `height` on the CPU, turned upright
+/// (`width` × `height` is the displayed size, as `display_size`).
 pub fn rgba_cpu(frame: &frame::Video, width: u32, height: u32) -> Result<Image> {
+    let orientation = orientation(frame);
+    if orientation != Orientation::UPRIGHT {
+        let (stored_w, stored_h) = orientation.display_size(width, height);
+        let stored = rgba_cpu_stored(frame, stored_w, stored_h)?;
+        let mut data = vec![0u8; width as usize * height as usize * 4];
+        for (y, row) in data.chunks_exact_mut(width as usize * 4).enumerate() {
+            for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (sx, sy) = orientation.source_pixel(x as u32, y as u32, stored_w, stored_h);
+                let i = sy as usize * stored.stride + sx as usize * 4;
+                pixel.copy_from_slice(&stored.data[i..i + 4]);
+            }
+        }
+        return Ok(Image {
+            width,
+            height,
+            stride: width as usize * 4,
+            data,
+        });
+    }
+    rgba_cpu_stored(frame, width, height)
+}
+
+/// `rgba_cpu` as stored, not turned.
+fn rgba_cpu_stored(frame: &frame::Video, width: u32, height: u32) -> Result<Image> {
     let software;
     let frame = if is_hardware(frame.format()) {
         software = to_software(frame)?;
@@ -349,6 +431,7 @@ fn describe(frame: &frame::Video) -> Option<CpuFrame<'_>> {
         matrix: classified.matrix,
         chroma_offset: classified.chroma_offset,
         color: classified.color,
+        orientation: orientation(frame),
         planes,
     })
 }
