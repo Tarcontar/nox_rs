@@ -79,6 +79,10 @@ fn templates_build() {
     glib::Object::new::<ColorWheels>().set_timeline(&timeline);
     let inspector = glib::Object::new::<Inspector>();
     inspector.set_timeline(&timeline);
+    glib::Object::new::<crate::node_editor::NodeEditor>().set_up(&timeline, &inspector);
+    let panel = glib::Object::new::<crate::node_panel::NodePanel>();
+    panel.set_up(&timeline);
+    panel.show(Some(nox_project::SOURCE.into()));
     glib::Object::new::<ClipStrip>().set_up(&timeline, &window.imp_children().0);
     assert!(crate::timeline::clip_menu().n_items() > 0, "clip menu");
     let (video, audio) = crate::timeline::track_menus();

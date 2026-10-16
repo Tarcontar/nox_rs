@@ -11,14 +11,21 @@ fn crate_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The files with `extension` in `dir` and its subfolders.
 fn files(dir: &str, extension: &str) -> Vec<PathBuf> {
-    let mut files: Vec<_> = std::fs::read_dir(crate_dir().join(dir))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == extension))
-        .collect();
-    files.sort();
-    files
+    let mut found = Vec::new();
+    let mut dirs = vec![crate_dir().join(dir)];
+    while let Some(dir) = dirs.pop() {
+        for path in std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == extension) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 fn has_words(text: &str) -> bool {

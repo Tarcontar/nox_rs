@@ -123,6 +123,8 @@ struct State {
     playback_id: u64,
     /// Measure scopes with every frame (`RenderedFrame::scopes`).
     scopes: bool,
+    /// Make thumbnails of this clip's effects (`Engine::set_thumbnail_clip`).
+    thumbnail_clip: Option<u64>,
     shutdown: bool,
 }
 
@@ -210,6 +212,7 @@ impl Engine {
                 playback: None,
                 playback_id: 0,
                 scopes: false,
+                thumbnail_clip: None,
                 shutdown: false,
             }),
             wake: Condvar::new(),
@@ -360,6 +363,19 @@ impl Engine {
         }
     }
 
+    /// Makes thumbnails of clip `clip`'s effects (`Timeline::clip_key`)
+    /// with every frame showing it from now on, delivered as
+    /// `EngineEvent::Thumbnails` (e.g. while the Effects page shows it).
+    /// Cached frames without them are rendered again.
+    pub fn set_thumbnail_clip(&self, clip: Option<u64>) {
+        let mut state = self.shared.state();
+        if state.thumbnail_clip != clip {
+            state.thumbnail_clip = clip;
+            state.generation += 1;
+            self.shared.interrupt();
+        }
+    }
+
     /// Decodes video as `hw` says from now on (initially as `NOX_DECODE`
     /// says). Frames are rendered again with the new decoders.
     pub fn set_hw_decode(&self, hw: HwDecode) {
@@ -453,7 +469,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
     // keyframe, which is slow and makes the lead grow again.
     let mut ahead: (u64, i64) = (0, i64::MIN);
     loop {
-        let (job, timeline, key, scopes, interrupts_then) = {
+        let (job, timeline, key, (scopes, thumbnail_clip), interrupts_then) = {
             let mut state = shared.state();
             loop {
                 if state.shutdown {
@@ -476,7 +492,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
                         Job::Request(frame),
                         timeline,
                         key,
-                        state.scopes,
+                        (state.scopes, state.thumbnail_clip),
                         interrupts(),
                     );
                 }
@@ -502,7 +518,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
                             Job::Ahead(frame, now - 2..now + ahead_frames),
                             timeline,
                             key,
-                            state.scopes,
+                            (state.scopes, state.thumbnail_clip),
                             interrupts(),
                         );
                     }
@@ -525,6 +541,7 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
         let started = Instant::now();
         let (width, height) = (key.width, key.height);
         renderer.set_scopes(scopes);
+        renderer.set_thumbnail_clip(thumbnail_clip);
         renderer.set_hw_decode(shared.hw_decode());
         if shared.reload_effects.swap(false, Ordering::Relaxed) {
             renderer.reload_matting();
@@ -568,6 +585,15 @@ fn run(shared: &Shared, mut renderer: Renderer, on_event: impl Fn(EngineEvent)) 
         for (path, decoding) in renderer.decodings_changed() {
             shared.decodings().insert(path.clone(), decoding);
             on_event(EngineEvent::Decoding(path));
+        }
+        if let Some((clip, thumbnails)) = renderer.take_thumbnails()
+            && result.is_ok()
+        {
+            on_event(EngineEvent::Thumbnails {
+                clip,
+                frame,
+                thumbnails,
+            });
         }
         if let Err(nox_media::Error::Interrupted) = result {
             tracing::trace!("frame {frame} interrupted after {elapsed:?}");

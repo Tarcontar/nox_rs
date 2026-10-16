@@ -1,0 +1,32 @@
+// A matte as a small gray thumbnail for the node editor (thumb_picture.comp
+// for pictures).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer Matte { float matte[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Thumbs { uint thumbs[]; };
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+    uvec2 thumb;
+    uint offset;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.thumb, pos)) {
+        return;
+    }
+    vec2 scale = vec2(p.size) / vec2(p.thumb);
+    float sum = 0.0;
+    for (int j = 0; j < 4; j++) {
+        for (int i = 0; i < 4; i++) {
+            vec2 at = (vec2(pos) + (vec2(i, j) + 0.5) / 4.0) * scale;
+            ivec2 q = clamp(ivec2(at), ivec2(0), ivec2(p.size) - 1);
+            sum += matte[uint(q.y) * p.size.x + uint(q.x)];
+        }
+    }
+    uint v = uint(round(clamp(sum / 16.0, 0.0, 1.0) * 255.0));
+    thumbs[p.offset + uint(pos.y) * p.thumb.x + uint(pos.x)] = v | (v << 8) | (v << 16) | (255u << 24);
+}

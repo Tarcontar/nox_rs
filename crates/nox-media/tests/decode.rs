@@ -372,6 +372,34 @@ fn still_image_any_index() {
     }
 }
 
+/// Hardware JPEG decoders handle baseline JPEG only (NVDEC fails on
+/// progressive ones with CUDA_ERROR_INVALID_IMAGE): a decoder opened with
+/// hardware falls back to software decoding rather than showing nothing.
+#[test]
+fn progressive_jpeg_decodes_with_any_setting() {
+    let Some((accel, _)) = gpu() else { return };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/progressive.jpg");
+    for hw in [
+        HwDecode::Auto,
+        HwDecode::Cuda,
+        HwDecode::Vulkan,
+        HwDecode::Vaapi,
+    ] {
+        let mut decoder = VideoDecoder::open_with(&path, Some(&accel), hw).unwrap();
+        let frame = decoder
+            .frame_at(0)
+            .unwrap_or_else(|e| panic!("{hw:?}: {e}"));
+        let frame = to_software(&frame).unwrap_or(frame);
+        let image = rgba_cpu(&frame, 96, 64).unwrap();
+        // Red on the left, blue on the right.
+        let at = |x: usize| &image.data[(32 * 96 + x) * 4..][..3];
+        assert!(at(10)[0] > 150 && at(10)[2] < 80, "{hw:?}: {:?}", at(10));
+        assert!(at(85)[2] > 150 && at(85)[0] < 80, "{hw:?}: {:?}", at(85));
+        // Asked again (cached or decoded anew), still the picture.
+        assert_eq!(decoder.frame_at(7).unwrap().width(), 96, "{hw:?}");
+    }
+}
+
 /// DMA-BUF export: with the linear modifier the buffer can be mapped, so
 /// the exported pixels can be compared with the readback path.
 #[cfg(target_os = "linux")]

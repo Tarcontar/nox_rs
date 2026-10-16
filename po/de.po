@@ -1516,22 +1516,6 @@ msgstr "Für diese Sitzung durch die Umgebungsvariable NOX_DECODE ({value}) fest
 msgid "Effects"
 msgstr "Effekte"
 
-#: resources/ui/inspector.ui
-msgid "Remove background"
-msgstr "Hintergrund entfernen"
-
-#: resources/ui/inspector.ui
-msgid "Cuts people out of their background (Robust Video Matting, on the graphics card)"
-msgstr "Stellt Personen frei (Robust Video Matting, auf der Grafikkarte)"
-
-#: src/inspector.rs
-msgid "Remove Background"
-msgstr "Hintergrund entfernen"
-
-#: src/inspector.rs
-msgid "Keep Background"
-msgstr "Hintergrund behalten"
-
 #: src/inspector.rs
 msgid "Download the background removal model?"
 msgstr "Das Modell zum Entfernen des Hintergrunds herunterladen?"
@@ -1575,3 +1559,281 @@ msgstr "Keine Modelle heruntergeladen. Effekte, die eines brauchen, bieten an, e
 #: src/preferences.rs
 msgid "{models} ({size} MB) in {folder}"
 msgstr "{models} ({size} MB) in {folder}"
+
+#: crates/nox-gui/resources/ui/inspector.ui
+msgid "Add Effect…"
+msgstr "Effekt hinzufügen …"
+
+#: crates/nox-gui/resources/ui/inspector.ui
+msgid "Adds an effect to the clip, after its other effects"
+msgstr "Fügt dem Clip einen Effekt nach seinen anderen Effekten hinzu"
+
+#: crates/nox-gui/src/inspector/effects.rs
+#, python-brace-format
+msgid "Add {effect}"
+msgstr "{effect} hinzufügen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+#, python-brace-format
+msgid "{name} (not supported)"
+msgstr "{name} (nicht unterstützt)"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Turns the effect on or off"
+msgstr "Schaltet den Effekt ein oder aus"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Move Up"
+msgstr "Nach oben"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Move Down"
+msgstr "Nach unten"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Duplicate"
+msgstr "Duplizieren"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Reset"
+msgstr "Zurücksetzen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Remove"
+msgstr "Entfernen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Effect actions"
+msgstr "Effektaktionen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Turn Effect On"
+msgstr "Effekt einschalten"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Turn Effect Off"
+msgstr "Effekt ausschalten"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Move Effect"
+msgstr "Effekt verschieben"
+
+#: crates/nox-gui/src/inspector/effects.rs
+#, python-brace-format
+msgid "Duplicate {effect}"
+msgstr "{effect} duplizieren"
+
+#: crates/nox-gui/src/inspector/effects.rs
+#, python-brace-format
+msgid "Reset {effect}"
+msgstr "{effect} zurücksetzen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+#, python-brace-format
+msgid "Remove {effect}"
+msgstr "{effect} entfernen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+#, python-brace-format
+msgid "Change {effect}"
+msgstr "{effect} ändern"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "In percent"
+msgstr "In Prozent"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "In percent of the picture's height"
+msgstr "In Prozent der Bildhöhe"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Toggle Keyframe"
+msgstr "Keyframe setzen oder entfernen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Nox can't render this effect; it stays in the project."
+msgstr "Nox kann diesen Effekt nicht berechnen; er bleibt im Projekt."
+
+#: crates/nox-fx/src/registry.rs
+msgid "Blur and Sharpen"
+msgstr "Weichzeichnen und Schärfen"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Keying"
+msgstr "Keying"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Stylize"
+msgstr "Stilisieren"
+
+#: crates/nox-fx/src/registry.rs
+msgid "AI"
+msgstr "KI"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Gaussian Blur"
+msgstr "Gaußscher Weichzeichner"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Radius"
+msgstr "Radius"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Sharpen"
+msgstr "Schärfen"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Amount"
+msgstr "Stärke"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Threshold"
+msgstr "Schwellenwert"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Painterly"
+msgstr "Gemalt"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Sharpness"
+msgstr "Schärfe"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Chroma Key"
+msgstr "Chroma-Key"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Key Color"
+msgstr "Key-Farbe"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Tolerance"
+msgstr "Toleranz"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Softness"
+msgstr "Weichheit"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Spill Suppression"
+msgstr "Farbsaumunterdrückung"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Show Matte"
+msgstr "Maske zeigen"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Model"
+msgstr "Modell"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Video (fast)"
+msgstr "Video (schnell)"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Detailed (slow)"
+msgstr "Detailliert (langsam)"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "Open Effects Page"
+msgstr "Effekte-Seite öffnen"
+
+#: crates/nox-gui/src/inspector/effects.rs
+msgid "These effects are wired as a graph and edited on the Effects page."
+msgstr "Diese Effekte sind als Graph verbunden und werden auf der Effekte-Seite bearbeitet."
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Source"
+msgstr "Quelle"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Picture"
+msgstr "Bild"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Output"
+msgstr "Ausgabe"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Effect graph"
+msgstr "Effektgraph"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Move Node"
+msgstr "Knoten verschieben"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Connect"
+msgstr "Verbinden"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Disconnect"
+msgstr "Trennen"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Remove Node"
+msgstr "Knoten entfernen"
+
+#: crates/nox-gui/src/node_editor.rs
+msgid "Select a video clip to see its effects."
+msgstr "Wählen Sie einen Videoclip aus, um seine Effekte zu sehen."
+
+#: crates/nox-gui/src/node_panel.rs
+msgid "On"
+msgstr "Ein"
+
+#: crates/nox-gui/src/node_panel.rs
+msgid "Source: the clip's picture"
+msgstr "Quelle: das Bild des Clips"
+
+#: crates/nox-gui/src/node_panel.rs
+msgid "Output: what's composited"
+msgstr "Ausgabe: was zusammengesetzt wird"
+
+#: crates/nox-gui/src/node_panel.rs
+msgid "Select a node to change it."
+msgstr "Wählen Sie einen Knoten aus, um ihn zu ändern."
+
+#: crates/nox-fx/src/registry.rs
+msgid "Mattes"
+msgstr "Masken"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Mask"
+msgstr "Maske"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Matte"
+msgstr "Maske"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Segment Subject"
+msgstr "Motiv freistellen"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Apply Matte"
+msgstr "Maske anwenden"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Mode"
+msgstr "Modus"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Multiply Alpha"
+msgstr "Alpha multiplizieren"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Replace Alpha"
+msgstr "Alpha ersetzen"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Invert"
+msgstr "Umkehren"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Invert Matte"
+msgstr "Maske umkehren"
+
+#: crates/nox-fx/src/registry.rs
+msgid "Feather Matte"
+msgstr "Maske weichzeichnen"

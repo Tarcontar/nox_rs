@@ -7,6 +7,7 @@
 
 pub mod document;
 pub mod edit;
+pub mod effects;
 pub mod keyframes;
 pub mod metadata;
 pub mod relink;
@@ -15,6 +16,7 @@ pub mod timeline;
 
 pub use document::Document;
 pub use edit::{Edge, EditError, ItemRef, MARKER_COLORS};
+pub use effects::{Connection, Cycle, SOURCE};
 pub use keyframes::{Ease, GradeKeyframe, Keyframe, Param};
 pub use metadata::{Object, Value};
 /// Clip grades (`Item::grade`).
@@ -24,8 +26,7 @@ pub use time::{
     timecode,
 };
 pub use timeline::{
-    AudioSegment, BACKGROUND_REMOVAL, BlendMode, Clip, Composable, DEFAULT_MEDIA_KEY, Dip,
-    DipColor, Effect, EffectKind, Gap, Item, Marker, MediaReference, Mix, ReferenceKind,
-    ResolvedClip, ScalingMode, Settings, Side, Stack, Timeline, Track, TrackKind, Transform,
-    Transition, TransitionKind,
+    AudioSegment, BlendMode, Clip, Composable, DEFAULT_MEDIA_KEY, Dip, DipColor, Effect,
+    EffectKind, Gap, Item, Marker, MediaReference, Mix, ReferenceKind, ResolvedClip, ScalingMode,
+    Settings, Side, Stack, Timeline, Track, TrackKind, Transform, Transition, TransitionKind,
 };

@@ -119,7 +119,7 @@
             <property name="action">action(win.set-out)</property>
           </object>
         </child>
-        <!-- Shift+4, Shift+6 and Shift+9 (pages, project settings) are
+        <!-- Shift+4, Shift+5, Shift+6 and Shift+9 (pages, project settings) are
              matched by physical key in window.rs: a <Shift>6 trigger misses
              on layouts where Shift+6 types another character (^ on US). -->
       </object>
@@ -444,6 +444,58 @@
                         </child>
                       </object>
                     </property>
+                  </object>
+                </property>
+              </object>
+            </property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkStackPage">
+            <property name="name">effects</property>
+            <property name="title" translatable="yes">Effects</property>
+            <property name="child">
+              <!-- The viewer and the selected node's controls above, the
+                   clips and the node editor below (as the Color page). -->
+              <object class="GtkPaned" id="effects_paned">
+                <property name="orientation">vertical</property>
+                <property name="resize-end-child">false</property>
+                <property name="shrink-end-child">true</property>
+                <property name="wide-handle">true</property>
+                <property name="start-child">
+                  <object class="GtkPaned">
+                    <property name="orientation">horizontal</property>
+                    <property name="resize-end-child">false</property>
+                    <property name="shrink-end-child">false</property>
+                    <property name="wide-handle">true</property>
+                    <property name="start-child">
+                      <object class="GtkBox" id="effects_viewer_slot">
+                        <property name="hexpand">true</property>
+                      </object>
+                    </property>
+                    <property name="end-child">
+                      <object class="GtkScrolledWindow">
+                        <property name="width-request">320</property>
+                        <property name="hscrollbar-policy">never</property>
+                        <property name="child">
+                          <object class="NoxNodePanel" id="node_panel"/>
+                        </property>
+                      </object>
+                    </property>
+                  </object>
+                </property>
+                <property name="end-child">
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <child>
+                      <object class="NoxClipStrip" id="effects_clip_strip"/>
+                    </child>
+                    <child>
+                      <object class="GtkSeparator"/>
+                    </child>
+                    <child>
+                      <object class="NoxNodeEditor" id="node_editor"/>
+                    </child>
                   </object>
                 </property>
               </object>

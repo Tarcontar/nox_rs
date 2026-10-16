@@ -692,6 +692,15 @@ impl Compositor {
         true
     }
 
+    /// Whether a picture under `key` is cached for a layer at `rect`
+    /// (`try_cached_layer` would add it).
+    pub fn has_cached_layer(&self, key: u64, rect: Rect, style: LayerStyle) -> bool {
+        let size = style.transform.image_size(rect);
+        self.cache
+            .iter()
+            .any(|c| c.key == key && (c.width, c.height) == size)
+    }
+
     /// Like `add_layer`, but keeps the converted image under `key` for
     /// later pictures (`try_cached_layer`). For stills.
     pub fn add_cached_layer<'f, 'a: 'f>(

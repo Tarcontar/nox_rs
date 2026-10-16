@@ -1,0 +1,48 @@
+// Chroma key, in place: alpha falls off as a pixel's chromaticity
+// (rgb / (r + g + b), so exposure doesn't matter) nears the key's; the
+// key's dominant channel is held down to the others' (spill
+// suppression). Linear working-space values.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D picture;
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+    // The key's chromaticity (rgb, sums to 1).
+    vec4 key;
+    // Chromaticity distance up to which the key is fully transparent,
+    // and over which it fades in.
+    float tolerance;
+    float softness;
+    float spill;
+    // The key's strongest channel (0 r, 1 g, 2 b).
+    uint dominant;
+    // Shows alpha as gray instead.
+    uint show_matte;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.size, pos)) {
+        return;
+    }
+    vec4 c = imageLoad(picture, pos);
+    vec3 rgb = max(c.rgb, vec3(0.0));
+    float sum = rgb.r + rgb.g + rgb.b;
+    // Black and near black have no chromaticity: kept.
+    float d = sum > 1e-4 ? distance(rgb / sum, p.key.rgb) : 1.0;
+    float alpha = smoothstep(p.tolerance, p.tolerance + p.softness + 1e-6, d);
+    // Spill: the dominant channel down to the larger of the others.
+    uint a = (p.dominant + 1u) % 3u;
+    uint b = (p.dominant + 2u) % 3u;
+    float limit = max(rgb[a], rgb[b]);
+    rgb[p.dominant] = mix(rgb[p.dominant], min(rgb[p.dominant], limit), p.spill);
+    c.a *= alpha;
+    c.rgb = rgb;
+    if (p.show_matte != 0u) {
+        c = vec4(vec3(c.a), 1.0);
+    }
+    imageStore(picture, pos, c);
+}

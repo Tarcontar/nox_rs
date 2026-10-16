@@ -27,6 +27,7 @@ mod tensor;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub use bridge::Matte;
 pub use kernels::{MatrixKernels, Precision};
 pub use matting::Matting;
 pub use model::{Input, Model};

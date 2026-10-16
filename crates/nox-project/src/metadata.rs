@@ -127,6 +127,29 @@ impl From<Object> for Value {
     }
 }
 
+/// A value of Nox's own metadata in `metadata`: `metadata.nox.<key>`.
+pub(crate) fn nox_value<'a>(metadata: &'a Object, key: &str) -> Option<&'a Value> {
+    metadata.get("nox")?.as_object()?.get(key)
+}
+
+/// Sets or (with `None`) removes `metadata.nox.<key>`, and `nox` itself
+/// once it's empty.
+pub(crate) fn set_nox_value(metadata: &mut Object, key: &str, value: Option<Value>) {
+    let mut nox = match metadata.remove("nox") {
+        Some(Value::Object(nox)) => nox,
+        _ => Object::new(),
+    };
+    match value {
+        Some(value) => nox.insert(key, value),
+        None => {
+            nox.remove(key);
+        }
+    }
+    if !nox.is_empty() {
+        metadata.insert("nox", nox);
+    }
+}
+
 /// String keys to values, in insertion order. Comparison ignores order.
 #[derive(Debug, Clone, Default)]
 pub struct Object(Vec<(String, Value)>);

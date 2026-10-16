@@ -22,6 +22,8 @@ use crate::viewer::Viewer;
 
 /// Called with a file whose decoding became known or changed.
 type DecodingChanged = Box<dyn Fn(&Path)>;
+/// Called with a clip's effects' thumbnails (`Timeline::clip_key`).
+type ThumbnailsMade = Box<dyn Fn(u64, &[nox_fx::Thumbnail])>;
 
 pub struct Playback {
     engine: Engine,
@@ -38,6 +40,8 @@ pub struct Playback {
     scopes: RefCell<Option<ScopesPanel>>,
     /// Called when how a file decodes becomes known or changes.
     decoding_changed: RefCell<Vec<DecodingChanged>>,
+    /// Called with thumbnails of the clip set by `set_thumbnail_clip`.
+    thumbnails_made: RefCell<Vec<ThumbnailsMade>>,
 }
 
 impl Playback {
@@ -57,6 +61,7 @@ impl Playback {
             stats: Cell::new(Stats::default()),
             scopes: RefCell::default(),
             decoding_changed: RefCell::default(),
+            thumbnails_made: RefCell::default(),
         });
         playback.sync_timeline();
         let preferences = crate::preferences::Preferences::get();
@@ -90,6 +95,17 @@ impl Playback {
                     EngineEvent::Decoding(path) => {
                         for callback in playback.decoding_changed.borrow().iter() {
                             callback(&path);
+                        }
+                    }
+                    EngineEvent::Thumbnails {
+                        clip,
+                        frame,
+                        thumbnails,
+                    } => {
+                        if playback.engine.is_playing() || frame == playback.timeline.playhead() {
+                            for callback in playback.thumbnails_made.borrow().iter() {
+                                callback(clip, &thumbnails);
+                            }
                         }
                     }
                     EngineEvent::Error { frame, message } => {
@@ -149,6 +165,21 @@ impl Playback {
         playback.update_size();
         playback.show_playhead();
         playback
+    }
+
+    /// Makes thumbnails of clip `clip`'s effects (`Timeline::clip_key`)
+    /// with every frame showing it, or none.
+    pub fn set_thumbnail_clip(&self, clip: Option<u64>) {
+        self.engine.set_thumbnail_clip(clip);
+        if !self.engine.is_playing() {
+            self.show_playhead();
+        }
+    }
+
+    /// Calls `callback` with the thumbnails of the clip set by
+    /// `set_thumbnail_clip`, as frames showing it render.
+    pub fn connect_thumbnails(&self, callback: impl Fn(u64, &[nox_fx::Thumbnail]) + 'static) {
+        self.thumbnails_made.borrow_mut().push(Box::new(callback));
     }
 
     fn sync_timeline(&self) {

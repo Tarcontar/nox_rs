@@ -2,8 +2,8 @@
 //! GPU and hands out the result as DMA-BUF or in system memory.
 
 use nox_gpu::{
-    BlendMode, Compositor, FrameLight, GpuTarget, Image, LayerHook, LayerPicture, LayerStyle,
-    Placement, Rect, Transform,
+    BlendMode, Compositor, FrameLight, GpuTarget, Image, LayerHook, LayerStyle, Placement, Rect,
+    Transform,
 };
 use nox_media::{Accel, Decoding, HwDecode, VideoDecoder};
 use nox_project::{Time, Timeline};
@@ -139,10 +139,19 @@ pub(crate) struct Renderer {
     hw: HwDecode,
     /// How each file decodes, as last reported (`decodings_changed`).
     decodings: std::collections::HashMap<PathBuf, Decoding>,
-    /// Background removal models by id, loaded as clips need them (which
-    /// one is the model registry's choice).
-    removers: std::collections::HashMap<String, Loaded<nox_ai::BackgroundRemover>>,
+    /// Runs clips' effects; made when the first clip with effects shows.
+    effects: Option<nox_fx::Effects>,
+    /// The clip (`Timeline::clip_key`) whose effects' thumbnails are made.
+    thumbnail_clip: Option<u64>,
+    /// The still (cache key) whose thumbnails were made last: cached, it
+    /// doesn't run its effects again.
+    thumbnailed_still: Option<u64>,
+    /// Thumbnails made by the last render.
+    thumbnails: Option<(u64, Vec<nox_fx::Thumbnail>)>,
 }
+
+/// The largest thumbnails of a clip's effects.
+pub(crate) const THUMBNAIL_SIZE: (u32, u32) = (160, 90);
 
 impl Renderer {
     pub fn new(dmabuf_formats: &[(u32, u64)], dmabuf_allowed: Arc<AtomicBool>) -> Self {
@@ -174,8 +183,25 @@ impl Renderer {
             scopes: false,
             hw: HwDecode::from_env(),
             decodings: Default::default(),
-            removers: Default::default(),
+            effects: None,
+            thumbnail_clip: None,
+            thumbnailed_still: None,
+            thumbnails: None,
         }
+    }
+
+    /// Makes thumbnails of clip `clip`'s effects (`Timeline::clip_key`)
+    /// with every frame showing it from now on.
+    pub fn set_thumbnail_clip(&mut self, clip: Option<u64>) {
+        if self.thumbnail_clip != clip {
+            self.thumbnail_clip = clip;
+            self.thumbnailed_still = None;
+        }
+    }
+
+    /// The clip and thumbnails made by the last render, if it made any.
+    pub fn take_thumbnails(&mut self) -> Option<(u64, Vec<nox_fx::Thumbnail>)> {
+        self.thumbnails.take()
     }
 
     /// Whether the GPU keeps 16-bit floats (runs fp16 models in 16 bits);
@@ -186,11 +212,11 @@ impl Renderer {
             .map(|(accel, _)| accel.gpu().storage_16bit())
     }
 
-    /// Tries loading background removal again (e.g. after the model was
+    /// Tries loading effects' models again (e.g. after they were
     /// downloaded).
     pub fn reload_matting(&mut self) {
-        for remover in self.removers.values_mut() {
-            remover.retry();
+        if let Some(effects) = &mut self.effects {
+            effects.reload();
         }
     }
 
@@ -243,17 +269,8 @@ impl Renderer {
             .into_iter()
             .filter_map(|layer| {
                 let path = timeline.media_path(layer.clip.media_reference()?)?;
-                let matte = layer.clip.item.removes_background().then(|| {
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    path.hash(&mut hasher);
-                    layer
-                        .clip
-                        .trimmed_range()
-                        .map(|r| r.start.as_seconds().to_bits())
-                        .hash(&mut hasher);
-                    hasher.finish()
-                });
+                let clip = timeline.clip_key(layer.clip)?;
+                let source = layer.source_time.as_seconds();
                 Some(Layer {
                     time: layer.file_time(),
                     opacity: layer.opacity,
@@ -264,7 +281,8 @@ impl Renderer {
                         layer.wipe,
                     ),
                     dip: layer.dip,
-                    matte,
+                    effects: nox_fx::resolve(&layer.clip.item, source),
+                    clip,
                     path,
                 })
             })
@@ -392,6 +410,7 @@ impl Renderer {
     ) -> nox_media::Result<()> {
         let (accel, compositor) = self.gpu.as_mut().expect("gpu");
         compositor.begin(width, height)?;
+        self.thumbnails = None;
         for Layer {
             path,
             time,
@@ -400,7 +419,8 @@ impl Renderer {
             grade,
             transform,
             dip,
-            matte,
+            effects,
+            clip,
         } in layers
         {
             // A dip's color goes below the picture or above it.
@@ -436,52 +456,66 @@ impl Renderer {
                     grade: *grade,
                     transform: gpu_transform(transform),
                 };
-                // Background removal writes the matte into the picture,
-                // with the models the registry picks for it that load.
-                let mut hook = matte.map(|key| {
-                    use nox_ai::models::{Conditions, Media, Task};
-                    let conditions = Conditions {
-                        media: if still { Media::Still } else { Media::Video },
-                        f16: accel.gpu().storage_16bit(),
-                    };
-                    let candidates =
-                        nox_ai::models::registry().candidates(Task::BackgroundRemoval, &conditions);
-                    let models = candidates
-                        .into_iter()
-                        .filter(|model| {
-                            self.removers
-                                .entry(model.id.clone())
-                                .or_insert(Loaded::Unloaded)
-                                .load(model, |path| {
-                                    nox_ai::BackgroundRemover::new(accel.gpu().clone(), model, path)
-                                })
-                                .is_some()
-                        })
-                        .map(|model| model.id.clone())
-                        .collect();
-                    MatteHook {
-                        removers: &mut self.removers,
-                        models,
-                        key,
-                        frame: (!still).then_some(index),
+                // The clip's effects run on its picture, in stack order.
+                // The clip shown on the Effects page runs them (if only
+                // to show its picture) for thumbnails.
+                let thumbnailed = self.thumbnail_clip == Some(*clip);
+                let runs = !effects.is_empty() || thumbnailed;
+                if runs && self.effects.is_none() {
+                    match nox_fx::Effects::new(accel.gpu().clone()) {
+                        Ok(created) => self.effects = Some(created),
+                        Err(err) => tracing::warn!("no effects: {err}"),
                     }
-                });
-                // Which model mattes it makes a different still.
-                let model = hook.as_ref().and_then(|h| h.models.first().cloned());
-                let hook = hook.as_mut().map(|h| h as &mut dyn LayerHook);
+                }
+                let context = nox_fx::Context {
+                    clip: *clip,
+                    frame: (!still).then_some(index),
+                };
+                let mut prepared = self
+                    .effects
+                    .as_mut()
+                    .filter(|_| runs)
+                    .map(|fx| fx.prepare(effects.clone(), context))
+                    .map(|p| {
+                        if thumbnailed {
+                            p.with_thumbnails(THUMBNAIL_SIZE)
+                        } else {
+                            p
+                        }
+                    });
+                // A still's effects (values, models) make a different still.
+                let effects_key = prepared
+                    .as_ref()
+                    .filter(|p| !p.is_empty())
+                    .map(nox_fx::Prepared::key);
+                let hook = prepared.as_mut().map(|h| h as &mut dyn LayerHook);
                 if still {
                     // Stills are converted once and kept on the GPU (with
-                    // their matte, if any).
-                    let key = still_key(path, matte.map(|m| (m, model)));
-                    if !compositor.try_cached_layer(key, rect, style) {
+                    // their effects, if any), unless their thumbnails are
+                    // still to be made.
+                    let key = still_key(path, effects_key);
+                    let thumbnail = thumbnailed && self.thumbnailed_still != Some(key);
+                    if thumbnail {
+                        self.thumbnailed_still = Some(key);
+                    }
+                    if thumbnail || !compositor.try_cached_layer(key, rect, style) {
                         nox_media::with_gpu_input(&decoded, Some(&*accel), |input| {
-                            compositor.add_cached_layer_with(key, input, rect, style, hook)
+                            if thumbnail && compositor.has_cached_layer(key, rect, style) {
+                                compositor.add_layer_with(input, rect, style, hook)
+                            } else {
+                                compositor.add_cached_layer_with(key, input, rect, style, hook)
+                            }
                         })??;
                     }
                 } else {
                     nox_media::with_gpu_input(&decoded, Some(&*accel), |input| {
                         compositor.add_layer_with(input, rect, style, hook)
                     })??;
+                }
+                if let Some(made) = prepared.as_mut().map(nox_fx::Prepared::take_thumbnails)
+                    && !made.is_empty()
+                {
+                    self.thumbnails = Some((*clip, made));
                 }
             }
             if let Some(dip) = dip.filter(|d| !d.before) {
@@ -594,12 +628,13 @@ impl Framing {
     }
 }
 
-/// The still cache key of a file.
-fn still_key(path: &Path, matte: Option<(u64, Option<String>)>) -> u64 {
+/// The still cache key of a file with effects of `effects`
+/// (`Prepared::key`).
+fn still_key(path: &Path, effects: Option<u64>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
-    matte.hash(&mut hasher);
+    effects.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -614,86 +649,10 @@ struct Layer {
     transform: nox_project::Transform,
     /// The color of a dip drawn with it.
     dip: Option<nox_project::Dip>,
-    /// With its background removed: the clip, whose matte state this is.
-    matte: Option<u64>,
-}
-
-/// A model, loaded when a clip first needs it.
-enum Loaded<T> {
-    Unloaded,
-    Ready(Box<T>),
-    /// The model isn't there or doesn't load; not tried again until
-    /// `retry`.
-    Unavailable,
-}
-
-impl<T> Loaded<T> {
-    /// The model, loaded with `new` if it isn't yet and its file is there.
-    fn load(
-        &mut self,
-        model: &nox_ai::models::ModelInfo,
-        new: impl FnOnce(&Path) -> nox_ai::Result<T>,
-    ) -> Option<&mut T> {
-        if let Self::Unloaded = self {
-            let dir = nox_ai::models::default_dir();
-            *self = if !model.is_available(&dir) {
-                tracing::warn!(
-                    "background removal needs {} ({}) in {}",
-                    model.name,
-                    model.file,
-                    dir.display()
-                );
-                Self::Unavailable
-            } else {
-                match new(&model.path(&dir)) {
-                    Ok(loaded) => Self::Ready(Box::new(loaded)),
-                    Err(err) => {
-                        tracing::warn!("{} unavailable: {err}", model.name);
-                        Self::Unavailable
-                    }
-                }
-            };
-        }
-        match self {
-            Self::Ready(loaded) => Some(loaded),
-            _ => None,
-        }
-    }
-
-    /// Tries loading again (e.g. after the model was downloaded).
-    fn retry(&mut self) {
-        if let Self::Unavailable = self {
-            *self = Self::Unloaded;
-        }
-    }
-}
-
-/// Writes a clip's matte into its picture, with the first of `models`
-/// that works.
-struct MatteHook<'m> {
-    removers: &'m mut std::collections::HashMap<String, Loaded<nox_ai::BackgroundRemover>>,
-    /// Loaded, most preferred first.
-    models: Vec<String>,
-    key: u64,
-    /// The frame in the clip's media; `None` for stills.
-    frame: Option<i64>,
-}
-
-impl LayerHook for MatteHook<'_> {
-    fn process(&mut self, picture: &LayerPicture) -> nox_gpu::Result<()> {
-        // A model failing (e.g. short of GPU memory: BiRefNet needs
-        // gigabytes) falls back to the next; with none, the clip stays as
-        // it is rather than the frame unrendered.
-        for id in &self.models {
-            if let Some(Loaded::Ready(remover)) = self.removers.get_mut(id) {
-                match remover.apply(self.key, self.frame, picture) {
-                    Ok(()) => return Ok(()),
-                    Err(err) => tracing::warn!("background removal with {id}: {err}"),
-                }
-            }
-        }
-        Ok(())
-    }
+    /// Its effects at this frame.
+    effects: nox_fx::Graph,
+    /// Identifies the clip (its media and trim), for effects with state.
+    clip: u64,
 }
 
 /// Queues a solid color over the whole picture (a dip).

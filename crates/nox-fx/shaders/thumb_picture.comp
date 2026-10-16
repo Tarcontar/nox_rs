@@ -1,0 +1,48 @@
+// A picture as a small thumbnail for the node editor: each pixel the
+// average of 4 × 4 samples of its part of the picture, from the linear
+// working space to sRGB for display, transparency shown over a checker
+// board, packed as RGBA8 at element `offset` of `thumbs`.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D picture;
+layout(set = 0, binding = 1, std430) writeonly buffer Thumbs { uint thumbs[]; };
+
+layout(push_constant) uniform Params {
+    // The working space to linear sRGB primaries, rows.
+    vec4 rows[3];
+    uvec2 size;
+    uvec2 thumb;
+    uint offset;
+} p;
+
+float oetf(float v) {
+    v = clamp(v, 0.0, 1.0);
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.thumb, pos)) {
+        return;
+    }
+    vec2 scale = vec2(p.size) / vec2(p.thumb);
+    vec4 sum = vec4(0.0);
+    for (int j = 0; j < 4; j++) {
+        for (int i = 0; i < 4; i++) {
+            vec2 at = (vec2(pos) + (vec2(i, j) + 0.5) / 4.0) * scale;
+            vec4 c = imageLoad(picture, clamp(ivec2(at), ivec2(0), ivec2(p.size) - 1));
+            sum += vec4(c.rgb * c.a, c.a);
+        }
+    }
+    vec4 c = sum / 16.0;
+    vec3 rgb = c.a > 1e-6 ? c.rgb / c.a : vec3(0.0);
+    rgb = vec3(dot(p.rows[0].xyz, rgb), dot(p.rows[1].xyz, rgb), dot(p.rows[2].xyz, rgb));
+    rgb = vec3(oetf(rgb.r), oetf(rgb.g), oetf(rgb.b));
+    float checker = ((pos.x / 6 + pos.y / 6) % 2 == 0) ? 0.30 : 0.42;
+    rgb = mix(vec3(checker), rgb, clamp(c.a, 0.0, 1.0));
+    uvec3 bytes = uvec3(round(rgb * 255.0));
+    thumbs[p.offset + uint(pos.y) * p.thumb.x + uint(pos.x)] =
+        bytes.r | (bytes.g << 8) | (bytes.b << 16) | (255u << 24);
+}

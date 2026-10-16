@@ -1,0 +1,19 @@
+// A picture's alpha as a matte of its size (e.g. what a key kept).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D picture;
+layout(set = 0, binding = 1, std430) writeonly buffer Matte { float m[]; };
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.size, pos)) {
+        return;
+    }
+    m[uint(pos.y) * p.size.x + uint(pos.x)] = clamp(imageLoad(picture, pos).a, 0.0, 1.0);
+}

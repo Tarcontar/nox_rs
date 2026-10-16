@@ -37,7 +37,7 @@ fn render(engine: &Engine, events: &mpsc::Receiver<EngineEvent>, frame: i64) -> 
             EngineEvent::Frame(rendered) if rendered.frame == frame && rendered.exact => {
                 return rendered;
             }
-            EngineEvent::Frame(_) | EngineEvent::Decoding(_) => {}
+            EngineEvent::Frame(_) | EngineEvent::Decoding(_) | EngineEvent::Thumbnails { .. } => {}
             EngineEvent::Error { message, .. } => panic!("{message}"),
         }
     }
@@ -295,7 +295,7 @@ fn scrubbing_previews_and_interrupts() {
     let next = || loop {
         match events.recv_timeout(Duration::from_secs(20)).expect("event") {
             EngineEvent::Frame(rendered) => return rendered,
-            EngineEvent::Decoding(_) => {}
+            EngineEvent::Decoding(_) | EngineEvent::Thumbnails { .. } => {}
             EngineEvent::Error { message, .. } => panic!("{message}"),
         }
     };
@@ -642,6 +642,20 @@ fn reports_how_files_decode() {
     );
 }
 
+/// Removes `item`'s background: the subject's matte (AI) as its alpha.
+fn remove_background(item: &mut nox_project::Item) {
+    let segment = item.add_effect(nox_project::Effect::rendering(
+        "nox.segment_subject",
+        "Segment",
+    ));
+    let apply = item.add_effect(nox_project::Effect::rendering("nox.apply_matte", "Apply"));
+    item.effect_mut(&apply)
+        .unwrap()
+        .set_param("mode", Some(nox_project::Value::from("replace")));
+    nox_fx::materialize(item);
+    item.connect(&segment, "matte", &apply, "matte").unwrap();
+}
+
 /// Background removal (nox-ai's matting) runs on a clip that has it: a
 /// plain blue picture has no person in it, so it's matted out and the red
 /// clip below shows through. Needs the model in `NOX_MODELS_DIR` (skips
@@ -665,7 +679,7 @@ fn background_removal_shows_what_is_below() {
     timeline.place(0, clip(&red, 0, 50), f(0)).unwrap();
     let v2 = timeline.add_track(TrackKind::Video);
     let mut top = clip(&blue, 0, 50);
-    top.item_mut().unwrap().set_background_removal(true);
+    remove_background(top.item_mut().unwrap());
     timeline.place(v2, top, f(0)).unwrap();
 
     let (sender, events) = mpsc::channel();
@@ -715,7 +729,7 @@ fn background_removal_on_stills() {
         MediaReference::from_path(&photo, None),
         TimeRange::new(f(0), f(50)),
     ));
-    top.item_mut().unwrap().set_background_removal(true);
+    remove_background(top.item_mut().unwrap());
     timeline.place(v2, top, f(0)).unwrap();
 
     let (sender, events) = mpsc::channel();
@@ -728,4 +742,189 @@ fn background_removal_on_stills() {
         let px = pixel(&render(&engine, &events, frame), 80, 45);
         assert!(close(px, [0xC0, 0x30, 0x20]), "frame {frame}: {px:?}");
     }
+}
+
+/// A chroma key on the top clip (green, the key's default color) lets the
+/// red clip below show through.
+#[test]
+fn chroma_key_shows_what_is_below() {
+    if !common::have_gpu() {
+        eprintln!("skipping: needs a GPU");
+        return;
+    }
+    let (Some(red), Some(green)) = (
+        solid("red-key.mkv", "0xC03020", "320x180"),
+        solid("green-key.mkv", "0x00B040", "320x180"),
+    ) else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    timeline.place(0, clip(&red, 0, 50), f(0)).unwrap();
+    let v2 = timeline.add_track(TrackKind::Video);
+    let mut top = clip(&green, 0, 50);
+    top.item_mut()
+        .unwrap()
+        .add_effect(nox_project::Effect::rendering("nox.chroma_key", "Key"));
+    timeline.place(v2, top, f(0)).unwrap();
+
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    let px = pixel(&render(&engine, &events, 5), 80, 45);
+    assert!(close(px, [0xC0, 0x30, 0x20]), "{px:?}");
+}
+
+/// A blur on a still mixes the colors at an edge; the still is cached with
+/// its effects, so turning the blur off shows it sharp again.
+#[test]
+fn blurred_stills_follow_their_effects() {
+    if !common::have_gpu() {
+        eprintln!("skipping: needs a GPU");
+        return;
+    }
+    let Some(photo) = fixture(
+        "red-blue.png",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=320x180,drawbox=x=160:y=0:w=160:h=180:color=blue:t=fill,format=rgb24",
+            "-frames:v",
+            "1",
+        ],
+    ) else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    let mut still = Composable::Clip(Clip::new(
+        "p",
+        MediaReference::from_path(&photo, None),
+        TimeRange::new(f(0), f(50)),
+    ));
+    let blur = still
+        .item_mut()
+        .unwrap()
+        .add_effect(nox_project::Effect::rendering("nox.gaussian_blur", "Blur"));
+    still
+        .item_mut()
+        .unwrap()
+        .effect_mut(&blur)
+        .unwrap()
+        .set_number_at("radius", 0.0, 5.0);
+    timeline.place(0, still, f(0)).unwrap();
+
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline.clone()));
+    // Two pixels left of the edge: red mixed with blue.
+    let px = pixel(&render(&engine, &events, 5), 78, 45);
+    assert!(px[0] > 0x40 && px[2] > 0x40, "blurred: {px:?}");
+
+    let track = timeline.track_mut(0).unwrap();
+    let Some(Composable::Clip(still)) = track.children.first_mut() else {
+        panic!("the still");
+    };
+    still.item.effect_mut(&blur).unwrap().enabled = false;
+    engine.set_timeline(Arc::new(timeline));
+    let px = pixel(&render(&engine, &events, 5), 78, 45);
+    assert!(close(px, [0xFF, 0, 0]), "sharp again: {px:?}");
+}
+
+/// Effects as a graph: a key of the blue half of a still masks a blur, so
+/// only the red half (the key's matte) is blurred: next to the edge, red
+/// takes on blue, blue stays blue.
+#[test]
+fn masked_effects_on_a_still() {
+    if !common::have_gpu() {
+        eprintln!("skipping: needs a GPU");
+        return;
+    }
+    let Some(photo) = fixture(
+        "red-blue-mask.png",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=320x180,drawbox=x=160:y=0:w=160:h=180:color=blue:t=fill,format=rgb24",
+            "-frames:v",
+            "1",
+        ],
+    ) else {
+        return;
+    };
+    let mut still = Composable::Clip(Clip::new(
+        "p",
+        MediaReference::from_path(&photo, None),
+        TimeRange::new(f(0), f(50)),
+    ));
+    let item = still.item_mut().unwrap();
+    let blur = item.add_effect(nox_project::Effect::rendering("nox.gaussian_blur", "Blur"));
+    item.effect_mut(&blur)
+        .unwrap()
+        .set_number_at("radius", 0.0, 5.0);
+    let key = item.add_effect(nox_project::Effect::rendering("nox.chroma_key", "Key"));
+    item.effect_mut(&key).unwrap().set_param(
+        "color",
+        Some(nox_project::Value::Array(vec![
+            nox_project::Value::Float(0.0),
+            nox_project::Value::Float(0.0),
+            nox_project::Value::Float(1.0),
+        ])),
+    );
+    nox_fx::materialize(item);
+    item.connect(nox_project::SOURCE, "picture", &key, "picture")
+        .unwrap();
+    item.connect(&key, "matte", &blur, "mask").unwrap();
+    item.set_effects_output(Some(nox_project::Connection::new(&blur, "picture")));
+    let mut timeline = Timeline::new("t", FPS);
+    timeline.place(0, still, f(0)).unwrap();
+    let clip = {
+        let layers = timeline.video_layers(f(0));
+        timeline.clip_key(layers[0].clip).unwrap()
+    };
+
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    let frame = render(&engine, &events, 5);
+    let red_side = pixel(&frame, 78, 45);
+    let blue_side = pixel(&frame, 82, 45);
+    assert!(red_side[2] > 0x30, "blurred red side: {red_side:?}");
+    assert!(
+        close(blue_side, [0, 0, 0xFF]),
+        "unblurred blue side: {blue_side:?}"
+    );
+
+    // Shown on the Effects page, the cached still runs its effects again
+    // for thumbnails: the source, the key, the blur and the output.
+    engine.set_thumbnail_clip(Some(clip));
+    engine.request(5);
+    let thumbnails = loop {
+        match events
+            .recv_timeout(Duration::from_secs(20))
+            .expect("thumbnails in time")
+        {
+            EngineEvent::Thumbnails {
+                clip: c,
+                frame: 5,
+                thumbnails,
+            } if c == clip => {
+                break thumbnails;
+            }
+            EngineEvent::Error { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    };
+    let nodes: Vec<&str> = thumbnails.iter().map(|t| t.node.as_str()).collect();
+    assert_eq!(nodes, [nox_project::SOURCE, &key, &blur, nox_fx::OUTPUT]);
+    assert_eq!((thumbnails[0].width, thumbnails[0].height), (160, 90));
 }

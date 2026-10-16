@@ -922,6 +922,46 @@ mod tests {
     }
 
     #[test]
+    fn effect_stacks_round_trip() {
+        let mut timeline = Timeline::new("t", Rational::new(25, 1));
+        let v1 = timeline.track_mut(0).unwrap();
+        // Without a uid, as other tools write effects.
+        v1.item.effects.push(nox_project::Effect::rendering(
+            "nox.segment_subject",
+            "Segment",
+        ));
+        let blur = v1
+            .item
+            .add_effect(nox_project::Effect::rendering("nox.gaussian_blur", "Blur"));
+        let blur = v1.item.effect_mut(&blur).unwrap();
+        blur.set_number_at("radius", 0.0, 12.0);
+        blur.toggle_keyframe("radius", 1.5, 0.0);
+        blur.enabled = false;
+        blur.set_node_position(Some((200.0, 40.0)));
+        // A graph: the blur masked by the subject's matte.
+        v1.item.ensure_effect_uids();
+        // (The blur, added first, is uid 1; the segmentation gets 2.)
+        v1.item.connect("2", "matte", "1", "mask").unwrap();
+        v1.item
+            .set_effects_output(Some(nox_project::Connection::new("1", "picture")));
+        timeline
+            .tracks
+            .item
+            .add_effect(nox_project::Effect::rendering("nox.chroma_key", "Key"));
+        let text = write_string(&timeline);
+        let read = read_str(&text).unwrap();
+        assert_eq!(read, timeline);
+        let names: Vec<String> = read
+            .track(0)
+            .unwrap()
+            .item
+            .rendering_effects()
+            .map(|(_, e)| e.effect_name.clone())
+            .collect();
+        assert_eq!(names, ["nox.segment_subject", "nox.gaussian_blur"]);
+    }
+
+    #[test]
     fn errors_name_the_item() {
         let text = r#"{"OTIO_SCHEMA": "Timeline.1", "name": "T", "tracks": {
             "OTIO_SCHEMA": "Stack.1", "children": [

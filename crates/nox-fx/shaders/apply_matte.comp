@@ -1,0 +1,31 @@
+// A matte into a picture's alpha, in place: multiplied with it (mode 0)
+// or replacing it (mode 1), inverted first if asked.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D picture;
+layout(set = 0, binding = 1, std430) readonly buffer Matte { float matte[]; };
+
+#include "matte.glsl"
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+    uvec2 matte_size;
+    uint mode;
+    uint invert;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.size, pos)) {
+        return;
+    }
+    float m = clamp(sample_matte(pos, p.size, p.matte_size), 0.0, 1.0);
+    if (p.invert != 0u) {
+        m = 1.0 - m;
+    }
+    vec4 c = imageLoad(picture, pos);
+    c.a = p.mode == 0u ? c.a * m : m;
+    imageStore(picture, pos, c);
+}

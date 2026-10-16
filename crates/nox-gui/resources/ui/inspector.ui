@@ -439,7 +439,8 @@
                         </child>
                       </object>
                     </child>
-                    <!-- Effects that change the picture (video clips). -->
+                    <!-- Effects that change the picture (video clips), in
+                         order. -->
                     <child>
                       <object class="GtkBox" id="effects_section">
                         <property name="orientation">vertical</property>
@@ -453,26 +454,19 @@
                             </style>
                           </object>
                         </child>
+                        <!-- The selected clip's effect stack, built from code
+                             (effects_view.rs). -->
                         <child>
-                          <object class="GtkBox">
-                            <property name="spacing">8</property>
-                            <child>
-                              <object class="GtkLabel" id="background_label">
-                                <property name="label" translatable="yes">Remove background</property>
-                                <property name="xalign">0</property>
-                                <property name="hexpand">true</property>
-                              </object>
-                            </child>
-                            <child>
-                              <object class="GtkSwitch" id="remove_background">
-                                <property name="valign">center</property>
-                                <signal name="notify::active" handler="on_remove_background_changed" swapped="true"/>
-                                <property name="tooltip-text" translatable="yes">Cuts people out of their background (Robust Video Matting, on the graphics card)</property>
-                                <accessibility>
-                                  <relation name="labelled-by">background_label</relation>
-                                </accessibility>
-                              </object>
-                            </child>
+                          <object class="GtkBox" id="effects_list">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">4</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkMenuButton" id="add_effect">
+                            <property name="label" translatable="yes">Add Effect…</property>
+                            <property name="halign">start</property>
+                            <property name="tooltip-text" translatable="yes">Adds an effect to the clip, after its other effects</property>
                           </object>
                         </child>
                         <child>

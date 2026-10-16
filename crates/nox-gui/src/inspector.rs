@@ -13,6 +13,8 @@ use crate::project::Project;
 use crate::timeline::TimelineView;
 use crate::ui_util::string_list;
 
+mod effects;
+
 mod imp {
     use super::*;
     use std::cell::{Cell, OnceCell};
@@ -33,7 +35,9 @@ mod imp {
         #[template_child]
         pub effects_section: TemplateChild<gtk::Box>,
         #[template_child]
-        pub remove_background: TemplateChild<gtk::Switch>,
+        pub effects_list: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub add_effect: TemplateChild<gtk::MenuButton>,
         #[template_child]
         pub background_status: TemplateChild<gtk::Label>,
         #[template_child]
@@ -122,6 +126,12 @@ mod imp {
         /// Set while the widgets are updated from the model, so their
         /// change handlers don't write the values back as edits.
         pub updating: Cell<bool>,
+        /// The selected clip's effect rows (`effects.rs`).
+        pub effect_rows: std::cell::RefCell<Vec<super::effects::EffectRow>>,
+        /// Effects whose rows are open, by key.
+        pub expanded_effects: std::cell::RefCell<std::collections::HashSet<String>>,
+        /// Opens the next effect added.
+        pub expand_added_effect: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -191,6 +201,7 @@ mod imp {
                 glib::Propagation::Stop
             });
             self.item_scroller.add_controller(wheel);
+            obj.setup_effects();
             self.speed.adjustment().connect_value_changed(glib::clone!(
                 #[weak]
                 obj,
@@ -402,31 +413,6 @@ impl Inspector {
         if let Ok(item) = changed {
             timeline.set_selection(Some(item));
         }
-    }
-
-    /// Turns background removal on or off; the first time, offers to
-    /// download its model.
-    #[template_callback]
-    fn on_remove_background_changed(&self) {
-        let imp = self.imp();
-        if imp.updating.get() {
-            return;
-        }
-        let on = imp.remove_background.is_active();
-        let missing = if on {
-            self.missing_models()
-        } else {
-            Vec::new()
-        };
-        if !missing.is_empty() {
-            // Off until the models are there.
-            imp.updating.set(true);
-            imp.remove_background.set_active(false);
-            imp.updating.set(false);
-            self.offer_model_download(missing);
-            return;
-        }
-        self.set_background_removal(on);
     }
 
     #[template_callback]
@@ -654,13 +640,19 @@ impl Inspector {
 
     /// The models the registry prefers for removing the selected clip's
     /// background (one of each kind: a still's segmentation model and the
-    /// matting model as its fallback) that aren't downloaded.
-    fn missing_models(&self) -> Vec<&'static nox_ai::models::ModelInfo> {
+    /// matting model as its fallback) that aren't downloaded. `choice` is
+    /// the effect's model choice: "auto" (for the clip), "video" or
+    /// "still".
+    fn missing_models(&self, choice: &str) -> Vec<&'static nox_ai::models::ModelInfo> {
         use nox_ai::models::{Conditions, Media, Task};
-        let still = self
-            .selected_video_path()
-            .and_then(|path| nox_media::probe(&path).ok())
-            .is_some_and(|info| info.is_still_image());
+        let still = match choice {
+            "video" => false,
+            "still" => true,
+            _ => self
+                .selected_video_path()
+                .and_then(|path| nox_media::probe(&path).ok())
+                .is_some_and(|info| info.is_still_image()),
+        };
         let conditions = Conditions {
             media: if still { Media::Still } else { Media::Video },
             f16: self
@@ -730,10 +722,11 @@ impl Inspector {
                 ));
                 imp.composite_section.set_visible(video);
                 imp.effects_section.set_visible(video);
-                imp.remove_background
-                    .set_active(clip.item.removes_background());
                 imp.audio_section.set_visible(!video);
                 let time = self.media_time().unwrap_or_default();
+                if video {
+                    self.show_effects(&clip.item, time);
+                }
                 imp.opacity_scale
                     .adjustment()
                     .set_value(clip.item.value_at(Param::Opacity, time) * 100.0);
@@ -836,19 +829,18 @@ impl Inspector {
     }
 }
 
-impl Inspector {
-    fn set_background_removal(&self, on: bool) {
-        let label = if on {
-            gettext("Remove Background")
-        } else {
-            gettext("Keep Background")
-        };
-        self.edit(&label, None, |item| item.set_background_removal(on));
-    }
+/// What to do once models are downloaded (e.g. add the effect needing
+/// them).
+type AfterDownload = Rc<dyn Fn(&Inspector)>;
 
+impl Inspector {
     /// Asks before downloading `models`, then downloads them, showing
-    /// progress, and turns background removal on for the selected clip.
-    fn offer_model_download(&self, models: Vec<&'static nox_ai::models::ModelInfo>) {
+    /// progress, and does `then`.
+    fn offer_model_download(
+        &self,
+        models: Vec<&'static nox_ai::models::ModelInfo>,
+        then: AfterDownload,
+    ) {
         let dir = nox_ai::models::default_dir();
         let names = models
             .iter()
@@ -882,14 +874,18 @@ impl Inspector {
                 self,
                 move |answer| {
                     if answer == Ok(1) {
-                        inspector.download_models(models);
+                        inspector.download_models(models, then.clone());
                     }
                 }
             ),
         );
     }
 
-    fn download_models(&self, models: Vec<&'static nox_ai::models::ModelInfo>) {
+    fn download_models(
+        &self,
+        models: Vec<&'static nox_ai::models::ModelInfo>,
+        then: AfterDownload,
+    ) {
         let status = self.imp().background_status.get();
         status.set_text(&gettext("Downloading…"));
         status.set_visible(true);
@@ -937,7 +933,7 @@ impl Inspector {
                         {
                             playback.reload_effects();
                         }
-                        inspector.set_background_removal(true);
+                        then(&inspector);
                     }
                     Ok(Err(err)) => {
                         tracing::warn!("model download failed: {err}");

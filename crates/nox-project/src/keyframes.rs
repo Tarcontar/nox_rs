@@ -1,5 +1,6 @@
 //! Keyframes: clip properties that change over time (opacity, volume and
-//! the transform), stored per property under `metadata.nox.keyframes`.
+//! the transform), stored per property under `metadata.nox.keyframes`;
+//! effects keep their parameters' the same way (`effects.rs`).
 //!
 //! Keyframe times are seconds in the clip's media (the time space of its
 //! `source_range`), as in Resolve, so keyframes stay on the same picture
@@ -175,60 +176,73 @@ pub fn interpolate(keys: &[Keyframe], time: f64) -> f64 {
     }
 }
 
+/// Keyframes from their stored form (`[{t, v, ease?}]`), sorted; broken
+/// ones are left out.
+pub(crate) fn keyframes_from(list: &Value) -> Vec<Keyframe> {
+    let mut keys: Vec<Keyframe> = list
+        .as_array()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|k| {
+            let k = k.as_object()?;
+            Some(Keyframe {
+                time: k.get("t")?.as_f64()?,
+                value: k.get("v")?.as_f64()?,
+                ease: match k.get("ease").and_then(Value::as_str) {
+                    Some("smooth") => Ease::Smooth,
+                    _ => Ease::Linear,
+                },
+            })
+        })
+        .collect();
+    keys.sort_by(|a, b| a.time.total_cmp(&b.time));
+    keys
+}
+
+/// The stored form of `keys`, sorted and one per time (none if empty).
+pub(crate) fn keyframes_value(mut keys: Vec<Keyframe>) -> Option<Value> {
+    keys.sort_by(|a, b| a.time.total_cmp(&b.time));
+    keys.dedup_by(|b, a| (a.time - b.time).abs() < SAME_TIME);
+    if keys.is_empty() {
+        return None;
+    }
+    let list = keys
+        .iter()
+        .map(|k| {
+            let mut object = Object::new();
+            object.insert("t", Value::Float(k.time));
+            object.insert("v", Value::Float(k.value));
+            if k.ease == Ease::Smooth {
+                object.insert("ease", "smooth");
+            }
+            Value::Object(object)
+        })
+        .collect();
+    Some(Value::Array(list))
+}
+
 impl Item {
     /// The keyframes of `param`, sorted by time (empty if it is constant).
     pub fn keyframes(&self, param: Param) -> Vec<Keyframe> {
-        let Some(list) = self
-            .nox_value("keyframes")
+        self.nox_value("keyframes")
             .and_then(Value::as_object)
             .and_then(|k| k.get(param.key()))
-            .and_then(Value::as_array)
-        else {
-            return Vec::new();
-        };
-        let mut keys: Vec<Keyframe> = list
-            .iter()
-            .filter_map(|k| {
-                let k = k.as_object()?;
-                Some(Keyframe {
-                    time: k.get("t")?.as_f64()?,
-                    value: k.get("v")?.as_f64()?,
-                    ease: match k.get("ease").and_then(Value::as_str) {
-                        Some("smooth") => Ease::Smooth,
-                        _ => Ease::Linear,
-                    },
-                })
-            })
-            .collect();
-        keys.sort_by(|a, b| a.time.total_cmp(&b.time));
-        keys
+            .map(keyframes_from)
+            .unwrap_or_default()
     }
 
     /// Replaces the keyframes of `param` (none: the property is constant
     /// again).
-    pub fn set_keyframes(&mut self, param: Param, mut keys: Vec<Keyframe>) {
-        keys.sort_by(|a, b| a.time.total_cmp(&b.time));
-        keys.dedup_by(|b, a| (a.time - b.time).abs() < SAME_TIME);
+    pub fn set_keyframes(&mut self, param: Param, keys: Vec<Keyframe>) {
         let mut all = match self.nox_value("keyframes") {
             Some(Value::Object(all)) => all.clone(),
             _ => Object::new(),
         };
-        if keys.is_empty() {
-            all.remove(param.key());
-        } else {
-            let list = keys
-                .iter()
-                .map(|k| {
-                    let mut object = Object::new();
-                    object.insert("t", Value::Float(k.time));
-                    object.insert("v", Value::Float(k.value));
-                    if k.ease == Ease::Smooth {
-                        object.insert("ease", "smooth");
-                    }
-                    Value::Object(object)
-                })
-                .collect();
-            all.insert(param.key(), Value::Array(list));
+        match keyframes_value(keys) {
+            Some(list) => all.insert(param.key(), list),
+            None => {
+                all.remove(param.key());
+            }
         }
         self.set_nox_value("keyframes", (!all.is_empty()).then_some(Value::Object(all)));
     }
@@ -284,8 +298,21 @@ impl Item {
             .any(|k| (k.time - time).abs() < SAME_TIME)
     }
 
-    /// Sets the easing of every keyframe at `time`.
+    /// Sets the easing of every keyframe at `time` (effects' too).
     pub fn set_ease_at(&mut self, time: f64, ease: Ease) {
+        for effect in &mut self.effects {
+            effect.update_keyframes(|keys| {
+                let mut changed = false;
+                for key in keys
+                    .iter_mut()
+                    .filter(|k| (k.time - time).abs() < SAME_TIME)
+                {
+                    key.ease = ease;
+                    changed = true;
+                }
+                changed
+            });
+        }
         for param in Param::ALL {
             let mut keys = self.keyframes(param);
             let mut changed = false;
@@ -422,8 +449,22 @@ impl Item {
             .any(|k| (k.time - time).abs() < SAME_TIME)
     }
 
-    /// Moves the keyframes at `from` (of every property) to `to`.
+    /// Moves the keyframes at `from` (of every property, effects' too) to
+    /// `to`.
     pub fn move_keyframes(&mut self, from: f64, to: f64) {
+        for effect in &mut self.effects {
+            effect.update_keyframes(|keys| {
+                let mut moved = false;
+                for key in keys
+                    .iter_mut()
+                    .filter(|k| (k.time - from).abs() < SAME_TIME)
+                {
+                    key.time = to;
+                    moved = true;
+                }
+                moved
+            });
+        }
         let mut grades = self.grade_keyframes();
         if grades.iter().any(|k| (k.time - from).abs() < SAME_TIME) {
             for key in grades
@@ -450,12 +491,19 @@ impl Item {
         }
     }
 
-    /// The media times with a keyframe of any property, sorted.
+    /// The media times with a keyframe of any property (effects' too),
+    /// sorted.
     pub fn keyframe_times(&self) -> Vec<f64> {
+        let effects = self.effects.iter().flat_map(|e| {
+            e.animated_params()
+                .into_iter()
+                .flat_map(|name| e.keyframes(&name).into_iter().map(|k| k.time))
+        });
         let mut times: Vec<f64> = Param::ALL
             .into_iter()
             .flat_map(|p| self.keyframes(p).into_iter().map(|k| k.time))
             .chain(self.grade_keyframes().into_iter().map(|k| k.time))
+            .chain(effects)
             .collect();
         times.sort_by(f64::total_cmp);
         times.dedup_by(|b, a| (*a - *b).abs() < SAME_TIME);

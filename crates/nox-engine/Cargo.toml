@@ -8,7 +8,7 @@ authors.workspace = true
 
 [dependencies]
 cpal.workspace = true
-nox-ai.workspace = true
+nox-fx.workspace = true
 nox-gpu.workspace = true
 nox-media.workspace = true
 nox-project.workspace = true
@@ -17,6 +17,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+nox-ai.workspace = true
 nox-color.workspace = true
 tracing-subscriber.workspace = true
 

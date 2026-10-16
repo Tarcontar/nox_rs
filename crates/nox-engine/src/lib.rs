@@ -67,4 +67,11 @@ pub enum EngineEvent {
     Error { frame: i64, message: String },
     /// How a file decodes became known or changed (`Engine::decoding`).
     Decoding(std::path::PathBuf),
+    /// Thumbnails of clip `clip`'s effects at sequence frame `frame`
+    /// (`Engine::set_thumbnail_clip`).
+    Thumbnails {
+        clip: u64,
+        frame: i64,
+        thumbnails: Vec<nox_fx::Thumbnail>,
+    },
 }

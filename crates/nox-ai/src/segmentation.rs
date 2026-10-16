@@ -9,7 +9,7 @@ use nox_gpu::{GpuDevice, LayerPicture};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::bridge::{Bridge, Normalize};
+use crate::bridge::{Bridge, Matte, Normalize};
 use crate::{Error, Model, Precision, Result, Session};
 
 /// The model's input size.
@@ -44,6 +44,34 @@ impl Segmentation {
 
     /// Multiplies `picture`'s alpha by the matte of its subject.
     pub fn apply(&mut self, picture: &LayerPicture) -> Result<()> {
+        let session = self.run(picture)?;
+        if session.buffer_offset(OUTPUT)? != 0 {
+            return Err(Error::Unsupported(format!(
+                "{OUTPUT} inside another buffer"
+            )));
+        }
+        self.bridge.apply_matte(
+            picture,
+            session.buffer(OUTPUT)?,
+            (SIDE as u32, SIDE as u32),
+            true,
+        )
+    }
+
+    /// The matte of `picture` (as `apply` would use it).
+    pub fn matte(&mut self, picture: &LayerPicture) -> Result<Matte> {
+        let session = self.run(picture)?;
+        self.bridge.to_matte(
+            session.buffer(OUTPUT)?,
+            session.buffer_offset(OUTPUT)?,
+            (SIDE as u32, SIDE as u32),
+            true,
+        )
+    }
+
+    /// Plans and runs the model on `picture` (the session holds gigabytes:
+    /// dropped by the caller as soon as it's done).
+    fn run(&mut self, picture: &LayerPicture) -> Result<Session> {
         let mut session = Session::new(self.gpu.clone(), self.model.clone());
         session.plan(&[(INPUT, &[1, 3, SIDE, SIDE])], &[], &[])?;
         tracing::info!(
@@ -60,12 +88,6 @@ impl Segmentation {
         self.bridge
             .to_tensor(picture, session.buffer(INPUT)?, size, Normalize::IMAGENET)?;
         session.run()?;
-        if session.buffer_offset(OUTPUT)? != 0 {
-            return Err(Error::Unsupported(format!(
-                "{OUTPUT} inside another buffer"
-            )));
-        }
-        self.bridge
-            .apply_matte(picture, session.buffer(OUTPUT)?, size, true)
+        Ok(session)
     }
 }

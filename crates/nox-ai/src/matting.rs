@@ -12,7 +12,7 @@ use nox_gpu::{GpuDevice, LayerPicture};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::bridge::{Bridge, Normalize};
+use crate::bridge::{Bridge, Matte, Normalize};
 use crate::{Error, Model, Precision, Result, Session, Tensor};
 
 /// Longest side the model sees; bigger pictures are scaled down for it
@@ -131,6 +131,35 @@ impl Matting {
     /// Writes the matte of clip `key` into `picture`'s alpha: of frame
     /// `frame` (in the clip's media), or of a still (`None`).
     pub fn apply(&mut self, key: u64, frame: Option<i64>, picture: &LayerPicture) -> Result<()> {
+        let (index, size) = self.run(key, frame, picture)?;
+        let session = &self.clips[index].session;
+        if session.buffer_offset("pha")? != 0 {
+            return Err(Error::Unsupported("pha inside another buffer".into()));
+        }
+        self.bridge
+            .apply_matte(picture, session.buffer("pha")?, size, false)
+    }
+
+    /// The matte of clip `key` for `picture` (as `apply` would use it).
+    pub fn matte(&mut self, key: u64, frame: Option<i64>, picture: &LayerPicture) -> Result<Matte> {
+        let (index, size) = self.run(key, frame, picture)?;
+        let session = &self.clips[index].session;
+        self.bridge.to_matte(
+            session.buffer("pha")?,
+            session.buffer_offset("pha")?,
+            size,
+            false,
+        )
+    }
+
+    /// Runs the model on `picture` for clip `key`: which of `clips` holds
+    /// the matte ("pha"), and its size.
+    fn run(
+        &mut self,
+        key: u64,
+        frame: Option<i64>,
+        picture: &LayerPicture,
+    ) -> Result<(usize, (u32, u32))> {
         self.clock += 1;
         let layer = (picture.width, picture.height);
         let index = match self
@@ -180,8 +209,6 @@ impl Matting {
         for _ in 0..runs {
             clip.session.run()?;
         }
-        self.bridge
-            .apply_matte(picture, clip.session.buffer("pha")?, size, false)?;
-        Ok(())
+        Ok((index, size))
     }
 }

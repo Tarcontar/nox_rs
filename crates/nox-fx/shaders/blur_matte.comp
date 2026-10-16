@@ -1,0 +1,35 @@
+// One direction of a separable Gaussian blur of a matte (feathering),
+// like blur.comp for pictures.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer Source { float s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Matte { float m[]; };
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+    uint vertical;
+    int taps;
+    int step;
+    float inv_two_sigma2;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.size, pos)) {
+        return;
+    }
+    ivec2 dir = p.vertical != 0u ? ivec2(0, 1) : ivec2(1, 0);
+    ivec2 last = ivec2(p.size) - 1;
+    float sum = 0.0;
+    float weights = 0.0;
+    for (int i = -p.taps; i <= p.taps; i++) {
+        int d = i * p.step;
+        float w = exp(-float(d * d) * p.inv_two_sigma2);
+        ivec2 q = clamp(pos + dir * d, ivec2(0), last);
+        sum += s[uint(q.y) * p.size.x + uint(q.x)] * w;
+        weights += w;
+    }
+    m[uint(pos.y) * p.size.x + uint(pos.x)] = sum / weights;
+}

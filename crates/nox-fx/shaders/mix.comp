@@ -1,0 +1,32 @@
+// A masked effect: its result (`picture`, in place) only where the mask
+// is, its input (`original`) elsewhere, blended by the mask. Colors are
+// blended premultiplied, so transparent pixels don't tint.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D picture;
+layout(set = 0, binding = 1, rgba32f) uniform readonly image2D original;
+layout(set = 0, binding = 2, std430) readonly buffer Matte { float matte[]; };
+
+#include "matte.glsl"
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+    uvec2 matte_size;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.size, pos)) {
+        return;
+    }
+    float m = clamp(sample_matte(pos, p.size, p.matte_size), 0.0, 1.0);
+    vec4 effect = imageLoad(picture, pos);
+    vec4 source = imageLoad(original, pos);
+    vec4 a = vec4(source.rgb * source.a, source.a);
+    vec4 b = vec4(effect.rgb * effect.a, effect.a);
+    vec4 c = mix(a, b, m);
+    c.rgb = c.a > 1e-6 ? c.rgb / c.a : vec3(0.0);
+    imageStore(picture, pos, c);
+}

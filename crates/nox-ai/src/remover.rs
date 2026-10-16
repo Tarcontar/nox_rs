@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::models::{ModelInfo, Runner};
-use crate::{Matting, Result, Segmentation};
+use crate::{Matte, Matting, Result, Segmentation};
 
 pub enum BackgroundRemover {
     Matting(Matting),
@@ -29,6 +29,14 @@ impl BackgroundRemover {
             Self::Matting(matting) => matting.apply(key, frame, picture),
             // Each picture on its own.
             Self::Segmentation(segmentation) => segmentation.apply(picture),
+        }
+    }
+
+    /// The matte `apply` would use, as a `Matte` of its own.
+    pub fn matte(&mut self, key: u64, frame: Option<i64>, picture: &LayerPicture) -> Result<Matte> {
+        match self {
+            Self::Matting(matting) => matting.matte(key, frame, picture),
+            Self::Segmentation(segmentation) => segmentation.matte(picture),
         }
     }
 }

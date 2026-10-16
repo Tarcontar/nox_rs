@@ -1,0 +1,29 @@
+// Unsharp mask, in place: `picture` += amount × (`picture` - `blurred`)
+// where the difference is above the threshold (softly), color only.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D picture;
+layout(set = 0, binding = 1, rgba32f) uniform readonly image2D blurred;
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+    float amount;
+    float threshold;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.size, pos)) {
+        return;
+    }
+    vec4 c = imageLoad(picture, pos);
+    vec3 detail = c.rgb - imageLoad(blurred, pos).rgb;
+    // Below the threshold, detail (noise) is left as it is; above it, all
+    // of it is sharpened, with a soft knee.
+    float size = max(abs(detail.r), max(abs(detail.g), abs(detail.b)));
+    float gate = smoothstep(p.threshold, p.threshold * 2.0 + 1e-6, size);
+    c.rgb = max(c.rgb + p.amount * gate * detail, vec3(0.0));
+    imageStore(picture, pos, c);
+}

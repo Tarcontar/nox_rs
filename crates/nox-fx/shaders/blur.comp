@@ -1,0 +1,51 @@
+// One direction of a separable Gaussian blur: `dst` = `src` blurred along
+// x or y. Colors are weighted by alpha (premultiplied) so transparent
+// pixels don't bleed; the first pass writes premultiplied pixels, the
+// second takes them and divides by alpha again. Large blurs take every
+// `step`th pixel, which a Gaussian that wide hardly notices.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D src;
+layout(set = 0, binding = 1, rgba32f) uniform writeonly image2D dst;
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+    // 0: along x, 1: along y.
+    uint vertical;
+    // Taps each side, `step` pixels apart.
+    int taps;
+    int step;
+    float inv_two_sigma2;
+    // The source is straight alpha (multiply it); the result is wanted
+    // straight (divide it).
+    uint premultiply;
+    uint unpremultiply;
+} p;
+
+void main() {
+    ivec2 pos;
+    if (!pixel(p.size, pos)) {
+        return;
+    }
+    ivec2 dir = p.vertical != 0u ? ivec2(0, 1) : ivec2(1, 0);
+    ivec2 last = ivec2(p.size) - 1;
+    vec4 sum = vec4(0.0);
+    float weights = 0.0;
+    for (int i = -p.taps; i <= p.taps; i++) {
+        int d = i * p.step;
+        float w = exp(-float(d * d) * p.inv_two_sigma2);
+        vec4 c = imageLoad(src, clamp(pos + dir * d, ivec2(0), last));
+        if (p.premultiply != 0u) {
+            c.rgb *= c.a;
+        }
+        sum += c * w;
+        weights += w;
+    }
+    vec4 c = sum / weights;
+    if (p.unpremultiply != 0u) {
+        c.rgb = c.a > 1e-6 ? c.rgb / c.a : vec3(0.0);
+    }
+    imageStore(dst, pos, c);
+}

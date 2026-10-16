@@ -1,0 +1,27 @@
+// A model's matte output (one plane, from element `offset` of its buffer,
+// logits if `logits`) as an owned plane of 32-bit floats in 0–1.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer Source { real s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Matte { float m[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint offset;
+    uint logits;
+} p;
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    float v = float(s[p.offset + i]);
+    if (p.logits != 0u) {
+        v = 1.0 / (1.0 + exp(-v));
+    }
+    m[i] = clamp(v, 0.0, 1.0);
+}

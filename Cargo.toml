@@ -14,6 +14,7 @@ bytemuck = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 nox-media = { path = "crates/nox-media" }
 nox-ai = { path = "crates/nox-ai" }
+nox-fx = { path = "crates/nox-fx" }
 nox-build = { path = "crates/nox-build" }
 nox-gpu = { path = "crates/nox-gpu" }
 nox-color = { path = "crates/nox-color" }

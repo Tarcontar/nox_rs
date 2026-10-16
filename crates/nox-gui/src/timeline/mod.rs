@@ -728,7 +728,33 @@ impl TimelineView {
         merge_key: Option<&str>,
         change: impl Fn(&mut nox_project::Item),
     ) {
-        let items = self.selected_items();
+        self.edit_clips(self.selected_items(), label, merge_key, change);
+    }
+
+    /// Changes the clip shown (clicked last), not the rest of the
+    /// selection: for edits by effect key (node editing), which other
+    /// clips' effects don't share.
+    pub fn edit_shown_clip(
+        &self,
+        label: &str,
+        merge_key: Option<&str>,
+        change: impl Fn(&mut nox_project::Item),
+    ) {
+        self.edit_clips(
+            self.selection().into_iter().collect(),
+            label,
+            merge_key,
+            change,
+        );
+    }
+
+    fn edit_clips(
+        &self,
+        items: Vec<ItemRef>,
+        label: &str,
+        merge_key: Option<&str>,
+        change: impl Fn(&mut nox_project::Item),
+    ) {
         let Some(&item) = items.first() else {
             return;
         };

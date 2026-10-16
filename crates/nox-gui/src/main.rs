@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod clip_strip;
 mod color_wheels;
+mod effect_controls;
 mod export_dialog;
 mod framing;
 mod i18n;
@@ -9,6 +10,8 @@ mod inspector;
 mod media_cell;
 mod media_object;
 mod media_pool;
+mod node_editor;
+mod node_panel;
 mod playback;
 mod preferences;
 mod project;

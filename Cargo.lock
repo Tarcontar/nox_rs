@@ -1234,6 +1234,7 @@ dependencies = [
  "cpal",
  "nox-ai",
  "nox-color",
+ "nox-fx",
  "nox-gpu",
  "nox-media",
  "nox-project",
@@ -1241,6 +1242,20 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nox-fx"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "nox-ai",
+ "nox-build",
+ "nox-color",
+ "nox-gpu",
+ "nox-media",
+ "nox-project",
+ "tracing",
 ]
 
 [[package]]
@@ -1266,6 +1281,7 @@ dependencies = [
  "gtk4",
  "nox-ai",
  "nox-engine",
+ "nox-fx",
  "nox-media",
  "nox-otio",
  "nox-project",

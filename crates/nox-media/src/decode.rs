@@ -144,6 +144,8 @@ pub struct VideoDecoder {
     at_start: bool,
     /// A still image: one frame, shown at every position.
     still: bool,
+    /// Decoding on hardware, which falls back to software if it fails.
+    hardware: bool,
 }
 
 impl VideoDecoder {
@@ -202,6 +204,8 @@ impl VideoDecoder {
             )),
         }
         let decoder = context.decoder().open_as(codec)?.video()?;
+        // Tiles are decoded in software, once: nothing to fall back from.
+        let hardware = backend.is_some() && accel.is_some() && tiled.is_none();
         // Tiles are decoded in software, once.
         let decoding = tiled.as_ref().map(|_| Decoding {
             api: DecodeApi::Software,
@@ -222,7 +226,48 @@ impl VideoDecoder {
             decoding,
             still,
             at_start: true,
+            hardware,
         })
+    }
+
+    /// Runs `request`; if the hardware decoder fails it (e.g. NVDEC with
+    /// progressive JPEG, which it doesn't support), decodes in software
+    /// from then on and runs it again.
+    fn with_fallback<T>(&mut self, request: impl Fn(&mut Self) -> Result<T>) -> Result<T> {
+        match request(self) {
+            Err(err) if self.hardware && !matches!(err, Error::Interrupted) => {
+                tracing::warn!(
+                    "{}: hardware decoding failed ({err}), decoding in software",
+                    self.path.display()
+                );
+                self.use_software()?;
+                request(self)
+            }
+            result => result,
+        }
+    }
+
+    /// Replaces the decoder with FFmpeg's software one (frame threads) and
+    /// starts the input over.
+    fn use_software(&mut self) -> Result<()> {
+        self.hardware = false;
+        self.decoding = None;
+        self.input = format::input(&self.path)?;
+        let stream = self
+            .input
+            .stream(self.stream_index)
+            .ok_or(Error::NoVideoStream)?;
+        let mut context = codec::Context::from_parameters(stream.parameters())?;
+        let codec = codec::decoder::find(context.id()).ok_or(ffmpeg::Error::DecoderNotFound)?;
+        context.set_threading(codec::threading::Config::kind(
+            codec::threading::Type::Frame,
+        ));
+        self.decoder = context.decoder().open_as(codec)?.video()?;
+        self.eof = false;
+        self.last = None;
+        self.pending = None;
+        self.at_start = true;
+        Ok(())
     }
 
     /// How frames are decoded; `None` until the first one is.
@@ -255,6 +300,10 @@ impl VideoDecoder {
     /// `stop` returns true (checked after every decoded frame). Frames
     /// decoded until then still count: asking again continues from there.
     pub fn frame_at_until(&mut self, index: i64, stop: &dyn Fn() -> bool) -> Result<frame::Video> {
+        self.with_fallback(|this| this.decode_frame_at(index, stop))
+    }
+
+    fn decode_frame_at(&mut self, index: i64, stop: &dyn Fn() -> bool) -> Result<frame::Video> {
         let index = self.effective(index);
         if let Some((i, frame)) = &self.last
             && *i == index
@@ -388,9 +437,13 @@ impl VideoDecoder {
     /// or the keyframe before `index`. Afterwards the decoder is positioned
     /// to continue towards `index`.
     pub fn frame_near(&mut self, index: i64, max_cost: i64) -> Result<frame::Video> {
+        self.with_fallback(|this| this.decode_frame_near(index, max_cost))
+    }
+
+    fn decode_frame_near(&mut self, index: i64, max_cost: i64) -> Result<frame::Video> {
         let index = self.effective(index);
         if self.decode_cost(index) <= max_cost {
-            return self.frame_at(index);
+            return self.decode_frame_at(index, &|| false);
         }
         if self.can_decode_forward(index)
             && let Some((_, frame)) = &self.last
@@ -408,9 +461,9 @@ impl VideoDecoder {
             // Landed past the target (decode timestamps) or at the end.
             Some((i, frame)) => {
                 self.last = Some((i, frame));
-                self.frame_at(index)
+                self.decode_frame_at(index, &|| false)
             }
-            None => self.frame_at(index),
+            None => self.decode_frame_at(index, &|| false),
         }
     }
 

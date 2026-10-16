@@ -1,8 +1,9 @@
 //! Between compositor layers and models: a layer picture into a model's
 //! input tensor (`layer_to_rgb.comp`), and a matte back into the
-//! picture's alpha (`apply_matte.comp`), on the GPU.
+//! picture's alpha (`apply_matte.comp`) or out as a `Matte`
+//! (`to_matte.comp`), on the GPU.
 
-use nox_gpu::compute::{Binding, BindingKind, Buffer, Kernel, Recording};
+use nox_gpu::compute::{Binding, BindingKind, Buffer, Kernel, MemoryUse, Recording};
 use nox_gpu::{GpuDevice, LayerPicture};
 use std::sync::Arc;
 
@@ -31,6 +32,23 @@ struct ApplyPush {
     logits: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ToMattePush {
+    n: u32,
+    offset: u32,
+    logits: u32,
+}
+
+/// A matte on the GPU: `width` × `height` 32-bit floats in 0–1 (how much
+/// of each pixel is the subject), row by row, at the model's resolution;
+/// users resample it to their pictures.
+pub struct Matte {
+    pub buffer: Buffer,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// How a model wants its input: sRGB in [0, 1], then `(v - mean) / std`
 /// per channel.
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +74,7 @@ pub(crate) struct Bridge {
     gpu: Arc<GpuDevice>,
     to_rgb: Kernel,
     apply: Kernel,
+    to_matte: Kernel,
     /// The working space to linear sRGB primaries.
     rows: [[f32; 4]; 3],
 }
@@ -88,12 +107,19 @@ impl Bridge {
             &image_and_buffer,
             size_of::<ApplyPush>(),
         )?;
+        let to_matte = Kernel::new(
+            &gpu,
+            spv!("to_matte"),
+            &[BindingKind::Buffer, BindingKind::Buffer],
+            size_of::<ToMattePush>(),
+        )?;
         let m = nox_color::WORKING_PRIMARIES.conversion_to(nox_color::Primaries::Bt709);
         let rows = [0, 1, 2].map(|r| [m[r][0], m[r][1], m[r][2], 0.0]);
         Ok(Self {
             gpu,
             to_rgb,
             apply,
+            to_matte,
             rows,
         })
     }
@@ -156,5 +182,36 @@ impl Bridge {
         )?;
         recording.run()?;
         Ok(())
+    }
+
+    /// The matte in `source` (from element `offset`, `width` × `height`,
+    /// of logits if `logits`) as a `Matte` of its own.
+    pub fn to_matte(
+        &self,
+        source: &Buffer,
+        offset: usize,
+        (width, height): (u32, u32),
+        logits: bool,
+    ) -> Result<Matte> {
+        let n = width * height;
+        let buffer = Buffer::new(&self.gpu, u64::from(n) * 4, MemoryUse::Device)?;
+        let mut recording = Recording::new(&self.gpu, 1, 2)?;
+        let push = ToMattePush {
+            n,
+            offset: offset as u32,
+            logits: logits.into(),
+        };
+        recording.dispatch(
+            &self.to_matte,
+            &[source.into(), (&buffer).into()],
+            bytemuck::bytes_of(&push),
+            groups(n),
+        )?;
+        recording.run()?;
+        Ok(Matte {
+            buffer,
+            width,
+            height,
+        })
     }
 }

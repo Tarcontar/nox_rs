@@ -1,7 +1,8 @@
 //! General-purpose compute on Nox's device, for other crates (nox-ai's
-//! inference): storage buffers, compute kernels over them, and recordings
-//! of dispatches that run again and again on Nox's queue (with FFmpeg's
-//! queue lock, like everything else here).
+//! inference, nox-fx's effects): storage buffers and images, compute
+//! kernels over them, and recordings of dispatches that run again and
+//! again on Nox's queue (with FFmpeg's queue lock, like everything else
+//! here).
 //!
 //! Every dispatch in a recording is followed by a compute-to-compute
 //! memory barrier, so each sees the writes of those before it.
@@ -122,6 +123,126 @@ impl Buffer {
         let len = bytes.len();
         bytes.copy_from_slice(&mapped[..len]);
         Ok(out)
+    }
+}
+
+/// An image on the device in the compositor's working format (RGBA32F,
+/// like `LayerPicture`s), always in GENERAL layout: storage for kernels,
+/// e.g. effects' intermediate pictures.
+pub struct Image {
+    gpu: Arc<GpuDevice>,
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Option<Allocation>,
+    width: u32,
+    height: u32,
+}
+
+impl Image {
+    pub fn new(gpu: &Arc<GpuDevice>, width: u32, height: u32) -> Result<Self> {
+        let device = &gpu.device;
+        // SAFETY: valid create infos; the image is bound to fresh memory,
+        // moved to GENERAL by a submission waited for, and destroyed in
+        // Drop.
+        unsafe {
+            let image = device.create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(crate::converter::WORKING_FORMAT)
+                    .extent(vk::Extent3D {
+                        width: width.max(1),
+                        height: height.max(1),
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(
+                        vk::ImageUsageFlags::STORAGE
+                            | vk::ImageUsageFlags::TRANSFER_SRC
+                            | vk::ImageUsageFlags::TRANSFER_DST,
+                    )
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            )?;
+            let mut this = Self {
+                gpu: gpu.clone(),
+                image,
+                view: vk::ImageView::null(),
+                allocation: None,
+                width,
+                height,
+            };
+            let allocation = gpu.allocator().allocate(&AllocationCreateDesc {
+                name: "compute image",
+                requirements: device.get_image_memory_requirements(image),
+                location: MemoryLocation::GpuOnly,
+                linear: false,
+                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+            })?;
+            device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+            this.allocation = Some(allocation);
+            this.view = device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(crate::converter::WORKING_FORMAT)
+                    .subresource_range(crate::converter::color_range()),
+                None,
+            )?;
+            let one_shot = OneShot::new(device, gpu.queue_family)?;
+            let result = one_shot.begin(device).and_then(|()| {
+                let barrier = crate::converter::image_barrier(
+                    image,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::GENERAL,
+                )
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
+                device.cmd_pipeline_barrier2(
+                    one_shot.cmd,
+                    &vk::DependencyInfo::default()
+                        .image_memory_barriers(std::slice::from_ref(&barrier)),
+                );
+                one_shot.submit_and_wait(gpu, &[], &[])
+            });
+            one_shot.destroy(device);
+            result?;
+            Ok(this)
+        }
+    }
+
+    pub fn handle(&self) -> vk::Image {
+        self.image
+    }
+
+    pub fn view(&self) -> vk::ImageView {
+        self.view
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        // SAFETY: the owner makes sure no submission using the image is
+        // pending (recordings wait for completion).
+        unsafe {
+            if self.view != vk::ImageView::null() {
+                self.gpu.device.destroy_image_view(self.view, None);
+            }
+            self.gpu.device.destroy_image(self.image, None);
+        }
+        if let Some(allocation) = self.allocation.take() {
+            let _ = self.gpu.allocator().free(allocation);
+        }
     }
 }
 
@@ -412,6 +533,76 @@ impl Recording {
         if let Some(debug_utils) = &self.gpu.debug_utils {
             // SAFETY: recording, inside a label.
             unsafe { debug_utils.cmd_end_debug_utils_label(self.one_shot.cmd) };
+        }
+    }
+
+    /// Records copying the top left `width` × `height` of image `src` to
+    /// `dst` (both in GENERAL layout, the same format), then a barrier.
+    pub fn copy_image(&mut self, src: vk::Image, dst: vk::Image, width: u32, height: u32) {
+        assert!(self.recording, "recording already finished");
+        let region = vk::ImageCopy::default()
+            .src_subresource(crate::converter::color_layers())
+            .dst_subresource(crate::converter::color_layers())
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            });
+        // SAFETY: valid images with TRANSFER usage in GENERAL layout.
+        unsafe {
+            self.gpu.device.cmd_copy_image(
+                self.one_shot.cmd,
+                src,
+                vk::ImageLayout::GENERAL,
+                dst,
+                vk::ImageLayout::GENERAL,
+                &[region],
+            );
+            self.barrier();
+        }
+    }
+
+    /// Records copying a buffer of tightly packed RGBA32F pixels into the
+    /// top left `width` × `height` of `image` (GENERAL layout), or (with
+    /// `to_buffer`) the other way, then a barrier.
+    pub fn copy_pixels(
+        &mut self,
+        buffer: &Buffer,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+        to_buffer: bool,
+    ) {
+        assert!(self.recording, "recording already finished");
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(crate::converter::color_layers())
+            .image_extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            });
+        let cmd = self.one_shot.cmd;
+        // SAFETY: a valid buffer and image with TRANSFER usage, the image
+        // in GENERAL layout.
+        unsafe {
+            if to_buffer {
+                self.gpu.device.cmd_copy_image_to_buffer(
+                    cmd,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    buffer.buffer,
+                    &[region],
+                );
+            } else {
+                self.gpu.device.cmd_copy_buffer_to_image(
+                    cmd,
+                    buffer.buffer,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    &[region],
+                );
+            }
+            self.barrier();
         }
     }
 

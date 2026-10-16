@@ -1,0 +1,24 @@
+[package]
+name = "nox-fx"
+description = "Effects on clips and the output: registry, parameters and GPU kernels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+nox-ai.workspace = true
+nox-color.workspace = true
+nox-gpu.workspace = true
+nox-project.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+nox-media.workspace = true
+
+[build-dependencies]
+nox-build.workspace = true
+
+[lints]
+workspace = true

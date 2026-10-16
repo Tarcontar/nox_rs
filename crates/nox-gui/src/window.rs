@@ -14,6 +14,8 @@ use crate::color_wheels::ColorWheels;
 use crate::i18n::{fill, gettext, ngettext};
 use crate::inspector::Inspector;
 use crate::media_object::MediaObject;
+use crate::node_editor::NodeEditor;
+use crate::node_panel::NodePanel;
 use crate::playback::Playback;
 use crate::project::Framing;
 use crate::project::Project;
@@ -38,6 +40,16 @@ mod imp {
         pub edit_viewer_slot: TemplateChild<gtk::Box>,
         #[template_child]
         pub color_viewer_slot: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub effects_viewer_slot: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub effects_paned: TemplateChild<gtk::Paned>,
+        #[template_child]
+        pub effects_clip_strip: TemplateChild<ClipStrip>,
+        #[template_child]
+        pub node_editor: TemplateChild<NodeEditor>,
+        #[template_child]
+        pub node_panel: TemplateChild<NodePanel>,
         #[template_child]
         pub inspector: TemplateChild<Inspector>,
         #[template_child]
@@ -66,6 +78,8 @@ mod imp {
             ClipStrip::ensure_type();
             ScopesPanel::ensure_type();
             ColorWheels::ensure_type();
+            NodeEditor::ensure_type();
+            NodePanel::ensure_type();
             klass.bind_template();
         }
 
@@ -139,6 +153,22 @@ pub fn build(app: &gtk::Application, files: &[gio::File]) -> Window {
     window.imp().inspector.set_playback(&ui.playback);
     window.imp().clip_strip.set_up(&timeline, &pool);
     window.imp().color_wheels.set_timeline(&timeline);
+    window.imp().effects_clip_strip.set_up(&timeline, &pool);
+    window
+        .imp()
+        .node_editor
+        .set_up(&timeline, &window.imp().inspector);
+    window.imp().node_editor.set_playback(&ui.playback);
+    window.imp().node_panel.set_up(&timeline);
+    let panel = window.imp().node_panel.downgrade();
+    window
+        .imp()
+        .node_editor
+        .connect_selection_changed(move |key| {
+            if let Some(panel) = panel.upgrade() {
+                panel.show(key);
+            }
+        });
     window
         .imp()
         .viewer
@@ -660,11 +690,12 @@ fn dialog_path(result: Result<gio::File, glib::Error>) -> Option<PathBuf> {
 
 /// File, edit and sequence actions. The `*-path` variants take a path
 /// instead of showing a dialog, for scripting over D-Bus.
-/// `win.page` ("edit" or "color"; Shift+4 and Shift+6 as in Resolve)
+/// `win.page` ("edit", "effects" or "color"; Shift+4, Shift+5 and Shift+6
+/// as in Resolve's Edit, Fusion and Color pages)
 /// switches pages. The one viewer moves to the visible page, so there is
 /// one engine and nothing renders twice.
-/// Shift+4, Shift+6 and Shift+9 as in DaVinci Resolve: the Edit and Color
-/// pages and Project Settings. Matched by the physical key, since Shift
+/// Shift+4, Shift+5, Shift+6 and Shift+9 as in DaVinci Resolve: the Edit,
+/// Effects and Color pages and Project Settings. Matched by the physical key, since Shift
 /// plus a digit key types a different character on most layouts (`^` for
 /// Shift+6 on US English, `&` on German), which a `<Shift>6` trigger
 /// misses. A key counts as digit `d` if it types `d` without Shift (US,
@@ -693,6 +724,7 @@ fn add_shift_digit_keys(window: &Window) {
                 });
             let action = match digit(keyval).or(unshifted) {
                 Some(4) => ("win.page", Some("edit".to_variant())),
+                Some(5) => ("win.page", Some("effects".to_variant())),
                 Some(6) => ("win.page", Some("color".to_variant())),
                 Some(9) => ("win.project-settings", None),
                 _ => return glib::Propagation::Proceed,
@@ -734,10 +766,11 @@ fn add_page_action(window: &Window, playback: &Rc<Playback>) {
             page.set_state(&name.to_variant());
             imp.inspector_toggle.set_visible(name == "edit");
             imp.viewer.transform_overlay().set_enabled(name == "edit");
-            let slot = if name == "color" {
-                &imp.color_viewer_slot
-            } else {
-                &imp.edit_viewer_slot
+            imp.node_editor.set_active(name == "effects");
+            let slot = match name.as_str() {
+                "color" => &imp.color_viewer_slot,
+                "effects" => &imp.effects_viewer_slot,
+                _ => &imp.edit_viewer_slot,
             };
             // Scopes are measured only while they are visible.
             if let Some(playback) = playback.upgrade() {
@@ -764,6 +797,14 @@ fn add_page_action(window: &Window, playback: &Rc<Playback>) {
         let max = paned.max_position();
         if max > 0 && !paned.is_position_set() {
             paned.set_position((max - 380).max(max / 2));
+        }
+    });
+    // The same for the Effects page: room for the clip strip and the node
+    // editor.
+    imp.effects_paned.connect_max_position_notify(|paned| {
+        let max = paned.max_position();
+        if max > 0 && !paned.is_position_set() {
+            paned.set_position((max - 400).max(max / 2));
         }
     });
 }
