@@ -10,9 +10,10 @@ mod po;
 fn main() {
     // `xml-stripblanks` needs xmllint (libxml2-utils); without it the .ui
     // files are embedded as they are, which works but is larger.
+    let exe = format!("xmllint{}", std::env::consts::EXE_SUFFIX);
     let xmllint = std::env::var_os("XMLLINT").is_some()
         || std::env::var_os("PATH")
-            .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("xmllint").is_file()));
+            .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(&exe).is_file()));
     if !xmllint {
         println!(
             "cargo:warning=xmllint not found (install libxml2-utils); .ui files are not stripped"
