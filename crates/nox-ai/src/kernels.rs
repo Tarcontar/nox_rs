@@ -95,12 +95,7 @@ impl KernelKind {
         let f16 = precision == Precision::F16;
         let tensor = f16 && matrices != MatrixKernels::Scalar;
         match self {
-            Self::ConvGemm2(_, 64) => {
-                return include_bytes!(concat!(env!("OUT_DIR"), "/conv_gemm_cm2_64.comp.spv"));
-            }
-            Self::ConvGemm2(..) => {
-                return include_bytes!(concat!(env!("OUT_DIR"), "/conv_gemm_cm2.comp.spv"));
-            }
+            Self::ConvGemm2(_, rows) => return conv_gemm2_spirv(rows),
             Self::ConvGemm(_, tile) if tensor => {
                 return match tile {
                     ConvTile::Square => {
@@ -263,6 +258,27 @@ impl Precision {
     }
 }
 
+/// Whether the cooperative matrices 2 kernels were built (`build.rs`: the
+/// GLSL compiler needs `GL_NV_cooperative_matrix2`).
+const CM2_BUILT: bool = cfg!(nox_cm2);
+
+/// The SPIR-V of a ConvGemm2 with `rows` rows per workgroup.
+#[cfg(nox_cm2)]
+fn conv_gemm2_spirv(rows: u32) -> &'static [u8] {
+    if rows == 64 {
+        include_bytes!(concat!(env!("OUT_DIR"), "/conv_gemm_cm2_64.comp.spv"))
+    } else {
+        include_bytes!(concat!(env!("OUT_DIR"), "/conv_gemm_cm2.comp.spv"))
+    }
+}
+
+/// Never called: without these kernels `Kernels::new` doesn't pick
+/// `MatrixKernels::Tensor2`.
+#[cfg(not(nox_cm2))]
+fn conv_gemm2_spirv(_rows: u32) -> &'static [u8] {
+    unreachable!("built without the cooperative matrices 2 kernels")
+}
+
 /// The kernels for one precision, created the first time they're needed.
 pub(crate) struct Kernels {
     precision: Precision,
@@ -273,11 +289,12 @@ pub(crate) struct Kernels {
 impl Kernels {
     /// For `precision` on `gpu`. F16 multiplies on tensor cores where the
     /// GPU has them (`GpuDevice::tensor_f16`), also with cooperative
-    /// matrices 2 if it has those. `NOX_AI_TENSOR` picks for comparisons:
+    /// matrices 2 if it has those (and they were built: `CM2_BUILT`).
+    /// `NOX_AI_TENSOR` picks for comparisons:
     /// `0` (no tensor cores), `1` (no cooperative matrices 2), `2`.
     pub fn new(precision: Precision, gpu: &GpuDevice) -> Self {
         let wanted = std::env::var("NOX_AI_TENSOR").ok();
-        let tensor2 = gpu.tensor_f16() && gpu.features().cooperative_matrix2;
+        let tensor2 = CM2_BUILT && gpu.tensor_f16() && gpu.features().cooperative_matrix2;
         let matrices = match (precision, wanted.as_deref()) {
             (Precision::F32, _) | (_, Some("0")) => MatrixKernels::Scalar,
             (_, Some("1")) if gpu.tensor_f16() => MatrixKernels::Tensor,

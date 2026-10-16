@@ -34,6 +34,33 @@ pub fn compile_shaders(dir: &Path, variants: &[(&str, &str, &[&str])]) {
     }
 }
 
+/// Whether the GLSL compiler accepts all of `extensions` (e.g.
+/// `GL_NV_cooperative_matrix2`, which older glslang lacks), by compiling an
+/// empty compute shader that requires them in `OUT_DIR`.
+pub fn compiler_supports(extensions: &[&str]) -> bool {
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let Some(compiler) = find_compiler() else {
+        return false;
+    };
+    let requires: String = extensions
+        .iter()
+        .map(|extension| format!("#extension {extension} : require\n"))
+        .collect();
+    let source =
+        format!("#version 450\n{requires}layout(local_size_x = 1) in;\nvoid main() {{}}\n");
+    let probe = out_dir.join("extension_probe.comp");
+    std::fs::write(&probe, source).expect("write extension probe");
+    command(
+        &compiler,
+        &probe,
+        &out_dir.join("extension_probe.comp.spv"),
+        &out_dir,
+        &[],
+    )
+    .output()
+    .is_ok_and(|o| o.status.success())
+}
+
 enum Compiler {
     Glslc(PathBuf),
     GlslangValidator(PathBuf),
@@ -64,7 +91,13 @@ fn find_compiler() -> Option<Compiler> {
         })
 }
 
-fn compile(compiler: &Compiler, input: &Path, output: &Path, include: &Path, defines: &[&str]) {
+fn command(
+    compiler: &Compiler,
+    input: &Path,
+    output: &Path,
+    include: &Path,
+    defines: &[&str],
+) -> Command {
     let mut cmd = match compiler {
         Compiler::Glslc(exe) => {
             let mut cmd = Command::new(exe);
@@ -82,7 +115,13 @@ fn compile(compiler: &Compiler, input: &Path, output: &Path, include: &Path, def
         cmd.arg(format!("-D{define}"));
     }
     cmd.arg("-o").arg(output).arg(input);
-    let result = cmd.output().expect("failed to run GLSL compiler");
+    cmd
+}
+
+fn compile(compiler: &Compiler, input: &Path, output: &Path, include: &Path, defines: &[&str]) {
+    let result = command(compiler, input, output, include, defines)
+        .output()
+        .expect("failed to run GLSL compiler");
     if !result.status.success() {
         panic!(
             "compiling {} failed:\n{}{}",

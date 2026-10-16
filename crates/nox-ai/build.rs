@@ -4,6 +4,9 @@
 //! and TENSOR, `gemm_tensor.glsl`; convolutions also with tiles of 32×128
 //! and 16×128), and convolutions with stride 1 as `conv_gemm_cm2` for
 //! NVIDIA's cooperative matrices 2 (F16 and CM2; also with 64-row tiles).
+//! Those need a glslang with `GL_NV_cooperative_matrix2` (older Vulkan
+//! SDKs lack it): without one they're skipped, `nox_cm2` stays unset and
+//! the convolutions run on `gemm_tensor.glsl` instead.
 
 fn main() {
     let dir = std::path::Path::new("shaders");
@@ -45,12 +48,22 @@ fn main() {
             ][..],
         ),
         ("matmul.comp", "matmul_tensor", &["F16", "TENSOR"][..]),
-        ("conv_gemm.comp", "conv_gemm_cm2", &["F16", "CM2"][..]),
-        (
-            "conv_gemm.comp",
-            "conv_gemm_cm2_64",
-            &["F16", "CM2", "TILE_M=64"][..],
-        ),
     ]);
+    println!("cargo::rustc-check-cfg=cfg(nox_cm2)");
+    if nox_build::compiler_supports(&["GL_KHR_cooperative_matrix", "GL_NV_cooperative_matrix2"]) {
+        println!("cargo::rustc-cfg=nox_cm2");
+        variants.extend([
+            ("conv_gemm.comp", "conv_gemm_cm2", &["F16", "CM2"][..]),
+            (
+                "conv_gemm.comp",
+                "conv_gemm_cm2_64",
+                &["F16", "CM2", "TILE_M=64"][..],
+            ),
+        ]);
+    } else {
+        println!(
+            "cargo::warning=glslang lacks GL_NV_cooperative_matrix2, skipping the CM2 kernels (update the Vulkan SDK)"
+        );
+    }
     nox_build::compile_shaders(dir, &variants);
 }
