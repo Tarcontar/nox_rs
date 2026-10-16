@@ -19,6 +19,22 @@ pub trait QueueLock: Send + Sync {
     fn unlock(&self, family: u32, index: u32);
 }
 
+/// Device features that kernels may use, as enabled at creation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Features {
+    /// Storage buffers of 16-bit values (`storageBuffer16BitAccess`).
+    pub storage_16bit: bool,
+    /// 16-bit float arithmetic in shaders (`shaderFloat16`).
+    pub float16: bool,
+    /// The Vulkan memory model (`vulkanMemoryModel`).
+    pub memory_model: bool,
+    /// Cooperative matrices (`VK_KHR_cooperative_matrix`'s feature).
+    pub cooperative_matrix: bool,
+    /// NVIDIA's cooperative matrices 2 with workgroup scope, flexible
+    /// dimensions and tensor addressing (`VK_NV_cooperative_matrix2`).
+    pub cooperative_matrix2: bool,
+}
+
 /// Handles of a device created elsewhere.
 pub struct ExternalDevice {
     pub get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
@@ -28,6 +44,11 @@ pub struct ExternalDevice {
     pub compute_queue_family: u32,
     /// Device extensions enabled at creation.
     pub enabled_extensions: Vec<CString>,
+    /// Features enabled at creation.
+    pub features: Features,
+    /// Whether `VK_EXT_debug_utils` was enabled on the instance (debug
+    /// labels for profilers).
+    pub debug_utils: bool,
     pub queue_lock: Option<Box<dyn QueueLock>>,
     /// Keeps the owner of the handles alive (e.g. FFmpeg's device reference).
     pub owner: Box<dyn Any + Send + Sync>,
@@ -38,6 +59,12 @@ pub struct GpuDevice {
     pub(crate) physical_device: vk::PhysicalDevice,
     pub(crate) device: ash::Device,
     extensions: Vec<CString>,
+    features: Features,
+    /// 16 × 16 × 16 cooperative matrices of 16-bit floats with 32-bit
+    /// sums, in 32-wide subgroups, are usable.
+    tensor_f16: bool,
+    /// Debug labels, if `VK_EXT_debug_utils` is enabled.
+    pub(crate) debug_utils: Option<ash::ext::debug_utils::Device>,
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(crate) queue_family: u32,
     queue: vk::Queue,
@@ -82,15 +109,23 @@ impl GpuDevice {
                 buffer_device_address: false,
                 allocation_sizes: Default::default(),
             })?;
+            let tensor_f16 = tensor_f16(&entry, &instance, &ext);
+            let debug_utils = ext
+                .debug_utils
+                .then(|| ash::ext::debug_utils::Device::new(&instance, &device));
             tracing::info!(
-                "GPU: {name} (compute queue family {})",
-                ext.compute_queue_family
+                "GPU: {name} (compute queue family {}, {:?}, 16-bit tensor cores: {tensor_f16})",
+                ext.compute_queue_family,
+                ext.features
             );
             Ok(Self {
                 instance,
                 physical_device: ext.physical_device,
                 device,
                 extensions: ext.enabled_extensions,
+                features: ext.features,
+                tensor_f16,
+                debug_utils,
                 memory_properties,
                 queue_family: ext.compute_queue_family,
                 queue,
@@ -148,6 +183,25 @@ impl GpuDevice {
         self.extensions.iter().any(|e| e.as_c_str() == name)
     }
 
+    /// Whether shaders may keep 16-bit floats in storage buffers
+    /// (`storageBuffer16BitAccess` was enabled).
+    pub fn storage_16bit(&self) -> bool {
+        self.features.storage_16bit
+    }
+
+    /// The features kernels may use.
+    pub fn features(&self) -> Features {
+        self.features
+    }
+
+    /// Whether 16 × 16 × 16 cooperative matrices (tensor cores) multiply
+    /// 16-bit floats into 32-bit sums here, in subgroups of 32: the
+    /// features are enabled, the GPU lists that shape at subgroup scope,
+    /// and compute subgroups are 32 wide.
+    pub fn tensor_f16(&self) -> bool {
+        self.tensor_f16
+    }
+
     /// Index of a memory type allowed by `type_bits` with `flags`.
     pub(crate) fn memory_type(
         &self,
@@ -189,5 +243,50 @@ impl Drop for GpuDevice {
         // to the owner, which is dropped afterwards.
         // SAFETY: not used after this point.
         unsafe { ManuallyDrop::drop(&mut self.allocator) };
+    }
+}
+
+/// Whether `ext`'s device multiplies 16 × 16 × 16 cooperative matrices of
+/// 16-bit floats into 32-bit sums at subgroup scope, with 32-wide
+/// subgroups (what nox-ai's tensor-core kernels are written for).
+///
+/// # Safety
+/// The handles must be valid.
+unsafe fn tensor_f16(entry: &ash::Entry, instance: &ash::Instance, ext: &ExternalDevice) -> bool {
+    let f = ext.features;
+    let extension = ash::khr::cooperative_matrix::NAME;
+    if !(f.storage_16bit && f.float16 && f.memory_model && f.cooperative_matrix)
+        || !ext
+            .enabled_extensions
+            .iter()
+            .any(|e| e.as_c_str() == extension)
+    {
+        return false;
+    }
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+        instance.get_physical_device_properties2(ext.physical_device, &mut properties);
+        let in_compute = subgroup
+            .supported_stages
+            .contains(vk::ShaderStageFlags::COMPUTE);
+        if subgroup.subgroup_size != 32 || !in_compute {
+            return false;
+        }
+        let cooperative = ash::khr::cooperative_matrix::Instance::new(entry, instance);
+        let Ok(shapes) =
+            cooperative.get_physical_device_cooperative_matrix_properties(ext.physical_device)
+        else {
+            return false;
+        };
+        shapes.iter().any(|p| {
+            (p.m_size, p.n_size, p.k_size) == (16, 16, 16)
+                && p.a_type == vk::ComponentTypeKHR::FLOAT16
+                && p.b_type == vk::ComponentTypeKHR::FLOAT16
+                && p.c_type == vk::ComponentTypeKHR::FLOAT32
+                && p.result_type == vk::ComponentTypeKHR::FLOAT32
+                && p.scope == vk::ScopeKHR::SUBGROUP
+        })
     }
 }

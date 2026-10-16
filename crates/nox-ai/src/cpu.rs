@@ -6,6 +6,8 @@
 //! inputs into what both this and the GPU kernels compute with, so the
 //! two agree on shapes and coordinates.
 
+use std::sync::Arc;
+
 use crate::model::Node;
 use crate::tensor::{Data, Tensor, strides};
 use crate::{Error, Result};
@@ -23,12 +25,12 @@ pub(crate) fn run(node: &Node, inputs: &[Option<&Tensor>]) -> Result<Vec<Tensor>
     match node.op.as_str() {
         "Add" | "Sub" | "Mul" | "Div" | "Pow" => one(binary(&node.op, input(0)?, input(1)?)?),
         "Relu" | "Sigmoid" | "Tanh" | "Exp" | "Sqrt" | "Neg" | "Abs" | "Erf" | "HardSigmoid"
-        | "HardSwish" | "Clip" | "Identity" => {
+        | "HardSwish" | "Clip" | "Identity" | "Floor" => {
             let (op, alpha, beta) = unary_params(node, inputs)?;
             let x = input(0)?;
             match (&x.data, op) {
-                // Shape arithmetic passes integers through.
-                (Data::I64(_), UnaryOp::Identity) => one(x.clone()),
+                // As it is (shared; integers stay integers).
+                (_, UnaryOp::Identity) => one(x.clone()),
                 _ => one(Tensor::f32(
                     x.shape.clone(),
                     x.to_f32()
@@ -40,10 +42,94 @@ pub(crate) fn run(node: &Node, inputs: &[Option<&Tensor>]) -> Result<Vec<Tensor>
         }
         "Cast" => {
             let x = input(0)?;
-            // 1: float, 10: half, 11: double; the rest are integers.
+            // 1: float, 10: half, 11: double; 9: bool; the rest integers.
             match node.int("to", 1) {
+                1 | 10 | 11 if matches!(x.data, Data::F32(_)) => one(x.clone()),
                 1 | 10 | 11 => one(Tensor::f32(x.shape.clone(), x.to_f32())),
+                9 => one(Tensor::i64(
+                    x.shape.clone(),
+                    x.to_f32().iter().map(|&v| i64::from(v != 0.0)).collect(),
+                )),
+                _ if matches!(x.data, Data::I64(_)) => one(x.clone()),
                 _ => one(Tensor::i64(x.shape.clone(), x.to_i64())),
+            }
+        }
+        "MatMul" => one(matmul(input(0)?, input(1)?)?),
+        "LayerNormalization" => one(layer_norm(
+            node,
+            input(0)?,
+            input(1)?,
+            inputs.get(2).copied().flatten(),
+        )?),
+        "Softmax" => one(softmax(node, input(0)?)?),
+        "GatherND" => one(gather_nd(node, input(0)?, input(1)?)?),
+        "Pad" => {
+            let x = input(0)?;
+            let p = pad_params(node, &x.shape, inputs)?;
+            one(pad(x, &p))
+        }
+        "Sum" => {
+            let mut parts = inputs.iter().flatten();
+            let mut sum = (*parts
+                .next()
+                .ok_or_else(|| Error::Model("Sum of nothing".into()))?)
+            .clone();
+            for part in parts {
+                sum = binary("Add", &sum, part)?;
+            }
+            one(sum)
+        }
+        "BatchNormalization" => {
+            let x = input(0)?;
+            let (scale, shift) = batch_norm_params(node, x.shape.len(), inputs)?;
+            one(binary("Add", &binary("Mul", x, &scale)?, &shift)?)
+        }
+        "ConstantOfShape" => {
+            let shape: Vec<usize> = input(0)?
+                .to_i64()
+                .iter()
+                .map(|&d| d.max(0) as usize)
+                .collect();
+            let n = shape.iter().product();
+            one(match node.attrs.get("value") {
+                Some(crate::model::Attr::Tensor(t)) => match &t.data {
+                    Data::I64(v) => Tensor::i64(shape, vec![v.first().copied().unwrap_or(0); n]),
+                    Data::F32(v) => Tensor::f32(shape, vec![v.first().copied().unwrap_or(0.0); n]),
+                },
+                _ => Tensor::f32(shape, vec![0.0; n]),
+            })
+        }
+        "Equal" | "Less" | "Greater" | "And" | "Or" | "Mod" => {
+            one(compare(node, input(0)?, input(1)?)?)
+        }
+        "Not" => {
+            let x = input(0)?;
+            one(Tensor::i64(
+                x.shape.clone(),
+                x.i64_values().iter().map(|&v| i64::from(v == 0)).collect(),
+            ))
+        }
+        "Where" => one(where_(input(0)?, input(1)?, input(2)?)?),
+        "ScatterND" => one(scatter_nd(input(0)?, input(1)?, input(2)?)?),
+        "Range" => {
+            let (start, limit, delta) = (input(0)?, input(1)?, input(2)?);
+            match (&start.data, &limit.data, &delta.data) {
+                (Data::I64(a), Data::I64(b), Data::I64(c)) => {
+                    let (a, b, c) = (a[0], b[0], c[0]);
+                    let v: Vec<i64> = (0..)
+                        .map(|i| a + i * c)
+                        .take_while(|&v| if c > 0 { v < b } else { v > b })
+                        .collect();
+                    one(Tensor::i64(vec![v.len()], v))
+                }
+                _ => {
+                    let (a, b, c) = (start.to_f32()[0], limit.to_f32()[0], delta.to_f32()[0]);
+                    let n = ((b - a) / c).ceil().max(0.0) as usize;
+                    one(Tensor::f32(
+                        vec![n],
+                        (0..n).map(|i| a + i as f32 * c).collect(),
+                    ))
+                }
             }
         }
         "Shape" => {
@@ -82,8 +168,8 @@ pub(crate) fn run(node: &Node, inputs: &[Option<&Tensor>]) -> Result<Vec<Tensor>
             let mut out = Tensor {
                 shape: shape.clone(),
                 data: match parts[0].data {
-                    Data::F32(_) => Data::F32(vec![0.0; shape.iter().product()]),
-                    Data::I64(_) => Data::I64(vec![0; shape.iter().product()]),
+                    Data::F32(_) => Data::F32(Arc::new(vec![0.0; shape.iter().product()])),
+                    Data::I64(_) => Data::I64(Arc::new(vec![0; shape.iter().product()])),
                 },
             };
             let mut at = 0;
@@ -247,40 +333,22 @@ impl BinaryOp {
 
 fn binary(op: &str, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let op = BinaryOp::of(op).expect("binary op");
-    let shape = broadcast_shape(&a.shape, &b.shape)?;
-    let (sa, sb) = (
-        broadcast_strides(&a.shape, &shape),
-        broadcast_strides(&b.shape, &shape),
-    );
-    let n: usize = shape.iter().product();
-    let index = |i: usize, s: &[usize]| {
-        let mut rest = i;
-        let mut at = 0;
-        for d in (0..shape.len()).rev() {
-            at += (rest % shape[d]) * s[d];
-            rest /= shape[d];
-        }
-        at
-    };
     if let (Data::I64(x), Data::I64(y)) = (&a.data, &b.data) {
-        let data = (0..n)
-            .map(|i| {
-                let (x, y) = (x[index(i, &sa)], y[index(i, &sb)]);
-                match op {
-                    BinaryOp::Add => x + y,
-                    BinaryOp::Sub => x - y,
-                    BinaryOp::Mul => x * y,
-                    BinaryOp::Div => x.checked_div(y).unwrap_or(0),
-                    BinaryOp::Pow => x.pow(y.max(0) as u32),
-                }
-            })
-            .collect();
+        let (shape, data) = broadcast_map(&[a, b], &[x, y], |v| {
+            let (x, y) = (v[0], v[1]);
+            match op {
+                BinaryOp::Add => x + y,
+                BinaryOp::Sub => x - y,
+                BinaryOp::Mul => x * y,
+                BinaryOp::Div => x.checked_div(y).unwrap_or(0),
+                BinaryOp::Pow => x.pow(y.max(0) as u32),
+            }
+        })?;
         return Ok(Tensor::i64(shape, data));
     }
-    let (x, y) = (a.to_f32(), b.to_f32());
-    let data = (0..n)
-        .map(|i| binary_f32(op, x[index(i, &sa)], y[index(i, &sb)]))
-        .collect();
+    let (shape, data) = broadcast_map(&[a, b], &[&a.f32_values(), &b.f32_values()], |v| {
+        binary_f32(op, v[0], v[1])
+    })?;
     Ok(Tensor::f32(shape, data))
 }
 
@@ -314,6 +382,11 @@ pub(crate) enum UnaryOp {
     HardSwish = 10,
     /// `min(max(x, alpha), beta)`
     Clip = 11,
+    Floor = 12,
+    /// Toward zero (casting floats to integers).
+    Trunc = 13,
+    /// `alpha`, whatever `x` is.
+    Fill = 14,
 }
 
 /// The operation and its two parameters.
@@ -336,6 +409,7 @@ pub(crate) fn unary_params(node: &Node, inputs: &[Option<&Tensor>]) -> Result<(U
         "Neg" => (UnaryOp::Neg, 0.0, 0.0),
         "Abs" => (UnaryOp::Abs, 0.0, 0.0),
         "Erf" => (UnaryOp::Erf, 0.0, 0.0),
+        "Floor" => (UnaryOp::Floor, 0.0, 0.0),
         "HardSigmoid" => (
             UnaryOp::HardSigmoid,
             node.float("alpha", 0.2),
@@ -367,6 +441,9 @@ pub(crate) fn unary(op: UnaryOp, x: f32, alpha: f32, beta: f32) -> f32 {
         UnaryOp::HardSigmoid => hard_sigmoid(x),
         UnaryOp::HardSwish => x * hard_sigmoid(x),
         UnaryOp::Clip => x.max(alpha).min(beta),
+        UnaryOp::Floor => x.floor(),
+        UnaryOp::Trunc => x.trunc(),
+        UnaryOp::Fill => alpha,
     }
 }
 
@@ -519,12 +596,14 @@ fn scatter_strided(out: &mut Tensor, part: &Tensor, axis: usize, at: usize) {
     };
     match (&mut out.data, &part.data) {
         (Data::F32(o), _) => {
+            let o = Arc::make_mut(o);
             let p = part.to_f32();
             for i in 0..n {
                 o[to(i)] = p[i];
             }
         }
         (Data::I64(o), _) => {
+            let o = Arc::make_mut(o);
             let p = part.to_i64();
             for i in 0..n {
                 o[to(i)] = p[i];
@@ -1187,4 +1266,455 @@ fn reduce(x: &Tensor, p: &ReduceParams) -> Tensor {
         };
     }
     Tensor::f32(p.out_shape(), out)
+}
+
+// ------------------------------------------------- transformers and more
+
+/// Element `i` of `shape`'s index, read through `strides`.
+fn at_strides(mut i: usize, shape: &[usize], strides: &[usize]) -> usize {
+    let mut at = 0;
+    for d in (0..shape.len()).rev() {
+        at += (i % shape[d]) * strides[d];
+        i /= shape[d];
+    }
+    at
+}
+
+/// Matrix multiplication with NumPy's rules: the last two axes multiply,
+/// the ones before broadcast; 1-D operands are a row or a column.
+pub(crate) struct MatMulParams {
+    pub m: usize,
+    pub k: usize,
+    pub n: usize,
+    /// The broadcast batch shape, and each operand's strides over it (in
+    /// elements; 0 where repeated).
+    pub batch: Vec<usize>,
+    pub a_batch_strides: Vec<usize>,
+    pub b_batch_strides: Vec<usize>,
+    pub out_shape: Vec<usize>,
+}
+
+pub(crate) fn matmul_params(a: &[usize], b: &[usize]) -> Result<MatMulParams> {
+    let a2: Vec<usize> = if a.len() == 1 {
+        vec![1, a[0]]
+    } else {
+        a.to_vec()
+    };
+    let b2: Vec<usize> = if b.len() == 1 {
+        vec![b[0], 1]
+    } else {
+        b.to_vec()
+    };
+    let (m, k) = (a2[a2.len() - 2], a2[a2.len() - 1]);
+    let (k2, n) = (b2[b2.len() - 2], b2[b2.len() - 1]);
+    if k != k2 {
+        return Err(Error::Model(format!("can't multiply {a:?} by {b:?}")));
+    }
+    let (ab, bb) = (&a2[..a2.len() - 2], &b2[..b2.len() - 2]);
+    let batch = broadcast_shape(ab, bb)?;
+    let scale = |s: Vec<usize>, by: usize| s.into_iter().map(|v| v * by).collect::<Vec<_>>();
+    let a_batch_strides = scale(broadcast_strides(ab, &batch), 1)
+        .iter()
+        .map(|&s| s * m * k)
+        .collect();
+    let b_batch_strides = scale(broadcast_strides(bb, &batch), 1)
+        .iter()
+        .map(|&s| s * k * n)
+        .collect();
+    let mut out_shape = batch.clone();
+    if a.len() > 1 {
+        out_shape.push(m);
+    }
+    if b.len() > 1 {
+        out_shape.push(n);
+    }
+    Ok(MatMulParams {
+        m,
+        k,
+        n,
+        batch,
+        a_batch_strides,
+        b_batch_strides,
+        out_shape,
+    })
+}
+
+fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let p = matmul_params(&a.shape, &b.shape)?;
+    let (x, y) = (a.to_f32(), b.to_f32());
+    let batches: usize = p.batch.iter().product();
+    let mut out = vec![0f32; batches * p.m * p.n];
+    for bi in 0..batches {
+        let (ao, bo) = (
+            at_strides(bi, &p.batch, &p.a_batch_strides),
+            at_strides(bi, &p.batch, &p.b_batch_strides),
+        );
+        for i in 0..p.m {
+            for j in 0..p.n {
+                let mut sum = 0.0;
+                for l in 0..p.k {
+                    sum += x[ao + i * p.k + l] * y[bo + l * p.n + j];
+                }
+                out[(bi * p.m + i) * p.n + j] = sum;
+            }
+        }
+    }
+    Ok(Tensor::f32(p.out_shape, out))
+}
+
+/// Rows of the last axis (`axis` must be the last one).
+fn last_axis(node: &Node, shape: &[usize]) -> Result<(usize, usize)> {
+    let axis = normalize_axis(node.int("axis", -1), shape.len() as i64)?;
+    if axis + 1 != shape.len() {
+        return Err(Error::Unsupported(format!(
+            "{} over axis {axis} (only the last)",
+            node.describe()
+        )));
+    }
+    let d = shape[axis];
+    Ok((shape.iter().product::<usize>() / d.max(1), d))
+}
+
+fn layer_norm(node: &Node, x: &Tensor, scale: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    let (rows, d) = last_axis(node, &x.shape)?;
+    let eps = node.float("epsilon", 1e-5);
+    let (data, g) = (x.to_f32(), scale.to_f32());
+    let b = bias.map(Tensor::to_f32);
+    let mut out = vec![0f32; data.len()];
+    for r in 0..rows {
+        let row = &data[r * d..][..d];
+        let mean = row.iter().sum::<f32>() / d as f32;
+        let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / d as f32;
+        let inv = 1.0 / (var + eps).sqrt();
+        for c in 0..d {
+            out[r * d + c] =
+                (row[c] - mean) * inv * g[c % g.len()] + b.as_ref().map_or(0.0, |b| b[c % b.len()]);
+        }
+    }
+    Ok(Tensor::f32(x.shape.clone(), out))
+}
+
+fn softmax(node: &Node, x: &Tensor) -> Result<Tensor> {
+    let (rows, d) = last_axis(node, &x.shape)?;
+    let data = x.to_f32();
+    let mut out = vec![0f32; data.len()];
+    for r in 0..rows {
+        let row = &data[r * d..][..d];
+        let max = row.iter().copied().fold(f32::MIN, f32::max);
+        let sum: f32 = row.iter().map(|v| (v - max).exp()).sum();
+        for c in 0..d {
+            out[r * d + c] = (row[c] - max).exp() / sum;
+        }
+    }
+    Ok(Tensor::f32(x.shape.clone(), out))
+}
+
+/// GatherND: for each index tuple (the last axis of `indices`, after the
+/// batch axes), the slice of `data` it points at.
+pub(crate) struct GatherNdParams {
+    pub batch_dims: usize,
+    /// Index tuples per batch and their length.
+    pub tuples: usize,
+    pub depth: usize,
+    /// Elements per gathered slice.
+    pub slice: usize,
+    /// Elements of `data` per batch, and the strides of its indexed axes.
+    pub data_batch: usize,
+    pub index_strides: Vec<usize>,
+    pub index_dims: Vec<usize>,
+    pub out_shape: Vec<usize>,
+}
+
+pub(crate) fn gather_nd_params(
+    node: &Node,
+    data: &[usize],
+    indices: &[usize],
+) -> Result<GatherNdParams> {
+    let b = node.int("batch_dims", 0).max(0) as usize;
+    let depth = *indices
+        .last()
+        .ok_or_else(|| Error::Model("GatherND without indices".into()))?;
+    if indices.len() < b + 1 || data.len() < b + depth || data[..b] != indices[..b] {
+        return Err(Error::Model(format!(
+            "{}: {data:?} by {indices:?}",
+            node.describe()
+        )));
+    }
+    let own = strides(data);
+    let mut out_shape = indices[..indices.len() - 1].to_vec();
+    out_shape.extend(&data[b + depth..]);
+    Ok(GatherNdParams {
+        batch_dims: b,
+        tuples: indices[b..indices.len() - 1].iter().product(),
+        depth,
+        slice: data[b + depth..].iter().product(),
+        data_batch: data[b..].iter().product(),
+        index_strides: own[b..b + depth].to_vec(),
+        index_dims: data[b..b + depth].to_vec(),
+        out_shape,
+    })
+}
+
+fn gather_nd(node: &Node, data: &Tensor, indices: &Tensor) -> Result<Tensor> {
+    let p = gather_nd_params(node, &data.shape, &indices.shape)?;
+    let (d, idx) = (data.to_f32(), indices.to_i64());
+    let batches: usize = data.shape[..p.batch_dims].iter().product();
+    let mut out = Vec::with_capacity(batches * p.tuples * p.slice);
+    for bi in 0..batches {
+        for t in 0..p.tuples {
+            let tuple = &idx[(bi * p.tuples + t) * p.depth..][..p.depth];
+            let mut at = bi * p.data_batch;
+            for (k, &i) in tuple.iter().enumerate() {
+                let dim = p.index_dims[k] as i64;
+                at += (if i < 0 { i + dim } else { i }).clamp(0, dim - 1) as usize
+                    * p.index_strides[k];
+            }
+            out.extend_from_slice(&d[at..at + p.slice]);
+        }
+    }
+    Ok(Tensor::f32(p.out_shape, out))
+}
+
+/// Constant padding: the padded shape and where the input goes in it.
+pub(crate) struct PadParams {
+    pub out_shape: Vec<usize>,
+    /// Padding before each axis (negative crops).
+    pub before: Vec<i64>,
+    pub value: f32,
+}
+
+pub(crate) fn pad_params(
+    node: &Node,
+    shape: &[usize],
+    inputs: &[Option<&Tensor>],
+) -> Result<PadParams> {
+    if node.string("mode", "constant") != "constant" {
+        return Err(Error::Unsupported(format!(
+            "{} other than constant",
+            node.describe()
+        )));
+    }
+    let rank = shape.len();
+    let pads = match inputs.get(1).copied().flatten() {
+        Some(t) => t.to_i64(),
+        None => node.ints("pads").map(<[i64]>::to_vec).unwrap_or_default(),
+    };
+    let value = inputs
+        .get(2)
+        .copied()
+        .flatten()
+        .and_then(|t| t.to_f32().first().copied())
+        .unwrap_or(node.float("value", 0.0));
+    let axes: Vec<usize> = match inputs.get(3).copied().flatten() {
+        Some(t) => t
+            .to_i64()
+            .iter()
+            .map(|&a| normalize_axis(a, rank as i64))
+            .collect::<Result<_>>()?,
+        None => (0..rank).collect(),
+    };
+    let n = axes.len();
+    let mut before = vec![0i64; rank];
+    let mut out_shape = shape.to_vec();
+    for (k, &a) in axes.iter().enumerate() {
+        let (b, e) = (pads[k], pads[n + k]);
+        before[a] = b;
+        out_shape[a] = (shape[a] as i64 + b + e).max(0) as usize;
+    }
+    Ok(PadParams {
+        out_shape,
+        before,
+        value,
+    })
+}
+
+fn pad(x: &Tensor, p: &PadParams) -> Tensor {
+    let data = x.to_f32();
+    let n: usize = p.out_shape.iter().product();
+    let in_strides = strides(&x.shape);
+    let mut out = vec![p.value; n];
+    for (o, v) in out.iter_mut().enumerate() {
+        let mut rest = o;
+        let mut at = 0usize;
+        let mut inside = true;
+        for d in (0..p.out_shape.len()).rev() {
+            let i = (rest % p.out_shape[d]) as i64 - p.before[d];
+            rest /= p.out_shape[d];
+            if i < 0 || i >= x.shape[d] as i64 {
+                inside = false;
+                break;
+            }
+            at += i as usize * in_strides[d];
+        }
+        if inside {
+            *v = data[at];
+        }
+    }
+    Tensor::f32(p.out_shape.clone(), out)
+}
+
+/// BatchNormalization at inference as a scale and a shift per channel
+/// (axis 1), shaped to broadcast over a rank-`rank` input.
+pub(crate) fn batch_norm_params(
+    node: &Node,
+    rank: usize,
+    inputs: &[Option<&Tensor>],
+) -> Result<(Tensor, Tensor)> {
+    let get = |i: usize| -> Result<Vec<f32>> {
+        inputs
+            .get(i)
+            .copied()
+            .flatten()
+            .map(Tensor::to_f32)
+            .ok_or_else(|| {
+                Error::Unsupported(format!("{} with computed statistics", node.describe()))
+            })
+    };
+    let (gamma, beta, mean, var) = (get(1)?, get(2)?, get(3)?, get(4)?);
+    let eps = node.float("epsilon", 1e-5);
+    let scale: Vec<f32> = gamma
+        .iter()
+        .zip(&var)
+        .map(|(g, v)| g / (v + eps).sqrt())
+        .collect();
+    let shift: Vec<f32> = beta
+        .iter()
+        .zip(&mean)
+        .zip(&scale)
+        .map(|((b, m), s)| b - m * s)
+        .collect();
+    let mut shape = vec![gamma.len()];
+    shape.extend(std::iter::repeat_n(1, rank.saturating_sub(2)));
+    Ok((Tensor::f32(shape.clone(), scale), Tensor::f32(shape, shift)))
+}
+
+/// Elementwise over broadcast operands (`values`, each tensor's in some
+/// type).
+fn broadcast_map<T: Copy, U>(
+    tensors: &[&Tensor],
+    values: &[&[T]],
+    f: impl Fn(&[T]) -> U,
+) -> Result<(Vec<usize>, Vec<U>)> {
+    let mut shape = tensors[0].shape.clone();
+    for t in &tensors[1..] {
+        shape = broadcast_shape(&shape, &t.shape)?;
+    }
+    let st: Vec<Vec<usize>> = tensors
+        .iter()
+        .map(|t| broadcast_strides(&t.shape, &shape))
+        .collect();
+    let n: usize = shape.iter().product();
+    let mut out = Vec::with_capacity(n);
+    if n == 0 {
+        return Ok((shape, out));
+    }
+    // Row by row along the innermost dimension, each operand's offset
+    // stepped along with the outer ones (no divisions per element:
+    // BiRefNet's attention masks took half a second so).
+    let (inner, outer) = match shape.split_last() {
+        Some((&inner, outer)) => (inner, outer),
+        None => (1, &[][..]),
+    };
+    let inner_st: Vec<usize> = st.iter().map(|s| s.last().copied().unwrap_or(0)).collect();
+    let mut index = vec![0; outer.len()];
+    let mut offsets = vec![0; tensors.len()];
+    let mut args = vec![values[0][0]; tensors.len()];
+    for _ in 0..n / inner {
+        for j in 0..inner {
+            for k in 0..values.len() {
+                args[k] = values[k][offsets[k] + j * inner_st[k]];
+            }
+            out.push(f(&args));
+        }
+        for d in (0..outer.len()).rev() {
+            index[d] += 1;
+            for (at, st) in offsets.iter_mut().zip(&st) {
+                *at += st[d];
+            }
+            if index[d] < outer[d] {
+                break;
+            }
+            for (at, st) in offsets.iter_mut().zip(&st) {
+                *at -= st[d] * outer[d];
+            }
+            index[d] = 0;
+        }
+    }
+    Ok((shape, out))
+}
+
+fn compare(node: &Node, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let op = node.op.as_str();
+    if op == "Mod" && node.int("fmod", 0) != 0 || op == "Mod" && matches!(a.data, Data::F32(_)) {
+        let (shape, v) = broadcast_map(&[a, b], &[&a.f32_values(), &b.f32_values()], |x| {
+            x[0] % x[1]
+        })?;
+        return Ok(Tensor::f32(shape, v));
+    }
+    if op == "Mod" {
+        let (shape, v) = broadcast_map(&[a, b], &[&a.i64_values(), &b.i64_values()], |x| {
+            if x[1] == 0 {
+                0
+            } else {
+                ((x[0] % x[1]) + x[1]) % x[1]
+            }
+        })?;
+        return Ok(Tensor::i64(shape, v));
+    }
+    let (shape, v) = broadcast_map(&[a, b], &[&a.f32_values(), &b.f32_values()], |x| {
+        let r = match op {
+            "Equal" => x[0] == x[1],
+            "Less" => x[0] < x[1],
+            "Greater" => x[0] > x[1],
+            "And" => x[0] != 0.0 && x[1] != 0.0,
+            _ => x[0] != 0.0 || x[1] != 0.0,
+        };
+        i64::from(r)
+    })?;
+    Ok(Tensor::i64(shape, v))
+}
+
+fn where_(cond: &Tensor, x: &Tensor, y: &Tensor) -> Result<Tensor> {
+    if let (Data::I64(xi), Data::I64(yi)) = (&x.data, &y.data) {
+        let (shape, v) = broadcast_map(&[cond, x, y], &[&cond.i64_values(), xi, yi], |a| {
+            if a[0] != 0 { a[1] } else { a[2] }
+        })?;
+        return Ok(Tensor::i64(shape, v));
+    }
+    let (c, x_values, y_values) = (cond.f32_values(), x.f32_values(), y.f32_values());
+    let (shape, v) = broadcast_map(&[cond, x, y], &[&c, &x_values, &y_values], |a| {
+        if a[0] != 0.0 { a[1] } else { a[2] }
+    })?;
+    Ok(Tensor::f32(shape, v))
+}
+
+fn scatter_nd(data: &Tensor, indices: &Tensor, updates: &Tensor) -> Result<Tensor> {
+    let depth = *indices.shape.last().unwrap_or(&0);
+    let own = strides(&data.shape);
+    let slice: usize = data.shape[depth..].iter().product();
+    let idx = indices.to_i64();
+    let tuples = idx.len() / depth.max(1);
+    let mut out = data.clone();
+    // The updates in the data's type, once.
+    let (updates_i64, updates_f32) = match out.data {
+        Data::I64(_) => (updates.to_i64(), Vec::new()),
+        Data::F32(_) => (Vec::new(), updates.to_f32()),
+    };
+    for t in 0..tuples {
+        let mut at = 0;
+        for k in 0..depth {
+            let dim = data.shape[k] as i64;
+            let i = idx[t * depth + k];
+            at += (if i < 0 { i + dim } else { i }) as usize * own[k];
+        }
+        match &mut out.data {
+            Data::I64(o) => {
+                Arc::make_mut(o)[at..at + slice].copy_from_slice(&updates_i64[t * slice..][..slice])
+            }
+            Data::F32(o) => {
+                Arc::make_mut(o)[at..at + slice].copy_from_slice(&updates_f32[t * slice..][..slice])
+            }
+        }
+    }
+    Ok(out)
 }

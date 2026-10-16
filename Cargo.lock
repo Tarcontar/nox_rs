@@ -1193,11 +1193,14 @@ dependencies = [
 name = "nox-ai"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bytemuck",
  "nox-build",
  "nox-color",
  "nox-gpu",
  "nox-media",
+ "nox-otio",
+ "nox-project",
  "prost",
  "sha2",
  "thiserror 2.0.21",

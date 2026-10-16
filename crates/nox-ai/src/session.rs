@@ -19,10 +19,11 @@ use nox_gpu::compute::{Binding, Buffer, BufferSlice, MemoryUse, Recording};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::cpu::{self, BinaryOp, Strided};
+use crate::cpu::{self, BinaryOp, Strided, UnaryOp};
 use crate::kernels::{
-    BinaryPush, ConvPush, CopyPush, KernelKind, Kernels, PoolPush, ReducePush, ResizePush,
-    UnaryPush, groups,
+    BinaryPush, CM2_COLUMNS, CM2_TILE_H, CM2_TILE_W, ConvPush, ConvTile, CopyPush, GEMM_TILE,
+    GatherNdPush, KernelKind, Kernels, MatMulPush, MatrixKernels, PoolPush, Precision, ReducePush,
+    ResizePush, RowsPush, TransposePush, UnaryPush, groups,
 };
 use crate::model::{Model, Node};
 use crate::tensor::{Tensor, strides};
@@ -62,7 +63,12 @@ struct Step {
     kind: KernelKind,
     buffers: Vec<usize>,
     push: Vec<u8>,
-    n: u32,
+    groups: [u32; 3],
+    /// An input the output may overwrite element by element (same size,
+    /// read at the same index), if this is its last use.
+    in_place: Option<usize>,
+    /// The node it's for (`Node::describe`), for profilers' labels.
+    node: Arc<str>,
 }
 
 struct Plan {
@@ -77,19 +83,48 @@ struct Plan {
 pub struct Session {
     gpu: Arc<GpuDevice>,
     model: Model,
+    precision: Precision,
     // Dropped before the kernels its recording uses.
     plan: Option<Plan>,
     kernels: Kernels,
 }
 
 impl Session {
+    /// A session for `model` in the precision it's made for, as far as
+    /// `gpu` can (`Precision::for_model`).
     pub fn new(gpu: Arc<GpuDevice>, model: Model) -> Self {
+        let precision = Precision::for_model(&model, &gpu);
+        Self::with_precision(gpu, model, precision)
+    }
+
+    /// A session keeping tensors in `precision` (F16 needs the device's
+    /// 16-bit storage).
+    pub fn with_precision(gpu: Arc<GpuDevice>, model: Model, precision: Precision) -> Self {
+        let kernels = Kernels::new(precision, &gpu);
         Self {
             gpu,
             model,
+            precision,
             plan: None,
-            kernels: Kernels::default(),
+            kernels,
         }
+    }
+
+    /// Whether matrix multiplications (convolutions, MatMul) run on
+    /// tensor cores: F16 on a GPU that has them.
+    pub fn tensor_cores(&self) -> bool {
+        self.kernels.matrices() != MatrixKernels::Scalar
+    }
+
+    /// What the matrix multiplications run on.
+    pub fn matrix_kernels(&self) -> MatrixKernels {
+        self.kernels.matrices()
+    }
+
+    /// How tensors are kept on the GPU: what input and output buffers
+    /// hold (`buffer`).
+    pub fn precision(&self) -> Precision {
+        self.precision
     }
 
     pub fn model(&self) -> &Model {
@@ -126,6 +161,8 @@ impl Session {
             uploads: Vec::new(),
             uploaded: HashMap::new(),
             steps: Vec::new(),
+            node: "".into(),
+            matrices: self.kernels.matrices(),
         };
         for (name, tensor) in constants {
             planner
@@ -146,6 +183,7 @@ impl Session {
             }
         }
         for node in &self.model.nodes {
+            planner.node = node.describe().into();
             planner
                 .plan_node(node, &self.model.constants)
                 .map_err(|err| match err {
@@ -198,13 +236,17 @@ impl Session {
             sizes,
             pinned,
             uploads,
-            mut steps,
+            steps,
             ..
         } = planner;
+        let mut steps = schedule(steps);
         let (physical, physical_sizes) = assign(&sizes, &pinned, &steps);
         let buffers: Vec<Buffer> = physical_sizes
             .iter()
-            .map(|&n| Buffer::new(&self.gpu, (n * 4) as u64, MemoryUse::Device))
+            .map(|&n| {
+                let bytes = (n * self.precision.bytes()).next_multiple_of(4);
+                Buffer::new(&self.gpu, bytes as u64, MemoryUse::Device)
+            })
             .collect::<std::result::Result<_, _>>()?;
         for step in &mut steps {
             for b in &mut step.buffers {
@@ -216,7 +258,7 @@ impl Session {
                 v.buffer = physical[v.buffer];
             }
         }
-        let uploads: Vec<(usize, Vec<f32>)> =
+        let uploads: Vec<(usize, Arc<Vec<f32>>)> =
             uploads.into_iter().map(|(b, d)| (physical[b], d)).collect();
         let copies: Vec<(GpuValue, GpuValue)> = copies
             .into_iter()
@@ -233,20 +275,24 @@ impl Session {
                 )
             })
             .collect();
-        upload(&self.gpu, &buffers, &uploads)?;
+        upload(&self.gpu, &buffers, &uploads, self.precision)?;
         let max_buffers = steps.iter().map(|s| s.kind.buffers()).max().unwrap_or(1);
+        let p = self.precision;
         let mut recording = Recording::new(&self.gpu, steps.len() as u32, max_buffers)?;
         for step in &steps {
             let kernel = self.kernels.get(&self.gpu, step.kind)?;
             let slices: Vec<Binding<'_>> =
                 step.buffers.iter().map(|&b| (&buffers[b]).into()).collect();
-            recording.dispatch(kernel, &slices, &step.push, groups(step.n))?;
+            // Named for profilers (NOX_GPU_LABELS=1): the node, the kernel.
+            recording.begin_label(&format!("{} [{}]", step.node, step.kind.label()));
+            recording.dispatch(kernel, &slices, &step.push, step.groups)?;
+            recording.end_label();
         }
         for (from, to) in &copies {
             recording.copy(
-                slice(&buffers[from.buffer], from.offset),
-                slice(&buffers[to.buffer], to.offset),
-                (from.len() * 4) as u64,
+                slice(&buffers[from.buffer], from.offset, p),
+                slice(&buffers[to.buffer], to.offset, p),
+                (from.len() * p.bytes()) as u64,
             );
         }
         tracing::debug!(
@@ -315,13 +361,14 @@ impl Session {
                 data.len()
             )));
         }
-        let mut staging = Buffer::new(&self.gpu, (data.len() * 4) as u64, MemoryUse::Upload)?;
-        staging.write(data)?;
+        let bytes = self.precision.encode(data);
+        let mut staging = Buffer::new(&self.gpu, bytes.len() as u64, MemoryUse::Upload)?;
+        staging.write(&bytes)?;
         let mut copy = Recording::new(&self.gpu, 0, 0)?;
         copy.copy(
             (&staging).into(),
-            slice(&plan.buffers[value.buffer], value.offset),
-            (data.len() * 4) as u64,
+            slice(&plan.buffers[value.buffer], value.offset, self.precision),
+            bytes.len() as u64,
         );
         copy.run()?;
         Ok(())
@@ -335,16 +382,16 @@ impl Session {
             Some(Value::Gpu(value)) => value,
             None => return Err(Error::Model(format!("no value {name}"))),
         };
-        let bytes = (value.len() * 4) as u64;
+        let bytes = (value.len() * self.precision.bytes()) as u64;
         let staging = Buffer::new(&self.gpu, bytes, MemoryUse::Download)?;
         let mut copy = Recording::new(&self.gpu, 0, 0)?;
         copy.copy(
-            slice(&plan.buffers[value.buffer], value.offset),
+            slice(&plan.buffers[value.buffer], value.offset, self.precision),
             (&staging).into(),
             bytes,
         );
         copy.run()?;
-        let mut data = staging.read::<f32>()?;
+        let mut data = self.precision.decode(&staging.read::<u8>()?);
         data.truncate(value.len());
         Ok(data)
     }
@@ -360,30 +407,59 @@ impl Session {
     }
 }
 
-fn slice(buffer: &Buffer, offset: usize) -> BufferSlice<'_> {
+/// `buffer` from element `offset` on.
+fn slice(buffer: &Buffer, offset: usize, precision: Precision) -> BufferSlice<'_> {
     BufferSlice {
         buffer,
-        offset: (offset * 4) as u64,
+        offset: (offset * precision.bytes()) as u64,
         range: nox_gpu::vk::WHOLE_SIZE,
     }
 }
 
 /// Copies the planned constants into their buffers.
-fn upload(gpu: &Arc<GpuDevice>, buffers: &[Buffer], uploads: &[(usize, Vec<f32>)]) -> Result<()> {
+fn upload(
+    gpu: &Arc<GpuDevice>,
+    buffers: &[Buffer],
+    uploads: &[(usize, Arc<Vec<f32>>)],
+    precision: Precision,
+) -> Result<()> {
     if uploads.is_empty() {
         return Ok(());
     }
-    let total: usize = uploads.iter().map(|(_, d)| d.len()).sum();
-    let mut staging = Buffer::new(gpu, (total * 4) as u64, MemoryUse::Upload)?;
-    let all: Vec<f32> = uploads
+    // Encoded straight into the staging buffer, one after another, in
+    // pieces spread over a few threads (176 MB for BiRefNet in 16 bits:
+    // 30 ms, 190 by copying everything first, then encoding on one thread).
+    let total: usize = uploads
         .iter()
-        .flat_map(|(_, d)| d.iter().copied())
-        .collect();
-    staging.write(&all)?;
+        .map(|(_, d)| d.len() * precision.bytes())
+        .sum();
+    let mut staging = Buffer::new(gpu, total as u64, MemoryUse::Upload)?;
+    let mut rest = staging.mapped_mut()?;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    // Dealt out in turn: the pieces of one tensor go to every thread.
+    let mut shares: Vec<Vec<(&[f32], &mut [u8])>> = (0..threads).map(|_| Vec::new()).collect();
+    let mut i = 0;
+    for (_, data) in uploads {
+        for chunk in data.chunks(1 << 20) {
+            let (piece, after) = rest.split_at_mut(chunk.len() * precision.bytes());
+            shares[i % threads].push((chunk, piece));
+            rest = after;
+            i += 1;
+        }
+    }
+    std::thread::scope(|scope| {
+        for share in shares {
+            scope.spawn(move || {
+                for (data, out) in share {
+                    precision.encode_into(data, out);
+                }
+            });
+        }
+    });
     let mut copy = Recording::new(gpu, 0, 0)?;
     let mut at = 0u64;
     for (buffer, data) in uploads {
-        let bytes = (data.len() * 4) as u64;
+        let bytes = (data.len() * precision.bytes()) as u64;
         copy.copy(
             BufferSlice {
                 buffer: &staging,
@@ -397,6 +473,62 @@ fn upload(gpu: &Arc<GpuDevice>, buffers: &[Buffer], uploads: &[(usize, Vec<f32>)
     }
     copy.run()?;
     Ok(())
+}
+
+/// Orders the steps so each value is computed just before it's needed: a
+/// depth-first walk from the last steps, taking each step's inputs in
+/// their original order. Models list nodes breadth-first (e.g. all four
+/// corners of a deformable convolution's sampling before any is used),
+/// which keeps far more alive at once.
+fn schedule(steps: Vec<Step>) -> Vec<Step> {
+    let n = steps.len();
+    // The steps writing each (virtual) buffer so far, in order.
+    let mut writers: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut deps: Vec<Vec<usize>> = Vec::with_capacity(n);
+    for (i, step) in steps.iter().enumerate() {
+        let output = *step.buffers.last().expect("output");
+        let mut d: Vec<usize> = Vec::new();
+        for &b in &step.buffers {
+            // Inputs, and earlier writes to the output (a Concat's copies,
+            // a Pad's fill) come first.
+            if let Some(w) = writers.get(&b) {
+                d.extend(w.iter().copied());
+            }
+        }
+        // Newest first: a chain like ((a + b) + c) + d then adds each
+        // term as it's made instead of making all of them first.
+        d.sort_unstable_by(|a, b| b.cmp(a));
+        d.dedup();
+        deps.push(d);
+        writers.entry(output).or_default().push(i);
+    }
+    let mut order = Vec::with_capacity(n);
+    // 0: not reached, 1: waiting for its inputs, 2: placed.
+    let mut state = vec![0u8; n];
+    for root in (0..n).rev() {
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize)];
+        state[root] = 1;
+        while let Some((i, next)) = stack.pop() {
+            if let Some(&dep) = deps[i].get(next) {
+                stack.push((i, next + 1));
+                if state[dep] == 0 {
+                    state[dep] = 1;
+                    stack.push((dep, 0));
+                }
+            } else {
+                state[i] = 2;
+                order.push(i);
+            }
+        }
+    }
+    let mut slots: Vec<Option<Step>> = steps.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .map(|i| slots[i].take().expect("placed once"))
+        .collect()
 }
 
 /// Physical buffers for the virtual ones a plan uses (by index), and their
@@ -430,6 +562,20 @@ fn assign(sizes: &[usize], pinned: &[bool], steps: &[Step]) -> (Vec<usize>, Vec<
     }
     for (i, step) in steps.iter().enumerate() {
         let output = *step.buffers.last().expect("output");
+        // Elementwise over an input that dies here: write over it.
+        if physical[output] == NONE
+            && let Some(input) = step.in_place
+            && last[input] == i
+            && !pinned[input]
+            && first[input] != NONE
+            && first[output] == i
+            && sizes[input] >= sizes[output]
+            && !free.contains(&physical[input])
+        {
+            physical[output] = physical[input];
+            // It lives on as the output now; not freed with the input.
+            last[input] = usize::MAX;
+        }
         if physical[output] == NONE {
             let fit = free
                 .iter()
@@ -457,20 +603,70 @@ struct Planner {
     pinned: Vec<bool>,
     values: HashMap<String, Value>,
     /// Constants to copy into buffers: (buffer, data).
-    uploads: Vec<(usize, Vec<f32>)>,
+    uploads: Vec<(usize, Arc<Vec<f32>>)>,
     /// Constants already on the GPU, by name.
     uploaded: HashMap<String, GpuValue>,
     steps: Vec<Step>,
+    /// The node being planned (`Node::describe`), for its steps.
+    node: Arc<str>,
+    /// What the matrix multiplications run on.
+    matrices: MatrixKernels,
 }
 
-/// Up to 4 dimensions, padded in front with size 1 (stride 0).
-fn pad4<T: Copy + Default>(shape: &[usize], strides: &[T]) -> Result<([u32; 4], [T; 4])> {
-    if shape.len() > 4 {
+/// `shape` with fewer dimensions, walked the same way by every operand
+/// (`strides`, one list per operand): extents of 1 dropped, and a
+/// dimension merged into the one inside it where each operand's stride
+/// over it is the inner stride times the inner extent. Kernels then work
+/// out fewer coordinates per element (a same-shaped elementwise step has
+/// one dimension: no divisions). The order of elements stays the same.
+/// At least one dimension.
+fn collapse(shape: &[usize], strides: &[Vec<isize>]) -> (Vec<usize>, Vec<Vec<isize>>) {
+    // Innermost first while building.
+    let mut out_shape: Vec<usize> = Vec::new();
+    let mut out_strides: Vec<Vec<isize>> = vec![Vec::new(); strides.len()];
+    for d in (0..shape.len()).rev() {
+        if shape[d] == 1 {
+            continue;
+        }
+        let merges = out_shape.last().is_some_and(|&inner| {
+            strides
+                .iter()
+                .zip(&out_strides)
+                .all(|(s, o)| s[d] == o.last().expect("inner") * inner as isize)
+        });
+        if merges {
+            *out_shape.last_mut().expect("inner") *= shape[d];
+        } else {
+            out_shape.push(shape[d]);
+            for (o, s) in out_strides.iter_mut().zip(strides) {
+                o.push(s[d]);
+            }
+        }
+    }
+    if out_shape.is_empty() {
+        out_shape.push(1);
+        for o in &mut out_strides {
+            o.push(0);
+        }
+    }
+    out_shape.reverse();
+    for o in &mut out_strides {
+        o.reverse();
+    }
+    (out_shape, out_strides)
+}
+
+/// Up to `N` dimensions, padded in front with size 1 (stride 0).
+fn pad<const N: usize, T: Copy + Default>(
+    shape: &[usize],
+    strides: &[T],
+) -> Result<([u32; N], [T; N])> {
+    if shape.len() > N {
         return Err(Error::Unsupported(format!("rank-{} tensors", shape.len())));
     }
-    let mut s = [1u32; 4];
-    let mut st = [T::default(); 4];
-    let pad = 4 - shape.len();
+    let mut s = [1u32; N];
+    let mut st = [T::default(); N];
+    let pad = N - shape.len();
     for i in 0..shape.len() {
         s[pad + i] = shape[i] as u32;
         st[pad + i] = strides[i];
@@ -501,7 +697,7 @@ impl Planner {
                 }
                 let value = self.alloc(tensor.shape.clone());
                 self.pinned[value.buffer] = true;
-                self.uploads.push((value.buffer, tensor.to_f32()));
+                self.uploads.push((value.buffer, tensor.shared_f32()));
                 self.uploaded.insert(name.clone(), value.clone());
                 Ok(value)
             }
@@ -509,13 +705,128 @@ impl Planner {
         }
     }
 
+    /// Constant convolution weights `tensor` (out channels × in channels ×
+    /// kernel height × width) on the GPU with the kernel's taps before the
+    /// input channels (out channels × taps × in channels), as
+    /// `conv_gemm_cm2.glsl` reads them; uploaded once per name.
+    fn upload_taps_major(&mut self, name: &str, tensor: &Tensor) -> GpuValue {
+        let key = format!("{name} (taps first)");
+        if let Some(value) = self.uploaded.get(&key) {
+            return value.clone();
+        }
+        let [out, inputs, h, w] = tensor.shape[..] else {
+            unreachable!("Conv weights have 4 dimensions");
+        };
+        let taps = h * w;
+        let data = tensor.shared_f32();
+        let mut reordered = vec![0.0; data.len()];
+        for o in 0..out {
+            for i in 0..inputs {
+                for t in 0..taps {
+                    reordered[(o * taps + t) * inputs + i] = data[(o * inputs + i) * taps + t];
+                }
+            }
+        }
+        let value = self.alloc(tensor.shape.clone());
+        self.pinned[value.buffer] = true;
+        self.uploads.push((value.buffer, Arc::new(reordered)));
+        self.uploaded.insert(key, value.clone());
+        value
+    }
+
+    /// A dispatch with one invocation per element of `n`.
     fn step(&mut self, kind: KernelKind, buffers: Vec<usize>, push: &impl bytemuck::Pod, n: usize) {
+        self.step_groups(kind, buffers, push, groups(n as u32));
+    }
+
+    fn step_groups(
+        &mut self,
+        kind: KernelKind,
+        buffers: Vec<usize>,
+        push: &impl bytemuck::Pod,
+        groups: [u32; 3],
+    ) {
         self.steps.push(Step {
             kind,
             buffers,
             push: bytemuck::bytes_of(push).to_vec(),
-            n: n as u32,
+            groups,
+            in_place: None,
+            node: Arc::clone(&self.node),
         });
+    }
+
+    /// Lets the last step write over input `buffer` when it's done with it.
+    fn last_in_place(&mut self, buffer: usize) {
+        self.steps.last_mut().expect("step").in_place = Some(buffer);
+    }
+
+    /// `tensor`, computed while planning, on the GPU.
+    fn upload_tensor(&mut self, tensor: &Tensor) -> GpuValue {
+        let value = self.alloc(tensor.shape.clone());
+        self.pinned[value.buffer] = true;
+        self.uploads.push((value.buffer, tensor.shared_f32()));
+        value
+    }
+
+    /// `out = a (op) b` with broadcasting.
+    fn binary(&mut self, op: BinaryOp, a: &GpuValue, b: &GpuValue) -> Result<GpuValue> {
+        let shape = cpu::broadcast_shape(&a.shape, &b.shape)?;
+        let signed = |s: Vec<usize>| s.into_iter().map(|v| v as isize).collect::<Vec<_>>();
+        let (dims, operands) = collapse(
+            &shape,
+            &[
+                signed(cpu::broadcast_strides(&a.shape, &shape)),
+                signed(cpu::broadcast_strides(&b.shape, &shape)),
+            ],
+        );
+        let (padded, sa) = pad::<6, isize>(&dims, &operands[0])?;
+        let (_, sb) = pad::<6, isize>(&dims, &operands[1])?;
+        let o = self.alloc(shape);
+        let push = BinaryPush {
+            n: o.len() as u32,
+            op: op as u32,
+            a_offset: a.offset as u32,
+            b_offset: b.offset as u32,
+            rank: dims.len() as u32,
+            shape: padded,
+            a_strides: sa.map(|s| s as u32),
+            b_strides: sb.map(|s| s as u32),
+        };
+        self.step(
+            KernelKind::Binary,
+            vec![a.buffer, b.buffer, o.buffer],
+            &push,
+            o.len(),
+        );
+        // An operand of the output's size, read where it's written.
+        if a.offset == 0 && a.len() == o.len() {
+            self.last_in_place(a.buffer);
+        } else if b.offset == 0 && b.len() == o.len() {
+            self.last_in_place(b.buffer);
+        }
+        Ok(o)
+    }
+
+    /// `out = f(x)` elementwise.
+    fn unary(&mut self, op: UnaryOp, x: &GpuValue, alpha: f32, beta: f32) -> GpuValue {
+        let o = self.alloc(x.shape.clone());
+        self.unary_into(op, x, &o, alpha, beta);
+        o
+    }
+
+    fn unary_into(&mut self, op: UnaryOp, x: &GpuValue, o: &GpuValue, alpha: f32, beta: f32) {
+        let push = UnaryPush {
+            n: o.len() as u32,
+            op: op as u32,
+            x_offset: x.offset as u32,
+            alpha,
+            beta,
+        };
+        self.step(KernelKind::Unary, vec![x.buffer, o.buffer], &push, o.len());
+        if x.offset == 0 && x.len() == o.len() && op != UnaryOp::Fill {
+            self.last_in_place(x.buffer);
+        }
     }
 
     /// Copies the view `view` (offsets relative to `src`'s) into `dst`
@@ -532,20 +843,95 @@ impl Planner {
         if n == 0 {
             return Ok(());
         }
-        let (shape, src_strides) = pad4(&view.shape, &view.strides)?;
         let dst_strides: Vec<isize> = dst_strides.iter().map(|&s| s as isize).collect();
-        let (_, dst_strides) = pad4(&view.shape, &dst_strides)?;
+        let (dims, operands) = collapse(&view.shape, &[view.strides.clone(), dst_strides]);
+        let rank = dims.len() as u32;
+        let (shape, src_strides) = pad::<6, isize>(&dims, &operands[0])?;
+        let (_, dst_strides) = pad::<6, isize>(&dims, &operands[1])?;
+        // Reading along one dimension and writing along another, both
+        // long enough to fill tiles: a transpose through shared memory.
+        let fast = |strides: &[isize; 6]| (0..6).find(|&k| strides[k] == 1 && shape[k] >= 8);
+        let innermost = (0..6).rev().find(|&k| shape[k] > 1);
+        if let (Some(a), Some(b), Some(inner)) = (fast(&dst_strides), fast(&src_strides), innermost)
+            && a != b
+            && src_strides[inner] != 1
+        {
+            let tiles_a = shape[a].div_ceil(32);
+            let tiles_b = shape[b].div_ceil(32);
+            let outer = n as u32 / (shape[a] * shape[b]);
+            let push = TransposePush {
+                tiles_a,
+                tiles_b,
+                outer,
+                dst_fast: a as u32,
+                src_fast: b as u32,
+                src_offset: (src.offset + view.offset) as i32,
+                dst_offset: (dst.offset + dst_offset) as i32,
+                rank,
+                shape,
+                src_strides: src_strides.map(|s| s as i32),
+                dst_strides: dst_strides.map(|s| s as i32),
+            };
+            let total = tiles_a * tiles_b * outer;
+            let x = total.min(65535);
+            self.step_groups(
+                KernelKind::Transpose,
+                vec![src.buffer, dst.buffer],
+                &push,
+                [x, total.div_ceil(x), 1],
+            );
+            return Ok(());
+        }
         let push = CopyPush {
             n: n as u32,
             src_offset: (src.offset + view.offset) as i32,
             dst_offset: (dst.offset + dst_offset) as i32,
-            pad0: 0,
+            rank,
             shape,
             src_strides: src_strides.map(|s| s as i32),
             dst_strides: dst_strides.map(|s| s as i32),
         };
         self.step(KernelKind::Copy, vec![src.buffer, dst.buffer], &push, n);
         Ok(())
+    }
+
+    /// `x` from the start of a buffer of its own, for the kernels that
+    /// read from there: copied if it's a view further in.
+    fn contiguous(&mut self, x: GpuValue) -> Result<GpuValue> {
+        if x.offset == 0 {
+            return Ok(x);
+        }
+        let o = self.alloc(x.shape.clone());
+        let view = Strided {
+            shape: x.shape.clone(),
+            strides: strides(&x.shape).iter().map(|&s| s as isize).collect(),
+            offset: 0,
+        };
+        self.copy(&x, &view, &o, 0, &strides(&o.shape))?;
+        Ok(o)
+    }
+
+    /// The view `view` of `x`: in place if its elements are one
+    /// contiguous run (a slice along the outermost axis that isn't 1),
+    /// else copied out.
+    fn view_or_copy(&mut self, x: &GpuValue, view: Strided) -> Result<GpuValue> {
+        let dense = strides(&view.shape);
+        let contiguous = view
+            .shape
+            .iter()
+            .zip(&view.strides)
+            .zip(&dense)
+            .all(|((&d, &s), &c)| d == 1 || s == c as isize);
+        if contiguous {
+            return Ok(GpuValue {
+                buffer: x.buffer,
+                offset: x.offset + view.offset,
+                shape: view.shape,
+            });
+        }
+        let o = self.alloc(view.shape.clone());
+        self.copy(x, &view, &o, 0, &strides(&o.shape))?;
+        Ok(o)
     }
 
     fn plan_node(&mut self, node: &Node, constants: &HashMap<String, Tensor>) -> Result<()> {
@@ -621,40 +1007,239 @@ impl Planner {
             "Add" | "Sub" | "Mul" | "Div" | "Pow" => {
                 let a = self.gpu_arg(node, &args, 0)?;
                 let b = self.gpu_arg(node, &args, 1)?;
-                let shape = cpu::broadcast_shape(&a.shape, &b.shape)?;
-                let (dims, sa) = pad4(&shape, &cpu::broadcast_strides(&a.shape, &shape))?;
-                let (_, sb) = pad4(&shape, &cpu::broadcast_strides(&b.shape, &shape))?;
-                let o = self.alloc(shape);
-                let push = BinaryPush {
-                    n: o.len() as u32,
-                    op: BinaryOp::of(&node.op).expect("binary") as u32,
+                let o = self.binary(BinaryOp::of(&node.op).expect("binary"), &a, &b)?;
+                out(&mut self.values, 0, Value::Gpu(o));
+            }
+            "Sum" => {
+                let mut sum = self.gpu_arg(node, &args, 0)?;
+                for i in 1..args.len() {
+                    if args[i].is_some() {
+                        let part = self.gpu_arg(node, &args, i)?;
+                        sum = self.binary(BinaryOp::Add, &sum, &part)?;
+                    }
+                }
+                out(&mut self.values, 0, Value::Gpu(sum));
+            }
+            "BatchNormalization" => {
+                let x = self.gpu_arg(node, &args, 0)?;
+                let (scale, shift) = cpu::batch_norm_params(node, x.shape.len(), &host)?;
+                let (scale, shift) = (self.upload_tensor(&scale), self.upload_tensor(&shift));
+                let scaled = self.binary(BinaryOp::Mul, &x, &scale)?;
+                let o = self.binary(BinaryOp::Add, &scaled, &shift)?;
+                out(&mut self.values, 0, Value::Gpu(o));
+            }
+            "Relu" | "Sigmoid" | "Tanh" | "Exp" | "Sqrt" | "Neg" | "Abs" | "Erf"
+            | "HardSigmoid" | "HardSwish" | "Clip" | "Floor" => {
+                let x = self.gpu_arg(node, &args, 0)?;
+                let (op, alpha, beta) = cpu::unary_params(node, &host)?;
+                let o = self.unary(op, &x, alpha, beta);
+                out(&mut self.values, 0, Value::Gpu(o));
+            }
+            // Integers on the GPU are whole floats.
+            "Cast" if matches!(node.int("to", 1), 6 | 7) => {
+                let x = self.gpu_arg(node, &args, 0)?;
+                let o = self.unary(UnaryOp::Trunc, &x, 0.0, 0.0);
+                out(&mut self.values, 0, Value::Gpu(o));
+            }
+            "MatMul" => {
+                let a = self.gpu_arg(node, &args, 0)?;
+                let b = self.gpu_arg(node, &args, 1)?;
+                let p = cpu::matmul_params(&a.shape, &b.shape)?;
+                let (batch, a_strides) = pad::<4, usize>(&p.batch, &p.a_batch_strides)?;
+                let (_, b_strides) = pad::<4, usize>(&p.batch, &p.b_batch_strides)?;
+                let o = self.alloc(p.out_shape.clone());
+                let push = MatMulPush {
+                    m: p.m as u32,
+                    k: p.k as u32,
+                    n: p.n as u32,
                     a_offset: a.offset as u32,
                     b_offset: b.offset as u32,
-                    shape: dims,
-                    a_strides: sa.map(|s| s as u32),
-                    b_strides: sb.map(|s| s as u32),
+                    pad: [0; 3],
+                    batch,
+                    a_batch_strides: a_strides.map(|s| s as u32),
+                    b_batch_strides: b_strides.map(|s| s as u32),
+                };
+                let batches: u32 = batch.iter().product();
+                let groups = [
+                    (p.n as u32).div_ceil(GEMM_TILE),
+                    (p.m as u32).div_ceil(GEMM_TILE),
+                    batches,
+                ];
+                if groups[2] > 65535 {
+                    return Err(Error::Unsupported(
+                        "MatMul of more than 65535 matrices".into(),
+                    ));
+                }
+                self.step_groups(
+                    KernelKind::MatMul,
+                    vec![a.buffer, b.buffer, o.buffer],
+                    &push,
+                    groups,
+                );
+                out(&mut self.values, 0, Value::Gpu(o));
+            }
+            "LayerNormalization" | "Softmax" => {
+                let x = self.gpu_arg(node, &args, 0)?;
+                let rank = x.shape.len() as i64;
+                let axis = cpu::normalize_axis(node.int("axis", -1), rank)?;
+                if axis + 1 != x.shape.len() {
+                    return Err(Error::Unsupported(format!(
+                        "{} over axis {axis} (only the last)",
+                        node.op
+                    )));
+                }
+                let d = x.shape[axis];
+                let layer_norm = node.op == "LayerNormalization";
+                let (scale, bias) = if layer_norm {
+                    let scale = self.gpu_arg(node, &args, 1)?;
+                    let bias = match args.get(2).cloned().flatten() {
+                        Some(_) => Some(self.gpu_arg(node, &args, 2)?),
+                        None => None,
+                    };
+                    (Some(scale), bias)
+                } else {
+                    (None, None)
+                };
+                let o = self.alloc(x.shape.clone());
+                let push = RowsPush {
+                    rows: (x.len() / d.max(1)) as u32,
+                    d: d as u32,
+                    op: u32::from(!layer_norm),
+                    x_offset: x.offset as u32,
+                    epsilon: node.float("epsilon", 1e-5),
+                    has_bias: u32::from(bias.is_some()),
+                    scale_len: scale.as_ref().map_or(1, |s| s.len() as u32),
+                    bias_len: bias.as_ref().map_or(1, |b| b.len() as u32),
+                };
+                let scale = scale.map(|s| self.contiguous(s)).transpose()?;
+                let bias = bias.map(|b| self.contiguous(b)).transpose()?;
+                let scale = scale.map_or(x.buffer, |s| s.buffer);
+                let bias = bias.map_or(x.buffer, |b| b.buffer);
+                // A workgroup per row (rows.comp).
+                let x_groups = push.rows.clamp(1, 65535);
+                self.step_groups(
+                    KernelKind::Rows,
+                    vec![x.buffer, scale, bias, o.buffer],
+                    &push,
+                    [x_groups, push.rows.div_ceil(x_groups).max(1), 1],
+                );
+                out(&mut self.values, 0, Value::Gpu(o));
+            }
+            "GatherND" => {
+                let data = self.gpu_arg(node, &args, 0)?;
+                let indices = self.gpu_arg(node, &args, 1)?;
+                let p = cpu::gather_nd_params(node, &data.shape, &indices.shape)?;
+                if p.depth > 4 {
+                    return Err(Error::Unsupported("GatherND with tuples over 4".into()));
+                }
+                let (dims, strides) = pad::<4, usize>(&p.index_dims, &p.index_strides)?;
+                // Padding goes in front; the kernel reads the first `depth`.
+                let shift = |a: [u32; 4]| -> [u32; 4] {
+                    let mut out = [0; 4];
+                    out[..p.depth].copy_from_slice(&a[4 - p.depth..]);
+                    out
+                };
+                let o = self.alloc(p.out_shape.clone());
+                let push = GatherNdPush {
+                    n: o.len() as u32,
+                    tuples: p.tuples as u32,
+                    depth: p.depth as u32,
+                    slice: p.slice as u32,
+                    data_batch: p.data_batch as u32,
+                    data_offset: data.offset as u32,
+                    indices_offset: indices.offset as u32,
+                    pad0: 0,
+                    index_dims: shift(dims),
+                    index_strides: shift(strides.map(|s| s as u32)),
                 };
                 self.step(
-                    KernelKind::Binary,
-                    vec![a.buffer, b.buffer, o.buffer],
+                    KernelKind::GatherNd,
+                    vec![data.buffer, indices.buffer, o.buffer],
                     &push,
                     o.len(),
                 );
                 out(&mut self.values, 0, Value::Gpu(o));
             }
-            "Relu" | "Sigmoid" | "Tanh" | "Exp" | "Sqrt" | "Neg" | "Abs" | "Erf"
-            | "HardSigmoid" | "HardSwish" | "Clip" => {
+            "Gather" => {
                 let x = self.gpu_arg(node, &args, 0)?;
-                let (op, alpha, beta) = cpu::unary_params(node, &host)?;
-                let o = self.alloc(x.shape.clone());
-                let push = UnaryPush {
-                    n: o.len() as u32,
-                    op: op as u32,
-                    x_offset: x.offset as u32,
-                    alpha,
-                    beta,
+                let indices = host
+                    .get(1)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| Error::Unsupported("Gather with computed indices".into()))?;
+                let rank = x.shape.len();
+                let axis = cpu::normalize_axis(node.int("axis", 0), rank as i64)?;
+                let mut shape = x.shape[..axis].to_vec();
+                shape.extend(&indices.shape);
+                shape.extend(&x.shape[axis + 1..]);
+                let own = strides(&x.shape);
+                // One index: a slice of `x`, maybe in place.
+                if indices.shape.is_empty() {
+                    let dim = x.shape[axis] as i64;
+                    let i = indices.to_i64()[0];
+                    let i = if i < 0 { i + dim } else { i }.clamp(0, dim - 1) as usize;
+                    let mut view_strides: Vec<isize> = own.iter().map(|&s| s as isize).collect();
+                    view_strides.remove(axis);
+                    let view = Strided {
+                        shape,
+                        strides: view_strides,
+                        offset: i * own[axis],
+                    };
+                    let o = self.view_or_copy(&x, view)?;
+                    out(&mut self.values, 0, Value::Gpu(o));
+                    return Ok(());
+                }
+                let o = self.alloc(shape);
+                let out_strides = strides(&o.shape);
+                // Each index copies one slice (the axis gone) into place.
+                let mut slice_shape = x.shape.clone();
+                slice_shape.remove(axis);
+                let mut slice_strides: Vec<isize> = own.iter().map(|&s| s as isize).collect();
+                slice_strides.remove(axis);
+                let outer = &out_strides[..axis];
+                let inner = &out_strides[axis + indices.shape.len()..];
+                let mut dst_strides: Vec<usize> = outer.to_vec();
+                dst_strides.extend(inner);
+                let index_stride = if indices.shape.is_empty() {
+                    0
+                } else {
+                    out_strides[axis + indices.shape.len() - 1]
                 };
-                self.step(KernelKind::Unary, vec![x.buffer, o.buffer], &push, o.len());
+                let dim = x.shape[axis] as i64;
+                for (j, &i) in indices.to_i64().iter().enumerate() {
+                    let i = if i < 0 { i + dim } else { i }.clamp(0, dim - 1) as usize;
+                    let view = Strided {
+                        shape: slice_shape.clone(),
+                        strides: slice_strides.clone(),
+                        offset: i * own[axis],
+                    };
+                    self.copy(&x, &view, &o, j * index_stride, &dst_strides)?;
+                }
+                out(&mut self.values, 0, Value::Gpu(o));
+            }
+            "Pad" => {
+                let x = self.gpu_arg(node, &args, 0)?;
+                let p = cpu::pad_params(node, &x.shape, &host)?;
+                if p.before.iter().any(|&b| b < 0)
+                    || p.out_shape.iter().zip(&x.shape).any(|(o, i)| o < i)
+                {
+                    return Err(Error::Unsupported("Pad that crops".into()));
+                }
+                let o = self.alloc(p.out_shape.clone());
+                self.unary_into(UnaryOp::Fill, &x, &o, p.value, 0.0);
+                let out_strides = strides(&o.shape);
+                let at: usize = p
+                    .before
+                    .iter()
+                    .zip(&out_strides)
+                    .map(|(&b, &s)| b as usize * s)
+                    .sum();
+                let view = Strided {
+                    shape: x.shape.clone(),
+                    strides: strides(&x.shape).iter().map(|&s| s as isize).collect(),
+                    offset: 0,
+                };
+                self.copy(&x, &view, &o, at, &out_strides)?;
                 out(&mut self.values, 0, Value::Gpu(o));
             }
             "Transpose" => {
@@ -681,8 +1266,7 @@ impl Planner {
                         })?;
                     cpu::expand_params(&x.shape, &target.to_i64())?
                 };
-                let o = self.alloc(view.shape.clone());
-                self.copy(&x, &view, &o, 0, &strides(&o.shape))?;
+                let o = self.view_or_copy(&x, view)?;
                 out(&mut self.values, 0, Value::Gpu(o));
             }
             "Concat" => {
@@ -719,23 +1303,88 @@ impl Planner {
                         strides: own.iter().map(|&s| s as isize).collect(),
                         offset: at * own[axis],
                     };
-                    let o = self.alloc(part);
-                    self.copy(&x, &view, &o, 0, &strides(&o.shape))?;
+                    let o = self.view_or_copy(&x, view)?;
                     out(&mut self.values, i, Value::Gpu(o));
                     at += size;
                 }
             }
             "Conv" => {
                 let x = self.gpu_arg(node, &args, 0)?;
-                let w = self.gpu_arg(node, &args, 1)?;
+                let weights = args
+                    .get(1)
+                    .cloned()
+                    .flatten()
+                    .ok_or_else(|| Error::Model("missing input 1".into()))?;
+                let p = cpu::conv_params(node, &x.shape, weights.shape())?;
+                let per_group_out = p.out_channels / p.group;
+                let pointwise =
+                    p.kernel_h == 1 && p.kernel_w == 1 && p.stride == [1, 1] && p.pad == [0, 0];
+                // On cooperative matrices 2 with many input channels per
+                // group: with few, most of each step of 32 is padding, and
+                // they were slower than on subgroup ones (Nsight GPU Trace
+                // of BiRefNet and RVM on an RTX 5060, per convolution: the
+                // least GPU time in total from 64 on, of 16 to 512).
+                // Other than pointwise ones take their weights tap by tap,
+                // reordered while planning (constant weights only).
+                let tensor2 = self.matrices == MatrixKernels::Tensor2
+                    && p.stride == [1, 1]
+                    && p.in_channels / p.group >= 64
+                    && (pointwise || matches!(weights, Value::Host(_)));
+                let geometry = [
+                    p.kernel_h,
+                    p.kernel_w,
+                    p.stride[0],
+                    p.stride[1],
+                    p.pad[0],
+                    p.pad[1],
+                    p.dilation[0],
+                    p.dilation[1],
+                ]
+                .map(|v| v as u32);
+                let (kind, tiles) = if tensor2 {
+                    // Over pixels (pointwise) or tiles of the output.
+                    let rows = if per_group_out > 64 { 128 } else { 64 };
+                    let columns = if pointwise {
+                        ((p.out_h * p.out_w) as u32).div_ceil(CM2_COLUMNS)
+                    } else {
+                        (p.out_h as u32).div_ceil(CM2_TILE_H)
+                            * (p.out_w as u32).div_ceil(CM2_TILE_W)
+                    };
+                    (
+                        KernelKind::ConvGemm2(geometry, rows),
+                        [columns, (per_group_out as u32).div_ceil(rows)],
+                    )
+                } else {
+                    // Wide tiles for few of them on tensor cores.
+                    let tile = match self.matrices {
+                        MatrixKernels::Scalar => ConvTile::Square,
+                        _ => ConvTile::for_rows(per_group_out),
+                    };
+                    let (rows, columns) = tile.size();
+                    (
+                        KernelKind::ConvGemm(geometry, tile),
+                        [
+                            ((p.out_h * p.out_w) as u32).div_ceil(columns),
+                            (per_group_out as u32).div_ceil(rows),
+                        ],
+                    )
+                };
+                let tiles = [tiles[0], tiles[1], (p.batch * p.group) as u32];
+                // Many outputs per group: a matrix multiplication. Few
+                // (depthwise) would leave most of its tiles empty; the
+                // direct kernel takes those, in the weights' own order.
+                let gemm = per_group_out >= 16 && tiles.iter().all(|&t| t <= 65535);
+                let w = match &weights {
+                    Value::Host(tensor) if gemm && tensor2 && !pointwise => {
+                        self.upload_taps_major(&node.inputs[1], tensor)
+                    }
+                    _ => self.gpu_arg(node, &args, 1)?,
+                };
                 let bias = match args.get(2).cloned().flatten() {
                     Some(_) => Some(self.gpu_arg(node, &args, 2)?),
                     None => None,
                 };
-                let p = cpu::conv_params(node, &x.shape, &w.shape)?;
-                if x.offset != 0 || w.offset != 0 {
-                    return Err(Error::Unsupported("Conv of a view".into()));
-                }
+                let (x, w) = (self.contiguous(x)?, self.contiguous(w)?);
                 let o = self.alloc(vec![p.batch, p.out_channels, p.out_h, p.out_w]);
                 let push = ConvPush {
                     n: o.len() as u32,
@@ -758,16 +1407,17 @@ impl Planner {
                 };
                 // Without a bias, any buffer will do for the binding.
                 let bias = bias.map_or(w.buffer, |b| b.buffer);
-                self.step(
-                    KernelKind::Conv,
-                    vec![x.buffer, w.buffer, bias, o.buffer],
-                    &push,
-                    o.len(),
-                );
+                let buffers = vec![x.buffer, w.buffer, bias, o.buffer];
+                if gemm {
+                    self.step_groups(kind, buffers, &push, tiles);
+                } else {
+                    self.step(KernelKind::Conv, buffers, &push, o.len());
+                }
                 out(&mut self.values, 0, Value::Gpu(o));
             }
             "Resize" | "Upsample" => {
                 let x = self.gpu_arg(node, &args, 0)?;
+                let x = self.contiguous(x)?;
                 if args
                     .iter()
                     .skip(1)
@@ -789,17 +1439,12 @@ impl Planner {
                     coordinates: p.coordinates as u32,
                     nearest: p.nearest as u32,
                 };
-                if x.offset != 0 {
-                    return Err(Error::Unsupported("Resize of a view".into()));
-                }
                 self.step(KernelKind::Resize, vec![x.buffer, o.buffer], &push, o.len());
                 out(&mut self.values, 0, Value::Gpu(o));
             }
             "AveragePool" | "MaxPool" => {
                 let x = self.gpu_arg(node, &args, 0)?;
-                if x.offset != 0 {
-                    return Err(Error::Unsupported("pooling a view".into()));
-                }
+                let x = self.contiguous(x)?;
                 let p = cpu::pool_params(node, &x.shape)?;
                 let o = self.alloc(vec![x.shape[0], x.shape[1], p.out_h, p.out_w]);
                 let push = PoolPush {
@@ -825,28 +1470,38 @@ impl Planner {
                 let p = cpu::reduce_params(node, &x.shape, &host)?;
                 let own = strides(&x.shape);
                 let kept: Vec<usize> = (0..x.shape.len()).filter(|d| !p.axes.contains(d)).collect();
-                let pick = |dims: &[usize]| -> (Vec<usize>, Vec<u32>) {
-                    (
-                        dims.iter().map(|&d| x.shape[d]).collect(),
-                        dims.iter().map(|&d| own[d] as u32).collect(),
-                    )
+                // Each part collapsed (an image's pixels are one run).
+                let pick = |dims: &[usize]| -> Result<(u32, [u32; 4], [u32; 4])> {
+                    let shape: Vec<usize> = dims.iter().map(|&d| x.shape[d]).collect();
+                    let walk: Vec<isize> = dims.iter().map(|&d| own[d] as isize).collect();
+                    let (shape, walk) = collapse(&shape, &[walk]);
+                    let (padded, walk) = pad::<4, isize>(&shape, &walk[0])?;
+                    Ok((shape.len() as u32, padded, walk.map(|s| s as u32)))
                 };
-                let (kept_shape, kept_strides) = pick(&kept);
-                let (reduced_shape, reduced_strides) = pick(&p.axes);
-                let (kept_shape, kept_strides) = pad4(&kept_shape, &kept_strides)?;
-                let (reduced_shape, reduced_strides) = pad4(&reduced_shape, &reduced_strides)?;
+                let (kept_rank, kept_shape, kept_strides) = pick(&kept)?;
+                let (reduced_rank, reduced_shape, reduced_strides) = pick(&p.axes)?;
                 let o = self.alloc(p.out_shape());
                 let push = ReducePush {
                     n: o.len() as u32,
                     count: reduced_shape.iter().product(),
                     mean: u32::from(p.mean),
                     x_offset: x.offset as u32,
+                    kept_rank,
+                    reduced_rank,
+                    pad: [0; 2],
                     kept: kept_shape,
                     kept_strides,
                     reduced: reduced_shape,
                     reduced_strides,
                 };
-                self.step(KernelKind::Reduce, vec![x.buffer, o.buffer], &push, o.len());
+                // A workgroup per output (reduce.comp).
+                let x_groups = push.n.clamp(1, 65535);
+                self.step_groups(
+                    KernelKind::Reduce,
+                    vec![x.buffer, o.buffer],
+                    &push,
+                    [x_groups, push.n.div_ceil(x_groups).max(1), 1],
+                );
                 out(&mut self.values, 0, Value::Gpu(o));
             }
             other => {

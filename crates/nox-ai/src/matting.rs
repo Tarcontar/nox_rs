@@ -8,13 +8,12 @@
 //! (`apply_matte.comp`), on the GPU throughout. State starts over when a
 //! frame isn't the one after the last (seeking, scrubbing).
 
-use nox_gpu::compute::{Binding, BindingKind, Kernel, Recording};
 use nox_gpu::{GpuDevice, LayerPicture};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::kernels::groups;
-use crate::{Error, Model, Result, Session, Tensor};
+use crate::bridge::{Bridge, Normalize};
+use crate::{Error, Model, Precision, Result, Session, Tensor};
 
 /// Longest side the model sees; bigger pictures are scaled down for it
 /// and the matte scaled up (the refiner at full 4K would take gigabytes).
@@ -34,25 +33,6 @@ const STATE: [(&str, &str); 4] = [
     ("r4o", "r4i"),
 ];
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct ToRgbPush {
-    rows: [[f32; 4]; 3],
-    width: u32,
-    height: u32,
-    layer_width: u32,
-    layer_height: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct ApplyPush {
-    width: u32,
-    height: u32,
-    layer_width: u32,
-    layer_height: u32,
-}
-
 /// A clip's session and where it is.
 struct Clip {
     key: u64,
@@ -68,10 +48,7 @@ pub struct Matting {
     gpu: Arc<GpuDevice>,
     model: Model,
     clips: Vec<Clip>,
-    to_rgb: Kernel,
-    apply: Kernel,
-    /// The working space to linear sRGB primaries.
-    rows: [[f32; 4]; 3],
+    bridge: Bridge,
     clock: u64,
 }
 
@@ -87,28 +64,11 @@ impl Matting {
                 )));
             }
         }
-        let image_and_buffer = [BindingKind::Image, BindingKind::Buffer];
-        let to_rgb = Kernel::new(
-            &gpu,
-            include_bytes!(concat!(env!("OUT_DIR"), "/layer_to_rgb.comp.spv")),
-            &image_and_buffer,
-            size_of::<ToRgbPush>(),
-        )?;
-        let apply = Kernel::new(
-            &gpu,
-            include_bytes!(concat!(env!("OUT_DIR"), "/apply_matte.comp.spv")),
-            &image_and_buffer,
-            size_of::<ApplyPush>(),
-        )?;
-        let m = nox_color::WORKING_PRIMARIES.conversion_to(nox_color::Primaries::Bt709);
-        let rows = [0, 1, 2].map(|r| [m[r][0], m[r][1], m[r][2], 0.0]);
         Ok(Self {
+            bridge: Bridge::new(gpu.clone(), Precision::for_model(&model, &gpu))?,
             gpu,
             model,
             clips: Vec::new(),
-            to_rgb,
-            apply,
-            rows,
             clock: 0,
         })
     }
@@ -147,8 +107,14 @@ impl Matting {
         shapes.extend(state.iter().map(|(n, s)| (*n, s.as_slice())));
         session.plan(&shapes, &constants, &STATE)?;
         tracing::info!(
-            "background removal planned for {width}×{height} ({:.0} MB)",
-            session.memory() as f64 / 1e6
+            "background removal planned for {width}×{height} ({:.0} MB, {:?}, {:?})",
+            session.memory() as f64 / 1e6,
+            session.precision(),
+            if session.tensor_cores() {
+                ", tensor cores"
+            } else {
+                ""
+            }
         );
         Ok(session)
     }
@@ -208,47 +174,14 @@ impl Matting {
         clip.next = frame.map(|f| f + 1);
 
         let src = clip.session.shape("src").expect("planned");
-        let (w, h) = (src[3] as u32, src[2] as u32);
-        // Recorded each time: the compositor's layer images come and go
-        // (a recording kept would point at a freed image).
-        let mut to_rgb = Recording::new(&self.gpu, 1, 2)?;
-        let push = ToRgbPush {
-            rows: self.rows,
-            width: w,
-            height: h,
-            layer_width: layer.0,
-            layer_height: layer.1,
-        };
-        to_rgb.dispatch(
-            &self.to_rgb,
-            &[
-                Binding::Image(picture.view),
-                clip.session.buffer("src")?.into(),
-            ],
-            bytemuck::bytes_of(&push),
-            groups(w * h),
-        )?;
-        to_rgb.run()?;
+        let size = (src[3] as u32, src[2] as u32);
+        self.bridge
+            .to_tensor(picture, clip.session.buffer("src")?, size, Normalize::NONE)?;
         for _ in 0..runs {
             clip.session.run()?;
         }
-        let mut apply = Recording::new(&self.gpu, 1, 2)?;
-        let push = ApplyPush {
-            width: w,
-            height: h,
-            layer_width: layer.0,
-            layer_height: layer.1,
-        };
-        apply.dispatch(
-            &self.apply,
-            &[
-                Binding::Image(picture.view),
-                clip.session.buffer("pha")?.into(),
-            ],
-            bytemuck::bytes_of(&push),
-            groups(layer.0 * layer.1),
-        )?;
-        apply.run()?;
+        self.bridge
+            .apply_matte(picture, clip.session.buffer("pha")?, size, false)?;
         Ok(())
     }
 }

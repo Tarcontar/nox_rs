@@ -2,10 +2,11 @@
 // bilinear, with ONNX's coordinate transformations.
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
 #include "common.glsl"
 
-layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+layout(set = 0, binding = 0, std430) readonly buffer X { real x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { real o[]; };
 
 layout(push_constant) uniform Params {
     uint n;
@@ -58,7 +59,7 @@ void main() {
     float sy = source(oy, p.scale_h, p.in_h, p.out_h);
     float sx = source(ox, p.scale_w, p.in_w, p.out_w);
     if (p.linear == 0u) {
-        o[i] = x[base + nearest_index(sy, p.in_h) * p.in_w + nearest_index(sx, p.in_w)];
+        o[i] = real(float(x[base + nearest_index(sy, p.in_h) * p.in_w + nearest_index(sx, p.in_w)]));
         return;
     }
     sy = clamp(sy, 0.0, float(p.in_h - 1u));
@@ -69,7 +70,7 @@ void main() {
     uint x1 = min(x0 + 1u, p.in_w - 1u);
     float fy = sy - float(y0);
     float fx = sx - float(x0);
-    float top = x[base + y0 * p.in_w + x0] * (1.0 - fx) + x[base + y0 * p.in_w + x1] * fx;
-    float bottom = x[base + y1 * p.in_w + x0] * (1.0 - fx) + x[base + y1 * p.in_w + x1] * fx;
-    o[i] = top * (1.0 - fy) + bottom * fy;
+    float top = float(x[base + y0 * p.in_w + x0]) * (1.0 - fx) + float(x[base + y0 * p.in_w + x1]) * fx;
+    float bottom = float(x[base + y1 * p.in_w + x0]) * (1.0 - fx) + float(x[base + y1 * p.in_w + x1]) * fx;
+    o[i] = real(top * (1.0 - fy) + bottom * fy);
 }

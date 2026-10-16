@@ -1,12 +1,14 @@
 // A compositor layer (RGBA32F, linear working space, straight alpha) as a
-// model's input: sRGB in [0, 1], planar RGB (NCHW) at the model's size,
-// scaled bilinearly (a box of 2×2 bilinear taps when shrinking).
+// model's input: sRGB in [0, 1], normalized as (v - mean) / std, planar
+// RGB (NCHW) at the model's size, scaled bilinearly (a box of 2×2
+// bilinear taps when shrinking).
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
 #include "common.glsl"
 
 layout(set = 0, binding = 0, rgba32f) uniform readonly image2D layer;
-layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { real o[]; };
 
 layout(push_constant) uniform Params {
     // The working space to linear BT.709/sRGB primaries, as rows.
@@ -17,6 +19,8 @@ layout(push_constant) uniform Params {
     uint height;
     uint layer_width;
     uint layer_height;
+    vec4 mean;
+    vec4 inv_std;
 } p;
 
 vec3 at(ivec2 pos) {
@@ -58,7 +62,7 @@ void main() {
         rgb = bilinear(center);
     }
     vec4 v = vec4(rgb, 0.0);
-    o[i] = srgb(dot(p.row0, v));
-    o[plane + i] = srgb(dot(p.row1, v));
-    o[2u * plane + i] = srgb(dot(p.row2, v));
+    o[i] = real((srgb(dot(p.row0, v)) - p.mean.r) * p.inv_std.r);
+    o[plane + i] = real((srgb(dot(p.row1, v)) - p.mean.g) * p.inv_std.g);
+    o[2u * plane + i] = real((srgb(dot(p.row2, v)) - p.mean.b) * p.inv_std.b);
 }

@@ -1537,8 +1537,8 @@ msgid "Download the background removal model?"
 msgstr "Das Modell zum Entfernen des Hintergrunds herunterladen?"
 
 #: src/inspector.rs
-msgid "Removing backgrounds uses {model} ({size} MB, {license}), which is downloaded once from GitHub into {folder}."
-msgstr "Zum Entfernen des Hintergrunds dient {model} ({size} MB, {license}), das einmalig von GitHub nach {folder} heruntergeladen wird."
+msgid "Removing backgrounds uses {models}, {size} MB downloaded once into {folder}."
+msgstr "Zum Entfernen des Hintergrunds dienen {models}, einmalig {size} MB nach {folder} heruntergeladen."
 
 #: src/inspector.rs
 msgid "Download"

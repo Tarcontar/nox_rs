@@ -1,0 +1,103 @@
+// 2D convolution of NCHW tensors (cpu::ConvParams) as a matrix
+// multiplication (gemm.glsl; gemm_tensor.glsl with TENSOR;
+// conv_gemm_cm2.glsl with CM2), for convolutions with many output
+// channels per group: weights (out channels × in channels·kernel) times
+// the input's patches (in channels·kernel × output pixels), gathered as they're read.
+// Workgroups' z: batch × group.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
+#ifdef CM2
+#include "conv_geometry.glsl"
+#include "conv_gemm_cm2.glsl"
+#else
+#ifdef TENSOR
+#include "gemm_tensor.glsl"
+#else
+#include "gemm.glsl"
+#endif
+
+layout(set = 0, binding = 0, std430) readonly buffer X { real x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer W { real w[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Bias { real bias[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Out { real o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint in_channels;
+    uint in_h;
+    uint in_w;
+    uint out_channels;
+    uint out_h;
+    uint out_w;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dilation_h;
+    uint dilation_w;
+    uint group;
+    uint has_bias;
+} p;
+
+#include "conv_geometry.glsl"
+
+uint per_group_in;
+uint per_group_out;
+// The group's first input plane and output channel.
+uint x_base;
+uint first_out;
+uint out_base;
+
+float load_a(uint row, uint k) {
+    return float(w[(first_out + row) * per_group_in * TAPS + k]);
+}
+
+// Where this invocation's column of B starts reading: the gemm loads B
+// along N with each invocation always in the same column (col0 + its
+// index % TILE_N), so it's worked out once.
+int col_iy;
+int col_ix;
+
+float load_b(uint k, uint col) {
+    if (POINTWISE) {
+        return float(x[x_base + k * p.in_h * p.in_w + col]);
+    }
+    uint c = k / TAPS;
+    uint r = k - c * TAPS;
+    uint ky = r / KERNEL_W;
+    uint kx = r - ky * KERNEL_W;
+    int iy = col_iy + int(ky * DILATION_H);
+    int ix = col_ix + int(kx * DILATION_W);
+    if (PADDED && (iy < 0 || iy >= int(p.in_h) || ix < 0 || ix >= int(p.in_w))) {
+        return 0.0;
+    }
+    return float(x[x_base + (c * p.in_h + uint(iy)) * p.in_w + uint(ix)]);
+}
+
+void store(uint row, uint col, float value) {
+    uint m = first_out + row;
+    if (p.has_bias != 0u) {
+        value += float(bias[m]);
+    }
+    o[out_base + m * p.out_h * p.out_w + col] = real(value);
+}
+
+void main() {
+    uint g = gl_WorkGroupID.z % p.group;
+    uint b = gl_WorkGroupID.z / p.group;
+    per_group_in = p.in_channels / p.group;
+    per_group_out = p.out_channels / p.group;
+    x_base = (b * p.in_channels + g * per_group_in) * p.in_h * p.in_w;
+    first_out = g * per_group_out;
+    out_base = b * p.out_channels * p.out_h * p.out_w;
+    uint col = gl_WorkGroupID.x * TILE_N + gl_LocalInvocationIndex % TILE_N;
+    uint oy = col / p.out_w;
+    uint ox = col - oy * p.out_w;
+    col_iy = int(oy * STRIDE_H) - int(PAD_H);
+    col_ix = int(ox * STRIDE_W) - int(PAD_W);
+    gemm(per_group_out, p.out_h * p.out_w, per_group_in * TAPS);
+}
+#endif

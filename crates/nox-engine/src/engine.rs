@@ -151,6 +151,8 @@ struct Shared {
     reload_effects: AtomicBool,
     /// How each file decodes, as far as known.
     decodings: Mutex<HashMap<PathBuf, Decoding>>,
+    /// Whether the GPU keeps 16-bit floats, once the renderer has it.
+    storage_16bit: std::sync::OnceLock<bool>,
 }
 
 impl Shared {
@@ -216,6 +218,7 @@ impl Engine {
             hw_decode: Mutex::new(HwDecode::from_env()),
             reload_effects: AtomicBool::new(false),
             decodings: Mutex::default(),
+            storage_16bit: std::sync::OnceLock::new(),
         });
         let dmabuf_allowed = Arc::new(AtomicBool::new(!dmabuf_formats.is_empty()));
         let allowed = dmabuf_allowed.clone();
@@ -224,6 +227,9 @@ impl Engine {
             .name("nox-render".into())
             .spawn(move || {
                 let renderer = Renderer::new(&dmabuf_formats, allowed);
+                if let Some(storage_16bit) = renderer.storage_16bit() {
+                    let _ = worker_shared.storage_16bit.set(storage_16bit);
+                }
                 run(&worker_shared, renderer, on_event);
             })
             .expect("failed to spawn render thread");
@@ -379,6 +385,12 @@ impl Engine {
         self.shared.reload_effects.store(true, Ordering::Relaxed);
         self.shared.state().generation += 1;
         self.shared.interrupt();
+    }
+
+    /// Whether the GPU keeps 16-bit floats, so runs fp16 models in 16 bits
+    /// (`None` until the renderer has started, or without a GPU).
+    pub fn storage_16bit(&self) -> Option<bool> {
+        self.shared.storage_16bit.get().copied()
     }
 
     /// How `path` decodes, once a frame of it has been (reported as

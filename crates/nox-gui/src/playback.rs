@@ -295,6 +295,11 @@ impl Playback {
         }
     }
 
+    /// Whether the GPU runs fp16 models in 16 bits (no, if not known yet).
+    pub fn storage_16bit(&self) -> bool {
+        self.engine.storage_16bit().unwrap_or(false)
+    }
+
     /// How `path` decodes, once a frame of it has been rendered.
     pub fn decoding(&self, path: &Path) -> Option<Decoding> {
         self.engine.decoding(path)

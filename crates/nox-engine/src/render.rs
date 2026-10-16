@@ -139,7 +139,9 @@ pub(crate) struct Renderer {
     hw: HwDecode,
     /// How each file decodes, as last reported (`decodings_changed`).
     decodings: std::collections::HashMap<PathBuf, Decoding>,
-    matting: MattingState,
+    /// Background removal models by id, loaded as clips need them (which
+    /// one is the model registry's choice).
+    removers: std::collections::HashMap<String, Loaded<nox_ai::BackgroundRemover>>,
 }
 
 impl Renderer {
@@ -172,43 +174,23 @@ impl Renderer {
             scopes: false,
             hw: HwDecode::from_env(),
             decodings: Default::default(),
-            matting: MattingState::Unloaded,
+            removers: Default::default(),
         }
     }
 
-    /// Loads background removal, if it isn't yet and the model is there.
-    fn load_matting(&mut self) {
-        if !matches!(self.matting, MattingState::Unloaded) {
-            return;
-        }
-        let Some((accel, _)) = &self.gpu else {
-            return;
-        };
-        let model = nox_ai::models::ROBUST_VIDEO_MATTING;
-        let dir = nox_ai::models::default_dir();
-        if !model.is_available(&dir) {
-            tracing::warn!(
-                "background removal needs {} in {}; clips show unchanged",
-                model.file,
-                dir.display()
-            );
-            self.matting = MattingState::Unavailable;
-            return;
-        }
-        self.matting = match nox_ai::Matting::new(accel.gpu().clone(), &model.path(&dir)) {
-            Ok(matting) => MattingState::Ready(Box::new(matting)),
-            Err(err) => {
-                tracing::warn!("background removal unavailable: {err}");
-                MattingState::Unavailable
-            }
-        };
+    /// Whether the GPU keeps 16-bit floats (runs fp16 models in 16 bits);
+    /// `None` without a GPU.
+    pub fn storage_16bit(&self) -> Option<bool> {
+        self.gpu
+            .as_ref()
+            .map(|(accel, _)| accel.gpu().storage_16bit())
     }
 
     /// Tries loading background removal again (e.g. after the model was
     /// downloaded).
     pub fn reload_matting(&mut self) {
-        if matches!(self.matting, MattingState::Unavailable) {
-            self.matting = MattingState::Unloaded;
+        for remover in self.removers.values_mut() {
+            remover.retry();
         }
     }
 
@@ -408,9 +390,6 @@ impl Renderer {
         quality: Quality,
         stop: &dyn Fn() -> bool,
     ) -> nox_media::Result<()> {
-        if layers.iter().any(|l| l.matte.is_some()) {
-            self.load_matting();
-        }
         let (accel, compositor) = self.gpu.as_mut().expect("gpu");
         compositor.begin(width, height)?;
         for Layer {
@@ -457,20 +436,43 @@ impl Renderer {
                     grade: *grade,
                     transform: gpu_transform(transform),
                 };
-                // Background removal writes the matte into the picture.
-                let mut hook = match (matte, &mut self.matting) {
-                    (Some(key), MattingState::Ready(matting)) => Some(MatteHook {
-                        matting,
-                        key: *key,
+                // Background removal writes the matte into the picture,
+                // with the models the registry picks for it that load.
+                let mut hook = matte.map(|key| {
+                    use nox_ai::models::{Conditions, Media, Task};
+                    let conditions = Conditions {
+                        media: if still { Media::Still } else { Media::Video },
+                        f16: accel.gpu().storage_16bit(),
+                    };
+                    let candidates =
+                        nox_ai::models::registry().candidates(Task::BackgroundRemoval, &conditions);
+                    let models = candidates
+                        .into_iter()
+                        .filter(|model| {
+                            self.removers
+                                .entry(model.id.clone())
+                                .or_insert(Loaded::Unloaded)
+                                .load(model, |path| {
+                                    nox_ai::BackgroundRemover::new(accel.gpu().clone(), model, path)
+                                })
+                                .is_some()
+                        })
+                        .map(|model| model.id.clone())
+                        .collect();
+                    MatteHook {
+                        removers: &mut self.removers,
+                        models,
+                        key,
                         frame: (!still).then_some(index),
-                    }),
-                    _ => None,
-                };
+                    }
+                });
+                // Which model mattes it makes a different still.
+                let model = hook.as_ref().and_then(|h| h.models.first().cloned());
                 let hook = hook.as_mut().map(|h| h as &mut dyn LayerHook);
                 if still {
                     // Stills are converted once and kept on the GPU (with
                     // their matte, if any).
-                    let key = still_key(path, *matte);
+                    let key = still_key(path, matte.map(|m| (m, model)));
                     if !compositor.try_cached_layer(key, rect, style) {
                         nox_media::with_gpu_input(&decoded, Some(&*accel), |input| {
                             compositor.add_cached_layer_with(key, input, rect, style, hook)
@@ -593,7 +595,7 @@ impl Framing {
 }
 
 /// The still cache key of a file.
-fn still_key(path: &Path, matte: Option<u64>) -> u64 {
+fn still_key(path: &Path, matte: Option<(u64, Option<String>)>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
@@ -616,17 +618,62 @@ struct Layer {
     matte: Option<u64>,
 }
 
-/// Background removal, loaded when a clip first needs it.
-enum MattingState {
+/// A model, loaded when a clip first needs it.
+enum Loaded<T> {
     Unloaded,
-    Ready(Box<nox_ai::Matting>),
-    /// The model isn't there or doesn't load; not tried again.
+    Ready(Box<T>),
+    /// The model isn't there or doesn't load; not tried again until
+    /// `retry`.
     Unavailable,
 }
 
-/// Writes a clip's matte into its picture (`nox_ai::Matting`).
+impl<T> Loaded<T> {
+    /// The model, loaded with `new` if it isn't yet and its file is there.
+    fn load(
+        &mut self,
+        model: &nox_ai::models::ModelInfo,
+        new: impl FnOnce(&Path) -> nox_ai::Result<T>,
+    ) -> Option<&mut T> {
+        if let Self::Unloaded = self {
+            let dir = nox_ai::models::default_dir();
+            *self = if !model.is_available(&dir) {
+                tracing::warn!(
+                    "background removal needs {} ({}) in {}",
+                    model.name,
+                    model.file,
+                    dir.display()
+                );
+                Self::Unavailable
+            } else {
+                match new(&model.path(&dir)) {
+                    Ok(loaded) => Self::Ready(Box::new(loaded)),
+                    Err(err) => {
+                        tracing::warn!("{} unavailable: {err}", model.name);
+                        Self::Unavailable
+                    }
+                }
+            };
+        }
+        match self {
+            Self::Ready(loaded) => Some(loaded),
+            _ => None,
+        }
+    }
+
+    /// Tries loading again (e.g. after the model was downloaded).
+    fn retry(&mut self) {
+        if let Self::Unavailable = self {
+            *self = Self::Unloaded;
+        }
+    }
+}
+
+/// Writes a clip's matte into its picture, with the first of `models`
+/// that works.
 struct MatteHook<'m> {
-    matting: &'m mut nox_ai::Matting,
+    removers: &'m mut std::collections::HashMap<String, Loaded<nox_ai::BackgroundRemover>>,
+    /// Loaded, most preferred first.
+    models: Vec<String>,
     key: u64,
     /// The frame in the clip's media; `None` for stills.
     frame: Option<i64>,
@@ -634,10 +681,16 @@ struct MatteHook<'m> {
 
 impl LayerHook for MatteHook<'_> {
     fn process(&mut self, picture: &LayerPicture) -> nox_gpu::Result<()> {
-        // A failed matte leaves the clip as it is rather than the frame
-        // unrendered.
-        if let Err(err) = self.matting.apply(self.key, self.frame, picture) {
-            tracing::warn!("background removal: {err}");
+        // A model failing (e.g. short of GPU memory: BiRefNet needs
+        // gigabytes) falls back to the next; with none, the clip stays as
+        // it is rather than the frame unrendered.
+        for id in &self.models {
+            if let Some(Loaded::Ready(remover)) = self.removers.get_mut(id) {
+                match remover.apply(self.key, self.frame, picture) {
+                    Ok(()) => return Ok(()),
+                    Err(err) => tracing::warn!("background removal with {id}: {err}"),
+                }
+            }
         }
         Ok(())
     }

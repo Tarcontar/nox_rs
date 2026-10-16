@@ -1,0 +1,47 @@
+// GatherND (cpu::GatherNdParams): for each index tuple, the slice of
+// `data` it points at. Indices are floats holding whole numbers (the GPU
+// keeps every tensor as floats); out-of-range ones are clamped.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
+#include "common.glsl"
+
+layout(set = 0, binding = 0, std430) readonly buffer Data { real data[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Indices { real indices[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Out { real o[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint tuples;
+    uint depth;
+    uint slice;
+    uint data_batch;
+    uint data_offset;
+    uint indices_offset;
+    uint pad0;
+    uint index_dims[4];
+    uint index_strides[4];
+} p;
+
+void main() {
+    uint i = element();
+    if (i >= p.n) {
+        return;
+    }
+    uint s = i % p.slice;
+    uint tuple = i / p.slice;
+    uint batch = tuple / p.tuples;
+    uint at = p.data_offset + batch * p.data_batch + s;
+    [[unroll]] for (uint k = 0u; k < 4u; k++) {
+        if (k >= p.depth) {
+            break;
+        }
+        int v = int(float(indices[p.indices_offset + tuple * p.depth + k]));
+        int dim = int(p.index_dims[k]);
+        if (v < 0) {
+            v += dim;
+        }
+        at += uint(clamp(v, 0, dim - 1)) * p.index_strides[k];
+    }
+    o[i] = real(float(data[at]));
+}

@@ -11,7 +11,7 @@ use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use std::sync::Arc;
 
-use crate::vk_util::{OneShot, Pipeline, buffer_write, create_pipeline, image_write};
+use crate::vk_util::{OneShot, Pipeline, buffer_write, create_specialized_pipeline, image_write};
 use crate::{Error, GpuDevice, Result};
 
 /// Where a buffer's memory is.
@@ -94,15 +94,18 @@ impl Buffer {
     /// Copies `data` to the start of an `Upload` buffer.
     pub fn write<T: bytemuck::Pod>(&mut self, data: &[T]) -> Result<()> {
         let bytes = bytemuck::cast_slice(data);
-        let mapped = self
-            .allocation
+        self.mapped_mut()?[..bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    /// The contents of an `Upload` buffer, to write in place.
+    pub fn mapped_mut(&mut self) -> Result<&mut [u8]> {
+        self.allocation
             .as_mut()
             .and_then(|a| a.mapped_slice_mut())
             .ok_or(Error::Unsupported(
                 "writing a buffer the CPU can't see".into(),
-            ))?;
-        mapped[..bytes.len()].copy_from_slice(bytes);
-        Ok(())
+            ))
     }
 
     /// The contents of a `Download` buffer, after the GPU wrote them.
@@ -187,6 +190,18 @@ impl Kernel {
         bindings: &[BindingKind],
         push_size: usize,
     ) -> Result<Self> {
+        Self::with_constants(gpu, spirv, bindings, push_size, &[])
+    }
+
+    /// `new` with specialization constants: `constants[i]` for
+    /// `constant_id = i`, each 32 bits (uint, int or bool).
+    pub fn with_constants(
+        gpu: &Arc<GpuDevice>,
+        spirv: &[u8],
+        bindings: &[BindingKind],
+        push_size: usize,
+        constants: &[u32],
+    ) -> Result<Self> {
         let layout: Vec<_> = bindings
             .iter()
             .enumerate()
@@ -199,7 +214,9 @@ impl Kernel {
             })
             .collect();
         // SAFETY: a valid device; destroyed in Drop.
-        let pipeline = unsafe { create_pipeline(&gpu.device, spirv, &layout, push_size)? };
+        let pipeline = unsafe {
+            create_specialized_pipeline(&gpu.device, spirv, &layout, push_size, constants)?
+        };
         Ok(Self {
             gpu: gpu.clone(),
             pipeline,
@@ -374,6 +391,28 @@ impl Recording {
             self.barrier();
         }
         Ok(())
+    }
+
+    /// Starts a debug label: profilers (Nsight) show and sum the GPU work
+    /// recorded until `end_label` under `name`. Nothing without
+    /// `VK_EXT_debug_utils` (`NOX_GPU_LABELS=1`).
+    pub fn begin_label(&mut self, name: &str) {
+        assert!(self.recording, "recording already finished");
+        if let Some(debug_utils) = &self.gpu.debug_utils {
+            let name = std::ffi::CString::new(name.replace('\0', " ")).expect("no NUL");
+            let label = vk::DebugUtilsLabelEXT::default().label_name(&name);
+            // SAFETY: recording; the name lives through the call.
+            unsafe { debug_utils.cmd_begin_debug_utils_label(self.one_shot.cmd, &label) };
+        }
+    }
+
+    /// Ends the innermost `begin_label`.
+    pub fn end_label(&mut self) {
+        assert!(self.recording, "recording already finished");
+        if let Some(debug_utils) = &self.gpu.debug_utils {
+            // SAFETY: recording, inside a label.
+            unsafe { debug_utils.cmd_end_debug_utils_label(self.one_shot.cmd) };
+        }
     }
 
     /// Records copying `bytes` from `src` to `dst` (offsets in bytes), then

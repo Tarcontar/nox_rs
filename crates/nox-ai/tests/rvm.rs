@@ -1,16 +1,26 @@
 //! Robust Video Matting on the GPU against the CPU reference, over two
-//! frames so the recurrent state fed back between runs is checked too.
-//! Needs the model: `NOX_AI_MODELS` names the folder it's in (else the
-//! test skips). `downloads_and_verifies` (ignored: network) fetches it.
+//! frames so the recurrent state fed back between runs is checked too;
+//! the fp32 model, and the fp16 one in 16 bits. Needs the models:
+//! `NOX_AI_MODELS` names the folder they're in (else the tests skip).
+//! `downloads_and_verifies` (ignored: network) fetches one.
 
-use nox_ai::models::ROBUST_VIDEO_MATTING;
-use nox_ai::{Model, Session, Tensor};
+use nox_ai::models::ModelInfo;
+use nox_ai::{Model, Precision, Session, Tensor};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
-fn model_path() -> Option<PathBuf> {
+/// A model of the built-in registry.
+fn listed(id: &str) -> &'static ModelInfo {
+    nox_ai::models::registry().get(id).expect("listed")
+}
+
+fn rvm() -> &'static ModelInfo {
+    listed("rvm_mobilenetv3")
+}
+
+fn model_path(model: &ModelInfo) -> Option<PathBuf> {
     let dir = PathBuf::from(std::env::var_os("NOX_AI_MODELS")?);
-    let path = ROBUST_VIDEO_MATTING.path(&dir);
+    let path = model.path(&dir);
     if path.exists() {
         Some(path)
     } else {
@@ -33,7 +43,17 @@ fn random(n: usize, seed: u64) -> Vec<f32> {
 
 #[test]
 fn gpu_matches_cpu_over_frames() {
-    let Some(path) = model_path() else { return };
+    gpu_matches_cpu(rvm(), Precision::F32, 1e-4);
+}
+
+/// In 16 bits, values round to 11 significant bits at every step.
+#[test]
+fn fp16_in_16_bits() {
+    gpu_matches_cpu(listed("rvm_mobilenetv3_fp16"), Precision::F16, 3e-2);
+}
+
+fn gpu_matches_cpu(info: &ModelInfo, precision: Precision, tolerance: f32) {
+    let Some(path) = model_path(info) else { return };
     let Ok(accel) = nox_media::Accel::new() else {
         eprintln!("skipping: no GPU");
         return;
@@ -71,6 +91,10 @@ fn gpu_matches_cpu_over_frames() {
     }
 
     let mut session = Session::new(accel.gpu().clone(), model);
+    if session.precision() != precision {
+        eprintln!("skipping: the GPU doesn't run {} in {precision:?}", info.id);
+        return;
+    }
     let src_shape = [1, 3, h, w];
     let mut plan: Vec<(&str, &[usize])> = vec![("src", &src_shape)];
     plan.extend(state.iter().zip(&shapes).map(|(&n, s)| (n, s.as_slice())));
@@ -95,7 +119,7 @@ fn gpu_matches_cpu_over_frames() {
             .zip(want)
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
-        assert!(worst < 1e-4, "matte off by {worst}");
+        assert!(worst < tolerance, "matte off by {worst}");
     }
 }
 
@@ -103,12 +127,13 @@ fn gpu_matches_cpu_over_frames() {
 #[ignore = "downloads 15 MB"]
 fn downloads_and_verifies() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("models");
-    let _ = std::fs::remove_file(ROBUST_VIDEO_MATTING.path(&dir));
+    let model = rvm();
+    let _ = std::fs::remove_file(model.path(&dir));
     let mut last = 0;
-    let path = ROBUST_VIDEO_MATTING
+    let path = model
         .download(&dir, |done, _| last = done, &AtomicBool::new(false))
         .unwrap();
-    assert_eq!(last, ROBUST_VIDEO_MATTING.size);
-    assert!(ROBUST_VIDEO_MATTING.is_available(&dir));
+    assert_eq!(last, model.size);
+    assert!(model.is_available(&dir));
     Model::load(&path).unwrap();
 }

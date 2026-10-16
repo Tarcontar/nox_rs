@@ -1,6 +1,6 @@
 # AI in Nox: own ONNX engine on Vulkan (nox-ai), first feature: background removal
 
-**Status (2026-10-15): steps 0–4 done.** Background removal works in the viewer and in exports. What's left is in "Later" and the risks below (faster kernels).
+**Status (2026-10-15): steps 0–4 done.** Background removal works in the viewer and in exports. Stills use BiRefNet lite (fp32) instead of RVM, which keeps every person in a photo (docs/PLAN.md). What's left is in "Later" and the risks below (faster kernels). fp16 models run in a 16-bit pipeline, at half the memory (docs/PLAN.md).
 
 ## Context
 You want AI-powered processing (speech to text, background removal, …) built on ONNX, the open and portable model format. You want inference in Vulkan compute shaders, so frames never leave the GPU. Nox already decodes, composites and encodes on one ash device without copies. Everything AI-related goes in its own crate.
@@ -115,7 +115,7 @@ nox-gui   ── Inspector "Effects" section, download prompt/progress
 - **Export:** an exported file shows the matted result.
 
 ## Risks
-- Kernel performance: fp32 direct convolution is slow at large sizes. RVM at ~512 px is small, and fp16 or cooperative-matrix kernels come later.
+- Kernel performance: fp32 direct convolution is slow at large sizes. RVM at ~512 px is small. fp16 storage is done; cooperative-matrix (tensor-core) kernels come later.
 - Whether FFmpeg's device enables shaderFloat16 or cooperative matrix decides what later optimizations can use. Step 0 logs the enabled features.
 - RVM's dynamic-shape subgraphs need host folding. A model outside the supported subset is refused clearly at load time.
 

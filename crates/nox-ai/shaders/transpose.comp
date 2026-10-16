@@ -1,0 +1,83 @@
+// A copy (copy.comp) that reads along one dimension and writes along
+// another (a transpose), through 32×32 tiles in shared memory so both the
+// reads and the writes are contiguous. Each workgroup does one tile of
+// dimensions `dst_fast` × `src_fast` (stride 1 in the destination and in
+// the source) at one index of the other dimensions.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 32, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Src { real s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Dst { real d[]; };
+
+layout(push_constant) uniform Params {
+    uint tiles_a;  // along dst_fast
+    uint tiles_b;  // along src_fast
+    uint outer;    // indices of the other dimensions
+    uint dst_fast;
+    uint src_fast;
+    int src_offset;
+    int dst_offset;
+    uint rank; // dimensions in use (the loop below skips size 1 anyway)
+    uint shape[6];
+    int src_strides[6];
+    int dst_strides[6];
+} p;
+
+shared float tile[32][33];
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint ta = group % p.tiles_a;
+    uint rest = group / p.tiles_a;
+    uint tb = rest % p.tiles_b;
+    uint o = rest / p.tiles_b;
+    // The same for the whole workgroup, so leaving before the barrier is
+    // fine.
+    if (o >= p.outer) {
+        return;
+    }
+    int from = p.src_offset;
+    int to = p.dst_offset;
+    for (int k = 5; k >= 0; k--) {
+        if (uint(k) == p.dst_fast || uint(k) == p.src_fast) {
+            continue;
+        }
+        int idx = int(o % p.shape[k]);
+        o /= p.shape[k];
+        from += idx * p.src_strides[k];
+        to += idx * p.dst_strides[k];
+    }
+    uint a = p.dst_fast;
+    uint b = p.src_fast;
+    uint lx = gl_LocalInvocationID.x;
+    uint ly = gl_LocalInvocationID.y;
+    uint a0 = ta * 32u;
+    uint b0 = tb * 32u;
+    uint size_a = p.shape[a];
+    uint size_b = p.shape[b];
+    int src_a = p.src_strides[a];
+    int src_b = p.src_strides[b];
+    int dst_a = p.dst_strides[a];
+    int dst_b = p.dst_strides[b];
+    // Read along b.
+    [[unroll]] for (uint r = 0u; r < 32u; r += 8u) {
+        uint ia = a0 + r + ly;
+        uint ib = b0 + lx;
+        if (ia < size_a && ib < size_b) {
+            tile[r + ly][lx] = float(s[from + int(ia) * src_a + int(ib) * src_b]);
+        }
+    }
+    barrier();
+    // Write along a.
+    [[unroll]] for (uint r = 0u; r < 32u; r += 8u) {
+        uint ib = b0 + r + ly;
+        uint ia = a0 + lx;
+        if (ia < size_a && ib < size_b) {
+            d[to + int(ia) * dst_a + int(ib) * dst_b] = real(tile[lx][r + ly]);
+        }
+    }
+}

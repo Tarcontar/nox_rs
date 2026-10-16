@@ -1,21 +1,22 @@
 // Copies a strided view of `src` into a strided place in `dst`: Concat,
 // Split, Slice (negative strides for negative steps), Expand (stride 0)
-// and Transpose, over up to 4 dimensions.
+// and Transpose, over up to 6 dimensions.
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
 #include "common.glsl"
 
-layout(set = 0, binding = 0, std430) readonly buffer Src { float s[]; };
-layout(set = 0, binding = 1, std430) writeonly buffer Dst { float d[]; };
+layout(set = 0, binding = 0, std430) readonly buffer Src { real s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Dst { real d[]; };
 
 layout(push_constant) uniform Params {
     uint n;
     int src_offset;
     int dst_offset;
-    uint pad0;
-    uvec4 shape;
-    ivec4 src_strides;
-    ivec4 dst_strides;
+    uint rank; // dimensions in use, the innermost last
+    uint shape[6];
+    int src_strides[6];
+    int dst_strides[6];
 } p;
 
 void main() {
@@ -26,11 +27,19 @@ void main() {
     uint rest = i;
     int from = p.src_offset;
     int to = p.dst_offset;
-    for (int k = 3; k >= 0; k--) {
+    // Unrolled, so the arrays are indexed by constants; only the
+    // dimensions in use, and the outermost without a division.
+    [[unroll]] for (uint j = 0u; j < 6u; j++) {
+        uint k = 5u - j;
+        if (j + 1u >= p.rank) {
+            from += int(rest) * p.src_strides[k];
+            to += int(rest) * p.dst_strides[k];
+            break;
+        }
         int idx = int(rest % p.shape[k]);
         rest /= p.shape[k];
         from += idx * p.src_strides[k];
         to += idx * p.dst_strides[k];
     }
-    d[to] = s[from];
+    d[to] = real(float(s[from]));
 }

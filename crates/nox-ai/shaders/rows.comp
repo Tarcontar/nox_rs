@@ -1,0 +1,72 @@
+// Operations along rows of the last axis, a workgroup per row (its 64
+// invocations take every 64th element, then combine): LayerNormalization
+// (op 0, with scale and maybe bias) and Softmax (op 1).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
+#define GROUP 64u
+#include "group_reduce.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer X { real x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Scale { real scale[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Bias { real bias[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Out { real o[]; };
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint d;
+    uint op;
+    uint x_offset;
+    float epsilon;
+    uint has_bias;
+    uint scale_len;
+    uint bias_len;
+} p;
+
+void main() {
+    uint r = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    // The same for the whole workgroup, so leaving before the barriers is
+    // fine.
+    if (r >= p.rows) {
+        return;
+    }
+    uint t = gl_LocalInvocationID.x;
+    uint base = p.x_offset + r * p.d;
+    uint out_base = r * p.d;
+    if (p.op == 0u) {
+        float sum = 0.0;
+        for (uint c = t; c < p.d; c += GROUP) {
+            sum += float(x[base + c]);
+        }
+        float mean = group_sum(sum) / float(p.d);
+        float squares = 0.0;
+        for (uint c = t; c < p.d; c += GROUP) {
+            float v = float(x[base + c]) - mean;
+            squares += v * v;
+        }
+        float inv = 1.0 / sqrt(group_sum(squares) / float(p.d) + p.epsilon);
+        for (uint c = t; c < p.d; c += GROUP) {
+            float v = (float(x[base + c]) - mean) * inv * float(scale[c % p.scale_len]);
+            if (p.has_bias != 0u) {
+                v += float(bias[c % p.bias_len]);
+            }
+            o[out_base + c] = real(v);
+        }
+    } else {
+        float m = -3.402823466e38;
+        for (uint c = t; c < p.d; c += GROUP) {
+            m = max(m, float(x[base + c]));
+        }
+        m = group_max(m);
+        float sum = 0.0;
+        for (uint c = t; c < p.d; c += GROUP) {
+            sum += exp(float(x[base + c]) - m);
+        }
+        float inv = 1.0 / group_sum(sum);
+        for (uint c = t; c < p.d; c += GROUP) {
+            o[out_base + c] = real(exp(float(x[base + c]) - m) * inv);
+        }
+    }
+}

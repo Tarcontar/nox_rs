@@ -648,8 +648,10 @@ fn reports_how_files_decode() {
 /// otherwise).
 #[test]
 fn background_removal_shows_what_is_below() {
-    let model = nox_ai::models::ROBUST_VIDEO_MATTING;
-    if !common::have_gpu() || !model.is_available(&nox_ai::models::default_dir()) {
+    let dir = nox_ai::models::default_dir();
+    let models = nox_ai::models::registry().models();
+    let matting = |m: &&nox_ai::models::ModelInfo| m.runner == nox_ai::models::Runner::Matting;
+    if !common::have_gpu() || !models.iter().filter(matting).all(|m| m.is_available(&dir)) {
         eprintln!("skipping: needs a GPU and the matting model");
         return;
     }
@@ -673,6 +675,56 @@ fn background_removal_shows_what_is_below() {
     engine.set_size(160, 90);
     engine.set_timeline(Arc::new(timeline));
     for frame in [5, 6, 30] {
+        let px = pixel(&render(&engine, &events, frame), 80, 45);
+        assert!(close(px, [0xC0, 0x30, 0x20]), "frame {frame}: {px:?}");
+    }
+}
+
+/// Background removal on a still segments it (BiRefNet): a plain blue
+/// picture has no subject, so the red clip below shows through. Needs both
+/// models in `NOX_MODELS_DIR` (skips otherwise).
+#[test]
+fn background_removal_on_stills() {
+    let dir = nox_ai::models::default_dir();
+    let models = nox_ai::models::registry().models();
+    if !common::have_gpu() || !models.iter().all(|m| m.is_available(&dir)) {
+        eprintln!("skipping: needs a GPU and the background removal models");
+        return;
+    }
+    let Some(photo) = fixture(
+        "blue-matte.png",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x2060E0:size=640x480,format=rgb24",
+            "-frames:v",
+            "1",
+        ],
+    ) else {
+        return;
+    };
+    let Some(red) = solid("red-matte.mkv", "0xC03020", "320x180") else {
+        return;
+    };
+    let mut timeline = Timeline::new("t", FPS);
+    timeline.place(0, clip(&red, 0, 50), f(0)).unwrap();
+    let v2 = timeline.add_track(TrackKind::Video);
+    let mut top = Composable::Clip(Clip::new(
+        "p",
+        MediaReference::from_path(&photo, None),
+        TimeRange::new(f(0), f(50)),
+    ));
+    top.item_mut().unwrap().set_background_removal(true);
+    timeline.place(v2, top, f(0)).unwrap();
+
+    let (sender, events) = mpsc::channel();
+    let engine = Engine::new(Vec::new(), move |event| {
+        let _ = sender.send(event);
+    });
+    engine.set_size(160, 90);
+    engine.set_timeline(Arc::new(timeline));
+    for frame in [5, 30] {
         let px = pixel(&render(&engine, &events, frame), 80, 45);
         assert!(close(px, [0xC0, 0x30, 0x20]), "frame {frame}: {px:?}");
     }

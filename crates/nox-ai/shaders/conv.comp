@@ -2,12 +2,13 @@
 // one output element per invocation.
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
 #include "common.glsl"
 
-layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1, std430) readonly buffer W { float w[]; };
-layout(set = 0, binding = 2, std430) readonly buffer Bias { float bias[]; };
-layout(set = 0, binding = 3, std430) writeonly buffer Out { float o[]; };
+layout(set = 0, binding = 0, std430) readonly buffer X { real x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer W { real w[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Bias { real bias[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer Out { real o[]; };
 
 layout(push_constant) uniform Params {
     uint n;
@@ -41,7 +42,7 @@ void main() {
     uint per_group_in = p.in_channels / p.group;
     uint per_group_out = p.out_channels / p.group;
     uint g = m / per_group_out;
-    float sum = p.has_bias != 0u ? bias[m] : 0.0;
+    float sum = p.has_bias != 0u ? float(bias[m]) : 0.0;
     int y0 = int(oy * p.stride_h) - int(p.pad_h);
     int x0 = int(ox * p.stride_w) - int(p.pad_w);
     for (uint c = 0u; c < per_group_in; c++) {
@@ -58,9 +59,9 @@ void main() {
                 if (ix < 0 || ix >= int(p.in_w)) {
                     continue;
                 }
-                sum += x[x_plane + uint(iy) * p.in_w + uint(ix)] * w[w_base + ky * p.kernel_w + kx];
+                sum += float(x[x_plane + uint(iy) * p.in_w + uint(ix)]) * float(w[w_base + ky * p.kernel_w + kx]);
             }
         }
     }
-    o[i] = sum;
+    o[i] = real(sum);
 }

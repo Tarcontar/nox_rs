@@ -1,10 +1,11 @@
 // Average or max pooling over windows of NCHW (cpu::PoolParams).
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
 #include "common.glsl"
 
-layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+layout(set = 0, binding = 0, std430) readonly buffer X { real x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { real o[]; };
 
 layout(push_constant) uniform Params {
     uint n;
@@ -41,7 +42,7 @@ void main() {
             int y = y0 + ky;
             int xx = x0 + kx;
             if (y >= 0 && xx >= 0 && y < int(p.in_h) && xx < int(p.in_w)) {
-                float v = x[base + uint(y) * p.in_w + uint(xx)];
+                float v = float(x[base + uint(y) * p.in_w + uint(xx)]);
                 acc = p.is_max != 0u ? max(acc, v) : acc + v;
                 count++;
             } else if (y < int(p.in_h + p.pad_h) && xx < int(p.in_w + p.pad_w)) {
@@ -50,5 +51,5 @@ void main() {
         }
     }
     uint divisor = p.count_include_pad != 0u ? count + padded : count;
-    o[i] = p.is_max != 0u ? acc : acc / float(max(divisor, 1u));
+    o[i] = real(p.is_max != 0u ? acc : acc / float(max(divisor, 1u)));
 }

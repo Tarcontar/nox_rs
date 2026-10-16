@@ -413,13 +413,17 @@ impl Inspector {
             return;
         }
         let on = imp.remove_background.is_active();
-        let model = nox_ai::models::ROBUST_VIDEO_MATTING;
-        if on && !model.is_available(&nox_ai::models::default_dir()) {
-            // Off until the model is there.
+        let missing = if on {
+            self.missing_models()
+        } else {
+            Vec::new()
+        };
+        if !missing.is_empty() {
+            // Off until the models are there.
             imp.updating.set(true);
             imp.remove_background.set_active(false);
             imp.updating.set(false);
-            self.offer_model_download();
+            self.offer_model_download(missing);
             return;
         }
         self.set_background_removal(on);
@@ -607,25 +611,10 @@ impl Inspector {
     fn show_decoder(&self) {
         let imp = self.imp();
         let label = &imp.decoder_label;
-        let (Some(timeline), Some(playback)) = (
-            imp.timeline.get(),
+        let (Some(playback), Some(path)) = (
             imp.playback.get().and_then(std::rc::Weak::upgrade),
+            self.selected_video_path(),
         ) else {
-            label.set_visible(false);
-            return;
-        };
-        let project = timeline.project();
-        let model = project.timeline();
-        let path = timeline.selection().and_then(|item| {
-            let video = model
-                .track(item.track)
-                .is_some_and(|t| t.kind == TrackKind::Video);
-            match model.item(item).ok()? {
-                Composable::Clip(clip) if video => model.media_path(clip.media_reference()?),
-                _ => None,
-            }
-        });
-        let Some(path) = path else {
             label.set_visible(false);
             return;
         };
@@ -646,6 +635,47 @@ impl Inspector {
         label.set_tooltip_text(Some(&text));
         label.set_text(&text);
         label.set_visible(true);
+    }
+
+    /// The file of the selected video clip, if one is selected.
+    fn selected_video_path(&self) -> Option<std::path::PathBuf> {
+        let timeline = self.imp().timeline.get()?;
+        let project = timeline.project();
+        let model = project.timeline();
+        let item = timeline.selection()?;
+        let video = model
+            .track(item.track)
+            .is_some_and(|t| t.kind == TrackKind::Video);
+        match model.item(item).ok()? {
+            Composable::Clip(clip) if video => model.media_path(clip.media_reference()?),
+            _ => None,
+        }
+    }
+
+    /// The models the registry prefers for removing the selected clip's
+    /// background (one of each kind: a still's segmentation model and the
+    /// matting model as its fallback) that aren't downloaded.
+    fn missing_models(&self) -> Vec<&'static nox_ai::models::ModelInfo> {
+        use nox_ai::models::{Conditions, Media, Task};
+        let still = self
+            .selected_video_path()
+            .and_then(|path| nox_media::probe(&path).ok())
+            .is_some_and(|info| info.is_still_image());
+        let conditions = Conditions {
+            media: if still { Media::Still } else { Media::Video },
+            f16: self
+                .imp()
+                .playback
+                .get()
+                .and_then(std::rc::Weak::upgrade)
+                .is_some_and(|playback| playback.storage_16bit()),
+        };
+        let dir = nox_ai::models::default_dir();
+        nox_ai::models::registry()
+            .preferred(Task::BackgroundRemoval, &conditions)
+            .into_iter()
+            .filter(|m| !m.is_available(&dir))
+            .collect()
     }
 
     fn edit(&self, label: &str, merge_key: Option<&str>, change: impl Fn(&mut nox_project::Item)) {
@@ -816,23 +846,26 @@ impl Inspector {
         self.edit(&label, None, |item| item.set_background_removal(on));
     }
 
-    /// Asks before downloading the matting model, then downloads it,
-    /// showing progress, and turns background removal on for the selected
-    /// clip.
-    fn offer_model_download(&self) {
-        let model = nox_ai::models::ROBUST_VIDEO_MATTING;
+    /// Asks before downloading `models`, then downloads them, showing
+    /// progress, and turns background removal on for the selected clip.
+    fn offer_model_download(&self, models: Vec<&'static nox_ai::models::ModelInfo>) {
         let dir = nox_ai::models::default_dir();
+        let names = models
+            .iter()
+            .map(|m| format!("{} ({})", m.name, m.license))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let size: u64 = models.iter().map(|m| m.size).sum();
         let dialog = gtk::AlertDialog::builder()
             .modal(true)
             .message(gettext("Download the background removal model?"))
             .detail(fill(
                 &gettext(
-                    "Removing backgrounds uses {model} ({size} MB, {license}), which is downloaded once from GitHub into {folder}.",
+                    "Removing backgrounds uses {models}, {size} MB downloaded once into {folder}.",
                 ),
                 &[
-                    ("model", &model.name),
-                    ("size", &(model.size / 1_000_000)),
-                    ("license", &model.license),
+                    ("models", &names),
+                    ("size", &(size / 1_000_000)),
                     ("folder", &dir.display()),
                 ],
             ))
@@ -849,27 +882,33 @@ impl Inspector {
                 self,
                 move |answer| {
                     if answer == Ok(1) {
-                        inspector.download_model();
+                        inspector.download_models(models);
                     }
                 }
             ),
         );
     }
 
-    fn download_model(&self) {
+    fn download_models(&self, models: Vec<&'static nox_ai::models::ModelInfo>) {
         let status = self.imp().background_status.get();
         status.set_text(&gettext("Downloading…"));
         status.set_visible(true);
         let (sender, receiver) = async_channel::unbounded::<(u64, u64)>();
         let download = gtk::gio::spawn_blocking(move || {
-            let model = nox_ai::models::ROBUST_VIDEO_MATTING;
-            model.download(
-                &nox_ai::models::default_dir(),
-                |done, total| {
-                    let _ = sender.send_blocking((done, total));
-                },
-                &std::sync::atomic::AtomicBool::new(false),
-            )
+            // Progress over all of them.
+            let total: u64 = models.iter().map(|m| m.size).sum();
+            let mut before = 0;
+            for model in models {
+                model.download(
+                    &nox_ai::models::default_dir(),
+                    |done, _| {
+                        let _ = sender.send_blocking((before + done, total));
+                    },
+                    &std::sync::atomic::AtomicBool::new(false),
+                )?;
+                before += model.size;
+            }
+            Ok::<_, nox_ai::Error>(())
         });
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = inspector)]

@@ -38,6 +38,9 @@ fn main() -> glib::ExitCode {
         .init();
     i18n::init();
     gio::resources_register_include!("nox.gresource").expect("bundled resources");
+    // Which AI models there are and which tasks use them (read once).
+    let models = nox_ai::models::registry();
+    tracing::debug!("{} AI models known", models.models().len());
 
     let app = gtk::Application::builder()
         .application_id(APP_ID)

@@ -1,0 +1,60 @@
+// Batched matrix multiplication (cpu::MatMulParams): out[b] = float(a[b]) × float(b[b])
+// with M×K and K×N matrices (gemm.glsl; gemm_tensor.glsl with TENSOR). The batch (workgroups' z)
+// broadcasts over up to 4 axes (stride 0 where repeated).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
+#ifdef TENSOR
+#include "gemm_tensor.glsl"
+#else
+#include "gemm.glsl"
+#endif
+
+layout(set = 0, binding = 0, std430) readonly buffer A { real a[]; };
+layout(set = 0, binding = 1, std430) readonly buffer B { real b[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Out { real o[]; };
+
+layout(push_constant) uniform Params {
+    uint m;
+    uint k;
+    uint n;
+    uint a_offset;
+    uint b_offset;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+    uint batch[4];
+    uint a_batch_strides[4];
+    uint b_batch_strides[4];
+} p;
+
+uint ao;
+uint bo;
+uint oo;
+
+float load_a(uint row, uint k) {
+    return float(a[ao + row * p.k + k]);
+}
+
+float load_b(uint k, uint col) {
+    return float(b[bo + k * p.n + col]);
+}
+
+void store(uint row, uint col, float value) {
+    o[oo + row * p.n + col] = real(value);
+}
+
+void main() {
+    uint z = gl_WorkGroupID.z;
+    ao = p.a_offset;
+    bo = p.b_offset;
+    uint rest = z;
+    for (int d = 3; d >= 0; d--) {
+        uint idx = rest % p.batch[d];
+        rest /= p.batch[d];
+        ao += idx * p.a_batch_strides[d];
+        bo += idx * p.b_batch_strides[d];
+    }
+    oo = z * p.m * p.n;
+    gemm(p.m, p.n, p.k);
+}

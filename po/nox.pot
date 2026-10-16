@@ -1538,7 +1538,7 @@ msgid "Download the background removal model?"
 msgstr ""
 
 #: src/inspector.rs
-msgid "Removing backgrounds uses {model} ({size} MB, {license}), which is downloaded once from GitHub into {folder}."
+msgid "Removing backgrounds uses {models}, {size} MB downloaded once into {folder}."
 msgstr ""
 
 #: src/inspector.rs

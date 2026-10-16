@@ -10,6 +10,8 @@ authors.workspace = true
 bytemuck.workspace = true
 nox-color.workspace = true
 nox-gpu.workspace = true
+nox-otio.workspace = true
+nox-project.workspace = true
 prost = "0.14"
 sha2 = "0.10"
 thiserror.workspace = true
@@ -17,6 +19,7 @@ tracing.workspace = true
 ureq = "3"
 
 [dev-dependencies]
+ash.workspace = true
 nox-media.workspace = true
 prost = "0.14"
 

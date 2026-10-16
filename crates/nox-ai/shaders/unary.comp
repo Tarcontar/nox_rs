@@ -1,10 +1,11 @@
 // out = f(x) elementwise (cpu::UnaryOp), with two parameters.
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#include "precision.glsl"
 #include "common.glsl"
 
-layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+layout(set = 0, binding = 0, std430) readonly buffer X { real x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { real o[]; };
 
 layout(push_constant) uniform Params {
     uint n;
@@ -34,7 +35,7 @@ void main() {
     if (i >= p.n) {
         return;
     }
-    float v = x[p.x_offset + i];
+    float v = float(x[p.x_offset + i]);
     float r;
     switch (p.op) {
     case 0: r = v; break;
@@ -48,7 +49,10 @@ void main() {
     case 8: r = erf_approx(v); break;
     case 9: r = clamp(p.alpha * v + p.beta, 0.0, 1.0); break;
     case 10: r = v * clamp(p.alpha * v + p.beta, 0.0, 1.0); break;
-    default: r = min(max(v, p.alpha), p.beta); break;
+    case 11: r = min(max(v, p.alpha), p.beta); break;
+    case 12: r = floor(v); break;
+    case 13: r = trunc(v); break;
+    default: r = p.alpha; break;
     }
-    o[i] = r;
+    o[i] = real(r);
 }

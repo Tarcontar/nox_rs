@@ -65,9 +65,11 @@ fn run_gpu(model: Model, inputs: &[(&str, Tensor)]) -> std::collections::HashMap
     let started = std::time::Instant::now();
     session.plan(&shapes, &constants, &[]).expect("plan");
     eprintln!(
-        "planned in {:?}, {:.0} MB",
+        "planned in {:?}, {:.0} MB, {:?}, matrices {:?}",
         started.elapsed(),
-        session.memory() as f64 / 1e6
+        session.memory() as f64 / 1e6,
+        session.precision(),
+        session.matrix_kernels()
     );
     for (name, tensor) in &fed {
         session.write(name, &tensor.to_f32()).expect("write");

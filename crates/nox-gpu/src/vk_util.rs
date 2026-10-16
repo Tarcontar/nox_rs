@@ -35,6 +35,22 @@ pub(crate) unsafe fn create_pipeline(
     bindings: &[vk::DescriptorSetLayoutBinding<'_>],
     push_size: usize,
 ) -> Result<Pipeline> {
+    // SAFETY: guaranteed by the caller.
+    unsafe { create_specialized_pipeline(device, spirv, bindings, push_size, &[]) }
+}
+
+/// `create_pipeline` with specialization constants: `constants[i]` for
+/// `constant_id = i`, all 32 bits wide.
+///
+/// # Safety
+/// `device` must be valid.
+pub(crate) unsafe fn create_specialized_pipeline(
+    device: &ash::Device,
+    spirv: &[u8],
+    bindings: &[vk::DescriptorSetLayoutBinding<'_>],
+    push_size: usize,
+    constants: &[u32],
+) -> Result<Pipeline> {
     // SAFETY: guaranteed by the caller; objects are returned to the owner.
     unsafe {
         let set_layout = device.create_descriptor_set_layout(
@@ -50,7 +66,7 @@ pub(crate) unsafe fn create_pipeline(
                 .push_constant_ranges(std::slice::from_ref(&push_range)),
             None,
         )?;
-        let pipeline = compute_pipeline(device, spirv, layout)?;
+        let pipeline = specialized_pipeline(device, spirv, layout, constants)?;
         Ok(Pipeline {
             set_layout,
             layout,
@@ -69,6 +85,28 @@ pub(crate) unsafe fn compute_pipeline(
     spirv: &[u8],
     layout: vk::PipelineLayout,
 ) -> Result<vk::Pipeline> {
+    // SAFETY: guaranteed by the caller.
+    unsafe { specialized_pipeline(device, spirv, layout, &[]) }
+}
+
+/// # Safety
+/// `device` and `layout` must be valid.
+unsafe fn specialized_pipeline(
+    device: &ash::Device,
+    spirv: &[u8],
+    layout: vk::PipelineLayout,
+    constants: &[u32],
+) -> Result<vk::Pipeline> {
+    let entries: Vec<_> = (0..constants.len() as u32)
+        .map(|i| vk::SpecializationMapEntry {
+            constant_id: i,
+            offset: 4 * i,
+            size: 4,
+        })
+        .collect();
+    let specialization = vk::SpecializationInfo::default()
+        .map_entries(&entries)
+        .data(bytemuck::cast_slice(constants));
     let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv)).expect("valid SPIR-V");
     // SAFETY: guaranteed by the caller.
     unsafe {
@@ -77,7 +115,8 @@ pub(crate) unsafe fn compute_pipeline(
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)
-            .name(c"main");
+            .name(c"main")
+            .specialization_info(&specialization);
         let pipeline = device.create_compute_pipelines(
             vk::PipelineCache::null(),
             &[vk::ComputePipelineCreateInfo::default()

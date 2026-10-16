@@ -5,6 +5,7 @@
 mod compositor;
 pub mod compute;
 mod converter;
+mod create;
 mod device;
 mod export;
 mod interop;
@@ -21,7 +22,8 @@ pub use converter::{
     BufferFrame, Converter, CpuFrame, ImageSync, Input, Layout, Orientation, Plane, PlaneFormat,
     VkFrame, VkPlane,
 };
-pub use device::{ExternalDevice, GpuDevice, QueueLock};
+pub use create::{QueueFamily, VulkanDevice};
+pub use device::{ExternalDevice, Features, GpuDevice, QueueLock};
 pub use export::{DmabufFd, DmabufFormat, DmabufFrame, FOURCC_ABGR8888, FOURCC_ABGR16161616F};
 pub use interop::{
     BufferTarget, ExportedMemory, FrameLight, GpuTarget, LinearFormat, LinearLayout, MemoryHandle,

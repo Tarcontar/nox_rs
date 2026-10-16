@@ -90,6 +90,8 @@ pub struct Model {
     pub outputs: Vec<String>,
     /// The default domain's operator set version.
     pub opset: i64,
+    /// Whether most of its float weights are 16-bit (an fp16 model).
+    half: bool,
 }
 
 impl Model {
@@ -113,8 +115,17 @@ impl Model {
             .graph
             .ok_or_else(|| Error::Model("the model has no graph".into()))?;
         let mut constants = HashMap::new();
+        // Float weights' elements, 16-bit and 32-bit.
+        let (mut half, mut single) = (0usize, 0usize);
         for init in &graph.initializer {
-            constants.insert(init.name.clone(), Tensor::from_proto(init)?);
+            let tensor = Tensor::from_proto(init)?;
+            let len = tensor.shape.iter().product::<usize>();
+            match init.data_type {
+                onnx::data_type::FLOAT16 => half += len,
+                onnx::data_type::FLOAT | onnx::data_type::DOUBLE => single += len,
+                _ => {}
+            }
+            constants.insert(init.name.clone(), tensor);
         }
         let inputs = graph
             .input
@@ -203,7 +214,14 @@ impl Model {
             inputs,
             outputs: graph.output.into_iter().map(|o| o.name).collect(),
             opset,
+            half: half > single,
         })
+    }
+
+    /// Whether it's an fp16 model: most of its float weights are 16-bit
+    /// (kept as `f32`s on the CPU, either way).
+    pub fn half(&self) -> bool {
+        self.half
     }
 
     /// How many nodes of each operator the model has, most first.

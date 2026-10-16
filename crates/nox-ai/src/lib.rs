@@ -10,6 +10,7 @@
 //! - `Model::run_cpu` runs a whole graph on the CPU (tests, and models too
 //!   small to be worth the GPU).
 
+mod bridge;
 mod cpu;
 mod kernels;
 mod matting;
@@ -18,14 +19,19 @@ pub mod models;
 /// ONNX's protobuf schema, for building models in tests.
 #[doc(hidden)]
 pub mod onnx;
+mod remover;
+mod segmentation;
 mod session;
 mod tensor;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub use kernels::{MatrixKernels, Precision};
 pub use matting::Matting;
 pub use model::{Input, Model};
+pub use remover::BackgroundRemover;
+pub use segmentation::Segmentation;
 pub use session::Session;
 pub use tensor::{Data, Tensor};
 
@@ -44,6 +50,8 @@ pub enum Error {
     Gpu(#[from] nox_gpu::Error),
     #[error("download: {0}")]
     Download(String),
+    #[error("model registry: {0}")]
+    Registry(String),
     #[error("cancelled")]
     Cancelled,
 }

@@ -1,18 +1,28 @@
-// Sum or mean over some axes (cpu::ReduceParams), one output element per
-// invocation. Kept and reduced axes each come as up to 4 extents with
-// their input strides.
+// Sum or mean over some axes (cpu::ReduceParams), a workgroup per output
+// element (its 64 invocations take every 64th element, then combine).
+// Kept and reduced axes each come as up to 4 extents with their input
+// strides, collapsed by the planner (an image's pixels are one extent).
 #version 450
 #extension GL_GOOGLE_include_directive : require
-#include "common.glsl"
+#include "precision.glsl"
+#extension GL_EXT_control_flow_attributes : require
+#define GROUP 64u
+#include "group_reduce.glsl"
 
-layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1, std430) writeonly buffer Out { float o[]; };
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer X { real x[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Out { real o[]; };
 
 layout(push_constant) uniform Params {
     uint n;
     uint count; // elements reduced into each output
     uint mean;
     uint x_offset;
+    uint kept_rank; // extents in use, the innermost last
+    uint reduced_rank;
+    uint pad0;
+    uint pad1;
     uvec4 kept;
     uvec4 kept_strides;
     uvec4 reduced;
@@ -20,25 +30,42 @@ layout(push_constant) uniform Params {
 } p;
 
 void main() {
-    uint i = element();
+    uint i = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    // The same for the whole workgroup, so leaving before the barriers is
+    // fine.
     if (i >= p.n) {
         return;
     }
+    // Unrolled: constant indices; the outermost extent without a
+    // division.
     uint base = p.x_offset;
     uint rest = i;
-    for (int d = 3; d >= 0; d--) {
+    [[unroll]] for (uint k = 0u; k < 4u; k++) {
+        uint d = 3u - k;
+        if (k + 1u >= p.kept_rank) {
+            base += rest * p.kept_strides[d];
+            break;
+        }
         base += (rest % p.kept[d]) * p.kept_strides[d];
         rest /= p.kept[d];
     }
     float sum = 0.0;
-    for (uint r = 0u; r < p.count; r++) {
+    for (uint r = gl_LocalInvocationID.x; r < p.count; r += GROUP) {
         uint at = base;
         uint left = r;
-        for (int d = 3; d >= 0; d--) {
+        [[unroll]] for (uint k = 0u; k < 4u; k++) {
+            uint d = 3u - k;
+            if (k + 1u >= p.reduced_rank) {
+                at += left * p.reduced_strides[d];
+                break;
+            }
             at += (left % p.reduced[d]) * p.reduced_strides[d];
             left /= p.reduced[d];
         }
-        sum += x[at];
+        sum += float(x[at]);
     }
-    o[i] = p.mean != 0u ? sum / float(max(p.count, 1u)) : sum;
+    float total = group_sum(sum);
+    if (gl_LocalInvocationID.x == 0u) {
+        o[i] = real(p.mean != 0u ? total / float(max(p.count, 1u)) : total);
+    }
 }
