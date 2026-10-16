@@ -3,7 +3,7 @@ use nox_engine::{AudioCodec, Container, EncodeQuality, ExportSettings, VideoCode
 use nox_media::OutputEncoding;
 use std::io::Write;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Probes media and renders Nox timelines without the editor.
@@ -238,8 +238,12 @@ fn render(args: RenderArgs) -> Result<(), String> {
         encoding,
         peak_nits: args.peak,
     };
-    let timeline =
+    let mut timeline =
         nox_otio::read_file(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    // Relative media paths are relative to the project, as in the app.
+    timeline.media_dir = std::path::absolute(project)
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_owned));
     if args.in_out {
         let range = nox_engine::marked_range(&timeline)
             .ok_or(format!("{} has no In and Out marks", project.display()))?;
